@@ -350,6 +350,15 @@ tanuki/ (the plugin repo — installed root is ${CLAUDE_PLUGIN_ROOT})
   briefs/<run>.md                             # Proposals (human gate)
 ```
 
+**Canonical scenarios location.** `~/.tanuki/scenarios/<target>.scenarios.json`
+is the **single supported home** for a target's matrix — it sits next to the
+rest of that target's state. No other path is read (an earlier ad-hoc
+`~/.claude/templates/tanuki/` location is not supported and cost a config that
+was nearly lost). The loaders (`tanuki-drive`, `tanuki-loop init`,
+`tanuki-scheduler`) fail closed with this canonical path when the config is
+absent, so a misplaced file surfaces immediately instead of a stale copy being
+read silently.
+
 ## Out of scope for the prototype
 
 Cross-repo consolidation beyond one target, transcript mining of real
