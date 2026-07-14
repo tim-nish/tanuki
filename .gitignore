@@ -3,3 +3,10 @@ __pycache__/
 *.pyc
 *.log
 .DS_Store
+
+# writing-assistant dogfooding footprint — keep it out of the plugin's tracked tree.
+# Per-run state/intermediates already live in ~/.local/state/writing-assistant/
+# (outside this repo). The only files it creates in-tree are the host-root config
+# and the drafts under output.drafts (articles/); neither belongs to the plugin.
+/writing-sources.yaml
+/articles/
