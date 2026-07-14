@@ -81,6 +81,12 @@ breakers, records the start SHA, and snapshots the ledger (exit 3 +
    changed; `--run` ties the persisted plan record to the run): verify set →
    exploration quota (unexplored branches — the anti-Goodhart guard) → active
    rotation → due regression members. Drive the planned subset via `--only`.
+   **This plan is pre-approved — never present an execution-confirmation ("run
+   all these scenarios?") gate.** The attended `/tanuki` plan gate
+   (`${CLAUDE_PLUGIN_ROOT}/docs/tanuki-spec.md`) is the one piece of the reused
+   pipeline that does **not** apply here: the scheduler already chose the set,
+   so the drive starts immediately at every phase. If judgment surfaces, defer
+   it to the morning gate — never prompt mid-run.
    After mining (step 2) run `tanuki-scheduler record-run --run <run>-iterN` —
    demotion/promotion is the tool's arithmetic. When the plan reports an
    empty unexplored pool across the whole run, note it in the audit: the
