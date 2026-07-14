@@ -102,6 +102,41 @@ mkrun r006 a
   || fail "an actionable finding must re-promote a regression scenario"
 pass "re-promotion: a finding pulls a regression scenario back to active"
 
+# --- verify never starves the exploration quota (spec: Verify / cap interaction)
+# A verify backlog as large as the cap must not consume every slot: the
+# exploration quota is reserved first, verify fills the remainder LRU, and the
+# overflow surfaces as verify_deferred (bounded WIP) rather than silent drop.
+V=("$sched" --target v)
+cat > "$tmp/v.json" <<'EOF'
+{"scenarios":[{"id":"v1","charter":"c","prompt":"p"},
+              {"id":"v2","charter":"c","prompt":"p"},
+              {"id":"v3","charter":"c","prompt":"p"}]}
+EOF
+"${V[@]}" sync --scenarios "$tmp/v.json" >/dev/null          # first sync -> all active
+cat > "$tmp/v.json" <<'EOF'
+{"scenarios":[{"id":"v1","charter":"c","prompt":"p"},
+              {"id":"v2","charter":"c","prompt":"p"},
+              {"id":"v3","charter":"c","prompt":"p"},
+              {"id":"u1","charter":"c","prompt":"p"}]}
+EOF
+"${V[@]}" sync --scenarios "$tmp/v.json" >/dev/null          # later sync -> u1 unexplored
+"$ledger" --target v init >/dev/null
+for s in v1 v2 v3; do
+  "$ledger" --target v upsert-finding --title "acc $s" --kind gap \
+    --evidence "r001/$s#1" >/dev/null
+done
+for id in F1 F2 F3; do "$ledger" --target v set-status --id "$id" --status accepted >/dev/null; done
+plan="$("${V[@]}" plan --scenarios "$tmp/v.json" --max 3)"      # verify(3) == cap(3)
+echo "$plan" | jget '["plan"]' | grep -q "u1" \
+  || fail "reserved exploration quota crowded out by the verify backlog"
+echo "$plan" | jget '["quota_met"]' | grep -q True \
+  || fail "quota_met must hold even when verify fills the cap"
+plen="$(echo "$plan" | python3 -c "import json,sys;print(len(json.load(sys.stdin)['plan']))")"
+[ "$plen" = "3" ] || fail "plan must respect max_scenarios (got $plen)"
+vdef="$(echo "$plan" | python3 -c "import json,sys;print(len(json.load(sys.stdin)['verify_deferred']))")"
+[ "$vdef" = "1" ] || fail "overflowed verify must surface as verify_deferred, got $vdef"
+pass "verify reserves the exploration quota, stays within the cap, surfaces overflow as verify_deferred"
+
 # --- history: persisted yield snapshots, transitions, plans, coverage ---------
 "${S[@]}" plan --scenarios "$tmp/m.json" --run r007 >/dev/null   # persisted plan record
 hist="$("${S[@]}" history --json)"
