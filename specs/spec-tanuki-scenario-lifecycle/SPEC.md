@@ -234,6 +234,79 @@ pointer ("no axes declared — run a generation pass to declare the exploration
 space"); existing targets are unaffected until their next generation pass
 adds the block.
 
+## Verify / cap interaction (REVISED 2026-07-15 — verify never starves exploration; absence means driven-absence)
+
+The original Selection order (Verify → Exploration quota → Active → Regression,
+capped by `max_scenarios`) has two coupled defects, observed on a live target
+whose accepted-but-unverified backlog grew to fill the whole cap:
+
+1. **Verify starves exploration.** `plan` fills the verify set *first*, up to
+   `max_scenarios`. When the verify set (scenarios evidencing accepted findings
+   awaiting verification-by-absence) is as large as the cap, the exploration
+   quota gets zero slots — `quota_met` goes false while unexplored scenarios
+   remain. That silently defeats the anti-Goodhart guard this spec already
+   declares and, via the loop amendment, makes the loop unable to converge.
+2. **Absence is measured as elapsed runs, not driven-absence.** `tanuki-ledger
+   compact` tombstones an `accepted` finding as *fixed* once it is "unseen for
+   ≥ N runs" — but the count is elapsed runs, regardless of whether the
+   finding's scenario was actually **driven** in them. A verify-pinned scenario
+   that stops being driven (crowded out of the cap by defect 1, or removed from
+   the matrix) is declared fixed **without ever being replayed** — a false
+   verification. The two defects compound: (1) drops the replay, (2) then calls
+   it fixed.
+
+**Fix — three deterministic changes (tool arithmetic only; the typed charter
+grid and the dry rule are unchanged — no reward-maximizing / value-backup
+search enters selection):**
+
+- **Reserved exploration quota.** `plan` reserves `exploration_quota` slots for
+  `unexplored` scenarios/branches *before* filling verify. Coverage exploration
+  is never traded away to re-drive known-productive ground; it is protected as
+  budget arithmetic, not left to cap tuning.
+- **Bounded, fairly-rotated verify.** Verify fills the remaining budget
+  (`max_scenarios − reserved`), **least-recently-planned first**, so every
+  accepted-finding scenario eventually replays and the backlog drains while a
+  run still stays within `max_scenarios`. When the verify set exceeds its
+  budget the plan record carries `verify_deferred` (the count/ids not run this
+  cycle) — the backlog is a **bounded, surfaced** work-in-progress signal,
+  never a silent truncation.
+- **Driven-absence compaction.** A run counts toward an accepted finding's
+  verify-by-absence only if at least one of the finding's scenarios was
+  **actually driven** in that run (read from the run manifest) and the finding
+  did not recur. "Unseen for N runs" now means "replayed N times and gone,"
+  not "N runs elapsed." A finding with no recorded scenarios falls back to
+  elapsed-run counting (legacy compatibility); `dismissed` findings are
+  unaffected (deadness is not scenario-conditional).
+
+**Consequences / invariants.**
+- `quota_met` can no longer be false while unexplored scenarios exist and
+  `max_scenarios ≥ exploration_quota` — restoring the loop amendment's
+  quiet-cycle precondition and, with it, convergence.
+- A verify replay deferred by the cap is now **safe**: driven-absence means a
+  deferred scenario accrues no false absence; it waits its turn in the LRU
+  rotation. Raising `max_scenarios` drains a large backlog faster, but is a
+  tuning knob, not a correctness dependency.
+- Removing or renaming a matrix scenario referenced by an accepted finding no
+  longer manufactures a false "fixed" tombstone (it simply stops accruing
+  absence and surfaces via `verify_deferred`). Scenarios are still never
+  deleted — regression pool, not removal (unchanged rule).
+
+**Constraints carried by this spec** (folded so the implementation order needs
+no external attachment):
+- A scheduler must not concentrate budget on known-productive branches at the
+  expense of under-tested ones; coverage-driven exploration is protected as
+  architecture (a reserved quota), not a tunable. Exploitation of the fattest
+  branch is explicitly rejected as the selection policy.
+- The accepted-but-unverified set is **bounded work-in-progress**: the plan
+  caps it and surfaces the overflow (`verify_deferred`) rather than letting it
+  grow unbounded or silently dropping replays.
+- All selection and compaction arithmetic stays deterministic tool code.
+
+**Non-goals (unchanged by this revision):** demotion hysteresis, re-promotion,
+regression cadence, the dry-rule convergence definition, and the plan-gated
+charter-generation pass are all untouched. No new config keys; `max_scenarios`
+and `exploration_quota` keep their meanings.
+
 ## Compatibility and migration
 
 - **Existing targets keep working untouched.** A hand-written matrix with no
