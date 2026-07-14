@@ -40,13 +40,31 @@ live in the scenarios file's `"loop"` block, stored once, never retyped:
   and recorded as the **run policy**; iterations ≥ 2 never ask and never stop
   for judgment. A headless run supplies the policy up front (a prior run's
   `policy.json` or `--policy <file>`); absent an answer the item is deferred,
-  not asked. No phase files issues overnight or merges to `main`.
+  not asked. No phase files issues overnight or merges to `main`. Before any
+  Phase 2/3 run, validate readiness with `tanuki-loop doctor` (Preflight
+  step 2) — it enforces the ceilings this section only asks for.
 
 ## 0. Preflight (once)
 
 1. Resolve the target scenarios config; expand `~` in its `plugin`/`host`
    paths. The `plugin` repo is the **loop repo**.
-2. **Isolation + state — `tanuki-loop init`.** Run `${CLAUDE_PLUGIN_ROOT}/tools/tanuki-loop
+2. **Headless readiness (Phase 2/3 only) — `tanuki-loop doctor`.** Before an
+   unattended run, validate the target **read-only** — no pipeline run, no
+   state written: `${CLAUDE_PLUGIN_ROOT}/tools/tanuki-loop --target <target>
+   doctor --loop-repo <plugin-repo> --scenarios <scenarios-file>
+   [--policy <file>] [--allow-stale-base]`. It reuses init's own config
+   resolution and guards and checks: the required `"loop"` ceilings
+   (`test_cmd`, `wall_time_s`, `token_budget`, `attempt_cap`, `iterations` —
+   the "always ensure they're set" rule, enforced), **base freshness** (the
+   same measurement `init` fails closed on), that **`test_cmd` passes on the
+   base tip** (in a throwaway detached worktree, removed afterward — a
+   baseline failure would trip the test breaker on inherited state, not a
+   regression), and **policy coverage** (which actionable findings have no
+   policy answer and would defer — informational, never fatal). Not-ready
+   follows the breaker convention (`{"breaker": …}` + exit 3, nothing
+   persisted); fix the named checks before `init`. Phase 1 runs may skip
+   this step.
+3. **Isolation + state — `tanuki-loop init`.** Run `${CLAUDE_PLUGIN_ROOT}/tools/tanuki-loop
    --target <target> init --loop-repo <plugin-repo> --scenarios
    <scenarios-file> --phase <P> [overrides: --cap/--test-cmd/--wall-time/
    --token-budget] [--policy <file>]` — the `"loop"` block supplies the
@@ -67,7 +85,7 @@ live in the scenarios file's `"loop"` block, stored once, never retyped:
    operator named, and `state.json`/the audit record the base tip and any
    behind-count. (A missing upstream or an offline fetch is tolerated with a
    note, not a stop.)
-3. Run `${CLAUDE_PLUGIN_ROOT}/tools/tanuki-preflight <plugin-worktree>`; on failure stop
+4. Run `${CLAUDE_PLUGIN_ROOT}/tools/tanuki-preflight <plugin-worktree>`; on failure stop
    and report (lint is not the loop's job). `tanuki-ledger --target <target>
    init` (idempotent).
 

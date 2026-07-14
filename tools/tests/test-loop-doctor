@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# Fixture for `tanuki-loop doctor` — the READ-ONLY Phase 2/3 headless-readiness
+# validator: required loop config (test_cmd, wall_time_s, token_budget,
+# attempt_cap, iterations), baseline test_cmd on the base tip (throwaway
+# worktree, removed), the base-freshness guard reused from init, and policy
+# coverage (which findings would defer). Not-ready follows the breaker
+# convention (exit 3); doctor must write NO repo/ledger/loop/policy state.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+loop="$here/tanuki-loop"
+ledger="$here/tanuki-ledger"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+jget() { python3 -c "import json,sys;print(json.load(sys.stdin)$1)"; }
+# The named check's JSON object from a doctor report on stdin.
+jcheck() { python3 -c "
+import json,sys
+r=json.load(sys.stdin)
+print(json.dumps(next(c for c in r['checks'] if c['check']=='$1')))"; }
+
+# A loop repo on main.
+repo="$tmp/repo"
+git init -q "$repo" && git -C "$repo" config user.email t@e && git -C "$repo" config user.name t
+git -C "$repo" checkout -qb main && echo v0 > "$repo/f" && git -C "$repo" add -A && git -C "$repo" commit -qm base
+
+D=("$loop" --target d doctor --loop-repo "$repo")
+
+# --- missing loop config: not ready, exit 3, every absent ceiling named ------
+rc=0; "${D[@]}" >/tmp/doc1.json 2>&1 || rc=$?
+[ "$rc" = "3" ] || fail "doctor on an unconfigured target must exit 3 (got $rc)"
+grep -q '"ready": false' /tmp/doc1.json || fail "unconfigured target must not be ready"
+grep -q '"breaker": "doctor:' /tmp/doc1.json || fail "not-ready must follow the breaker convention"
+for k in test_cmd wall_time_s token_budget attempt_cap iterations; do
+  jcheck loop-config < /tmp/doc1.json | grep -q "\"$k\"" \
+    || fail "loop-config check must name missing key $k"
+done
+jcheck baseline-test < /tmp/doc1.json | jget '["ok"]' | grep -q False \
+  || fail "baseline-test must fail when there is no test_cmd to check"
+pass "missing loop config: exit 3 breaker, every absent ceiling named"
+
+# --- read-only: no target state, no worktrees, clean tree --------------------
+[ ! -e "$TANUKI_ROOT/d" ] || fail "doctor must not create target state"
+[ "$(git -C "$repo" worktree list | wc -l)" = "1" ] || fail "doctor leaked a worktree"
+[ -z "$(git -C "$repo" status --porcelain)" ] || fail "doctor dirtied the repo tree"
+pass "doctor is read-only: no state dir, no leftover worktree, clean tree"
+
+# --- fully configured target: ready, exit 0, baseline runs on the base tip ---
+cat > "$tmp/scen.json" <<'EOF'
+{"loop": {"test_cmd": "test -f f", "iterations": 5, "wall_time_s": 3600,
+          "token_budget": 200000, "attempt_cap": 4}}
+EOF
+docr="$("${D[@]}" --scenarios "$tmp/scen.json")"
+echo "$docr" | jget '["ready"]' | grep -q True || fail "configured target must be ready: $docr"
+echo "$docr" | jcheck baseline-test | jget '["ok"]' | grep -q True \
+  || fail "passing test_cmd on the base tip must pass the baseline check"
+echo "$docr" | jcheck policy-coverage | grep -q "no actionable findings" \
+  || fail "empty ledger must report nothing to cover"
+[ "$(git -C "$repo" worktree list | wc -l)" = "1" ] || fail "baseline test leaked its throwaway worktree"
+pass "fully configured target: ready, baseline test passes, throwaway worktree removed"
+
+# --- CLI override, failing baseline: exit 3, the base-tip failure explained --
+rc=0; "${D[@]}" --scenarios "$tmp/scen.json" --test-cmd false >/tmp/doc2.json 2>&1 || rc=$?
+[ "$rc" = "3" ] || fail "failing baseline test_cmd must exit 3 (got $rc)"
+jcheck baseline-test < /tmp/doc2.json | grep -q "FAILS on the base tip" \
+  || fail "baseline failure must be attributed to the base tip, not a regression"
+jcheck loop-config < /tmp/doc2.json | jget '["ok"]' | grep -q True \
+  || fail "CLI --test-cmd must satisfy the config check like init's override"
+pass "failing baseline test_cmd: exit 3, failure attributed to inherited state"
+
+# --- policy coverage: uncovered findings listed as would-defer, non-fatal ----
+"$ledger" --target d init >/dev/null
+"$ledger" --target d upsert-finding --title "Covered friction" --kind friction \
+  --evidence "r1/s1#1" >/dev/null
+"$ledger" --target d upsert-finding --title "Uncovered gap" --kind gap \
+  --evidence "r1/s2#1" >/dev/null
+cat > "$tmp/policy.json" <<'EOF'
+{"decisions": {"F1": {"decision": "fix directly", "iter": 1}}}
+EOF
+sum_before="$(md5sum "$TANUKI_ROOT/d/ledger.json")"
+docp="$("${D[@]}" --scenarios "$tmp/scen.json" --policy "$tmp/policy.json")"
+echo "$docp" | jget '["ready"]' | grep -q True \
+  || fail "uncovered findings are informational and must not block readiness"
+pc="$(echo "$docp" | jcheck policy-coverage)"
+[ "$(echo "$pc" | jget '["covered"]')" = "1" ] || fail "F1 should be covered: $pc"
+echo "$pc" | jget '["would_defer"][0]["id"]' | grep -q F2 \
+  || fail "F2 must be listed as would-defer: $pc"
+[ "$sum_before" = "$(md5sum "$TANUKI_ROOT/d/ledger.json")" ] \
+  || fail "doctor modified the ledger"
+[ ! -e "$TANUKI_ROOT/d/loop" ] || fail "doctor must not create loop state"
+pass "policy coverage: covered counted, uncovered listed as would-defer, ledger untouched"
+
+# --- a missing --policy file is surfaced, not silently treated as empty ------
+docm="$("${D[@]}" --scenarios "$tmp/scen.json" --policy "$tmp/nope.json")"
+echo "$docm" | jcheck policy-coverage | grep -q "EMPTY policy" \
+  || fail "missing policy file must be named in the report"
+pass "missing policy file: named as an empty-policy source, non-fatal"
+
+# --- malformed policy file is a failed check (a headless run would crash) ----
+echo '{oops' > "$tmp/bad.json"
+rc=0; "${D[@]}" --scenarios "$tmp/scen.json" --policy "$tmp/bad.json" >/tmp/doc3.json 2>&1 || rc=$?
+[ "$rc" = "3" ] || fail "malformed policy must fail doctor (got $rc)"
+jcheck policy-coverage < /tmp/doc3.json | grep -q "not valid JSON" \
+  || fail "malformed policy must be reported as invalid JSON"
+pass "malformed policy file fails the coverage check"
+
+# --- base freshness reuses init's guard: stale base fails, override passes ---
+origin="$tmp/origin"; git init -q --bare "$origin"
+git -C "$origin" symbolic-ref HEAD refs/heads/main
+repo2="$tmp/repo2"
+git init -q "$repo2" && git -C "$repo2" config user.email t@e && git -C "$repo2" config user.name t
+git -C "$repo2" checkout -qb main && echo a > "$repo2/f" && git -C "$repo2" add -A \
+  && git -C "$repo2" commit -qm c0
+git -C "$repo2" remote add origin "$origin" && git -C "$repo2" push -qu origin main
+other="$tmp/other"; git clone -q "$origin" "$other"
+git -C "$other" config user.email t@e && git -C "$other" config user.name t
+git -C "$other" checkout -q main
+echo b >> "$other/f" && git -C "$other" commit -qam c1 && git -C "$other" push -q origin main
+
+D2=("$loop" --target d2 doctor --loop-repo "$repo2" --scenarios "$tmp/scen.json")
+rc=0; "${D2[@]}" >/tmp/doc4.json 2>&1 || rc=$?
+[ "$rc" = "3" ] || fail "stale base must fail doctor (got $rc)"
+jcheck base-freshness < /tmp/doc4.json | grep -q "fail closed" \
+  || fail "stale base must explain that init will fail closed"
+"${D2[@]}" --allow-stale-base | jget '["ready"]' | grep -q True \
+  || fail "--allow-stale-base must make a stale base acceptable, as in init"
+pass "base freshness: stale base fails; --allow-stale-base mirrors init's override"
+
+echo "ALL PASS"

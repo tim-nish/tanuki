@@ -112,7 +112,9 @@ convergence counter (`record-cycle`), the post-merge reachability check
 (`gate-check`), and the materialization idempotency map (`issue-get`/
 `issue-put`). Breakers are `tanuki-loop` exit code 3 with `{"breaker": …}`.
 
-The tool also owns the operator surface: `policy` (records iteration-1
+The tool also owns the operator surface: `doctor` (the read-only Phase 2/3
+headless-readiness validator — see "Headless readiness" below), `policy`
+(records iteration-1
 judgment answers — the mechanism behind "questions only in iteration 1"),
 `finish` (machine-readable terminal reason: converged | cap | gate-ratified |
 aborted; breakers persist `last_breaker` the same way), and `dashboard`
@@ -138,6 +140,49 @@ finding id** (stable across iterations because dedupe bumps the same id):
 "spec|story|direct", "disposition": "defer" | "<chosen resolution>",
 "iter": 1}}}`. From iteration 2 the loop consults this map and never asks; an
 absent answer for a genuine `spec` decision is a defer, not a question.
+
+## Headless readiness (`tanuki-loop doctor`) — ADDED 2026-07-15
+
+Phase 2/3 readiness is validated **up front, read-only, without running the
+pipeline**: `tanuki-loop --target <t> doctor --loop-repo <repo> [--scenarios
+F] [--policy F] [--phase 2|3] [--allow-stale-base] [init's override flags]`.
+Rationale: this spec requires ceilings for an unattended run ("always ensure
+they're set") and a policy supplied up front, but `init` does not enforce
+either — a forgotten `"loop"` block previously surfaced only mid-run (an
+unbounded loop, a baseline test failure overnight, or a night of deferrals
+discovered at the morning gate). The validator is a preflight gate, **not
+another execution mode**: it runs no drive, no mining, no iteration.
+
+It reuses `init`'s own resolution and guards (`resolve_loop_config`,
+`resolve_base`, `check_base_freshness`) — never parallel logic — so it cannot
+disagree with the run it validates. Four checks:
+
+1. **Required headless config** — `test_cmd`, `wall_time_s`, `token_budget`,
+   `attempt_cap`, and `iterations` all resolved (scenarios `"loop"` block or
+   CLI override); any absent ceiling is named. Fatal.
+2. **Base freshness** — the same measurement `init` fails closed on
+   (issue #2); `--allow-stale-base` mirrors init's explicit override. Fatal
+   without the override.
+3. **Baseline `test_cmd`** — run once against the base tip in a **throwaway
+   detached worktree, removed afterward** (the operator's tree is never
+   touched; the repo nets zero change). A base-tip failure means every
+   iteration would trip the test breaker on **inherited state, not a
+   regression** — better learned in seconds than overnight. Fatal.
+4. **Policy coverage** — which actionable ledger findings (status
+   open/proposed, not tombstoned) have no answer in the supplied policy
+   (`--policy`, else the current run's `policy.json`, else empty) and would
+   therefore **defer** under "questions only in iteration 1".
+   **Informational, never fatal** — deferral is the designed-safe headless
+   outcome; the check exists so a night of it is a known cost, not a morning
+   surprise. A malformed policy file, by contrast, is a failed check.
+
+**Read-only contract:** `doctor` writes no repo, ledger, loop-state, or policy
+data (check 2's fetch refreshes remote-tracking refs only, exactly like
+`init`'s guard). A failed check follows the breaker convention
+(`{"breaker": …}` + exit 3) but persists nothing — there is no run state to
+write. Out of scope, deliberately: a stub-drive rehearsal mode and runtime
+token-budget enforcement (the budget remains a stored, harness-tripped
+ceiling).
 
 ## Dashboard revision (REVISED 2026-07-14 — operational status, not internal state)
 
@@ -334,7 +379,8 @@ phases share one implementation and differ only in supervision and cap:
   hold.
 - **Phase 2 / 3 — unattended.** Identical loop, higher cap, run headless
   (`--dangerously-skip-permissions` or a pre-approved allowlist), auto-advancing
-  the mechanical gates and stopping at any breaker.
+  the mechanical gates and stopping at any breaker. Readiness is validated
+  up front by `tanuki-loop doctor` (see "Headless readiness") before `init`.
 
 The architecture is **Phase-3-ready from the first commit**: raising the cap
 and removing supervision is the only change between phases. The morning
