@@ -7,6 +7,13 @@ All notable changes to Tanuki are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `tanuki-loop doctor` — a read-only Phase 2/3 headless-readiness validator:
+  required loop ceilings (`test_cmd`, `wall_time_s`, `token_budget`,
+  `attempt_cap`, `iterations`), the base-freshness guard, a baseline
+  `test_cmd` run on the base tip (throwaway worktree, removed afterward), and
+  policy coverage (which findings would defer, informational). Reuses `init`'s
+  config resolution and guards; not-ready follows the breaker convention
+  (exit 3) without persisting anything.
 - Continuous integration: the tool test suites run on every push and pull
   request (GitHub Actions).
 - `CHANGELOG.md` and a tests/license badge row in the README.

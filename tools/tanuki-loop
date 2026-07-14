@@ -22,6 +22,16 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
        its upstream (the loop must never dogfood stale code); --allow-stale-base
        overrides to dogfood the local tip anyway. The base is never silently
        moved to the upstream tip.
+  doctor --loop-repo P [--scenarios F] [--base B] [--phase 2|3] [--policy F]
+       [same overrides as init] [--allow-stale-base]
+       READ-ONLY Phase 2/3 headless-readiness validator — no pipeline run, no
+       state written. Checks: required loop config (test_cmd, wall_time_s,
+       token_budget, attempt_cap, iterations), base freshness (same guard
+       init fails closed on), test_cmd on the base tip (throwaway detached
+       worktree, removed afterward), and policy coverage (which actionable
+       findings have no policy answer and would DEFER — informational).
+       Not-ready follows the breaker convention ({"breaker": …} + exit 3)
+       but persists nothing — there is no run state to write.
   iter-start                     cap / wall-time / external-modification breakers;
                                  records the iteration start SHA + ledger snapshot
   iter-verify [--no-patch]       the four-part integration invariant; records end SHA
@@ -70,8 +80,10 @@ runtime's; the loop treats it as an operator-supplied ceiling the harness trips.
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 TANUKI_ROOT = os.environ.get("TANUKI_ROOT", os.path.expanduser("~/.tanuki"))
@@ -208,31 +220,32 @@ def cleanup_merged_integration_branches(repo, base, target):
     return {"deleted": deleted, "kept": kept, "skipped": skipped}
 
 
-# --- subcommands -------------------------------------------------------------
-
-def cmd_init(args):
-    repo = os.path.abspath(os.path.expanduser(args.loop_repo))
-    rc, _ = git(repo, "rev-parse", "--git-dir")
-    if rc != 0:
-        die(f"--loop-repo is not a git repo: {repo}")
-    # Per-target loop config from the scenarios file's "loop" block — so a
-    # run needs no repo-specific flags typed each time. CLI flags override.
+def resolve_loop_config(args):
+    """Per-target loop settings from the scenarios file's "loop" block, with
+    CLI flags as per-run overrides — the single resolution path shared by
+    `init` and `doctor`, so the validator can never disagree with the run.
+    Values are None where neither source supplies them; `init` applies the
+    attempt-cap default (4) after this."""
     loopcfg = {}
     if args.scenarios:
         with open_scenarios(args.scenarios, args.target) as f:
             loopcfg = json.load(f).get("loop", {})
-    cap = args.cap if args.cap is not None else loopcfg.get("iterations")
-    if not cap:
-        die("no iteration cap: pass --cap or set loop.iterations in the "
-            "scenarios file")
-    test_cmd = args.test_cmd or loopcfg.get("test_cmd")
-    wall = args.wall_time if args.wall_time is not None \
-        else loopcfg.get("wall_time_s")
-    tokens = args.token_budget if args.token_budget is not None \
-        else loopcfg.get("token_budget")
-    attempt_cap = args.attempt_cap if args.attempt_cap is not None \
-        else loopcfg.get("attempt_cap", 4)
-    base = args.base
+    return {
+        "cap": args.cap if args.cap is not None else loopcfg.get("iterations"),
+        "test_cmd": args.test_cmd or loopcfg.get("test_cmd"),
+        "wall_time_s": args.wall_time if args.wall_time is not None
+        else loopcfg.get("wall_time_s"),
+        "token_budget": args.token_budget if args.token_budget is not None
+        else loopcfg.get("token_budget"),
+        "attempt_cap": args.attempt_cap if args.attempt_cap is not None
+        else loopcfg.get("attempt_cap"),
+    }
+
+
+def resolve_base(repo, base):
+    """Resolve the base branch (default: the repo's checked-out branch) and
+    its tip SHA, shared by `init` and `doctor`. Dies on a detached HEAD with
+    no --base, or an unresolvable ref."""
     if not base:
         rc, base = git(repo, "symbolic-ref", "--short", "HEAD")
         if rc != 0:
@@ -240,15 +253,17 @@ def cmd_init(args):
     rc, base_sha = git(repo, "rev-parse", base)
     if rc != 0:
         die(f"cannot resolve base '{base}'")
-    # Staleness guard (issue #2): never silently dogfood code older than the
-    # remote. Best-effort fetch, then FAIL CLOSED if <base> is behind its
-    # upstream — every iteration would otherwise base on stale plugin code and
-    # surface already-fixed findings at the morning gate. --allow-stale-base is
-    # the explicit override (e.g. deliberately testing an un-pushed local
-    # branch). We never silently move the base to the upstream tip; the
-    # operator fast-forwards or overrides deliberately, so what is dogfooded is
-    # always the ref they named.
-    base_note, n_behind = None, 0
+    return base, base_sha
+
+
+def check_base_freshness(repo, base):
+    """The staleness guard's measurement (issue #2), shared by `init` (which
+    fails closed on it) and `doctor` (which reports it): best-effort fetch of
+    <base>'s remote, then how far the local base lags its upstream. Returns
+    {"upstream", "behind", "note"} — note is None when the base has an
+    upstream and the fetch succeeded. Never moves any ref; apart from the
+    fetch's refresh of remote-tracking refs it is read-only."""
+    note, n_behind = None, 0
     rc, upstream = git(repo, "rev-parse", "--abbrev-ref",
                        "--symbolic-full-name", f"{base}@{{upstream}}")
     upstream = upstream if rc == 0 and upstream else None
@@ -258,20 +273,52 @@ def cmd_init(args):
         rc_b, behind = git(repo, "rev-list", "--count", f"{base}..{upstream}")
         n_behind = int(behind) if rc_b == 0 and behind.isdigit() else 0
         if not fetched:
-            base_note = (f"fetch failed (offline?) — staleness checked against "
-                         f"last-known {upstream}")
-        if n_behind > 0:
-            if not args.allow_stale_base:
-                die(f"local base '{base}' is {n_behind} commit(s) behind "
-                    f"'{upstream}'; the loop would dogfood stale code. "
-                    f"Fast-forward it (git -C {repo} merge --ff-only "
-                    f"{upstream}), pass --base {upstream}, or re-run with "
-                    "--allow-stale-base to dogfood the local tip anyway.")
-            base_note = (f"{n_behind} commit(s) behind {upstream} — proceeding "
-                         "under --allow-stale-base"
-                         + (f"; {base_note}" if base_note else ""))
+            note = (f"fetch failed (offline?) — staleness checked against "
+                    f"last-known {upstream}")
     else:
-        base_note = f"base '{base}' has no upstream — staleness not checked"
+        note = f"base '{base}' has no upstream — staleness not checked"
+    return {"upstream": upstream, "behind": n_behind, "note": note}
+
+
+# --- subcommands -------------------------------------------------------------
+
+def cmd_init(args):
+    repo = os.path.abspath(os.path.expanduser(args.loop_repo))
+    rc, _ = git(repo, "rev-parse", "--git-dir")
+    if rc != 0:
+        die(f"--loop-repo is not a git repo: {repo}")
+    # Per-target loop config from the scenarios file's "loop" block — so a
+    # run needs no repo-specific flags typed each time. CLI flags override.
+    cfg = resolve_loop_config(args)
+    cap = cfg["cap"]
+    if not cap:
+        die("no iteration cap: pass --cap or set loop.iterations in the "
+            "scenarios file")
+    test_cmd = cfg["test_cmd"]
+    wall = cfg["wall_time_s"]
+    tokens = cfg["token_budget"]
+    attempt_cap = cfg["attempt_cap"] if cfg["attempt_cap"] is not None else 4
+    base, base_sha = resolve_base(repo, args.base)
+    # Staleness guard (issue #2): never silently dogfood code older than the
+    # remote. Best-effort fetch, then FAIL CLOSED if <base> is behind its
+    # upstream — every iteration would otherwise base on stale plugin code and
+    # surface already-fixed findings at the morning gate. --allow-stale-base is
+    # the explicit override (e.g. deliberately testing an un-pushed local
+    # branch). We never silently move the base to the upstream tip; the
+    # operator fast-forwards or overrides deliberately, so what is dogfooded is
+    # always the ref they named.
+    fresh = check_base_freshness(repo, base)
+    upstream, n_behind, base_note = fresh["upstream"], fresh["behind"], fresh["note"]
+    if n_behind > 0:
+        if not args.allow_stale_base:
+            die(f"local base '{base}' is {n_behind} commit(s) behind "
+                f"'{upstream}'; the loop would dogfood stale code. "
+                f"Fast-forward it (git -C {repo} merge --ff-only "
+                f"{upstream}), pass --base {upstream}, or re-run with "
+                "--allow-stale-base to dogfood the local tip anyway.")
+        base_note = (f"{n_behind} commit(s) behind {upstream} — proceeding "
+                     "under --allow-stale-base"
+                     + (f"; {base_note}" if base_note else ""))
     # Sweep merged integration branches from prior runs (issue #6) BEFORE
     # cutting this run's branch — the fresh branch starts at the base tip, so
     # doing this after would make it a deletion candidate. The next init for a
@@ -331,6 +378,172 @@ def cmd_init(args):
     out({"run": run, "integration_branch": integration, "worktree": worktree,
          "base_sha": base_sha, "base_upstream": upstream,
          "base_behind": n_behind, "branch_cleanup": cleaned})
+
+
+def _doctor_policy(args):
+    """The policy a headless run would start from, read-only: an explicit
+    --policy file wins; otherwise the current run's policy.json when one
+    exists (the documented 'prior run's policy' path); otherwise empty.
+    Returns (check-dict-or-None, decisions-set, source-label) — a malformed
+    file is a failed check (an absent one is not: it just means everything
+    undecided defers)."""
+    path = None
+    if args.policy:
+        p = os.path.expanduser(args.policy)
+        if not os.path.exists(p):
+            return None, set(), f"missing: {p} — run would start with an EMPTY policy"
+        path = p
+    else:
+        cur = os.path.join(TANUKI_ROOT, args.target, "loop", "current")
+        if os.path.exists(cur):
+            with open(cur, encoding="utf-8") as f:
+                run = f.read().strip()
+            p = os.path.join(loop_dir(args.target, run), "policy.json")
+            if os.path.exists(p):
+                path = p
+    if not path:
+        return None, set(), "none (empty policy)"
+    try:
+        with open(path, encoding="utf-8") as f:
+            policy = json.load(f) or {}
+    except ValueError as e:
+        return ({"check": "policy-coverage", "ok": False,
+                 "policy_source": path,
+                 "detail": f"policy file is not valid JSON ({e}) — a headless "
+                           "run would crash consulting it"},
+                set(), path)
+    return None, set((policy.get("decisions") or {}).keys()), path
+
+
+def cmd_doctor(args):
+    """READ-ONLY Phase 2/3 headless-readiness validator — answers 'is this
+    target ready for an unattended run?' without running the pipeline. It
+    reuses init's own resolution and guards (resolve_loop_config,
+    resolve_base, check_base_freshness) so it can never disagree with the run
+    it validates, and writes NO repo, ledger, loop-state, or policy data. A
+    failed check follows the breaker convention ({"breaker": …} + exit 3) but
+    persists nothing — there is no run state to write."""
+    repo = os.path.abspath(os.path.expanduser(args.loop_repo))
+    rc, _ = git(repo, "rev-parse", "--git-dir")
+    if rc != 0:
+        die(f"--loop-repo is not a git repo: {repo}")
+    base, base_sha = resolve_base(repo, args.base)
+    checks = []
+
+    # 1. Required headless config — every ceiling an unattended run needs.
+    #    The spec says "always ensure they're set (config or flag) for an
+    #    unattended run"; init does not enforce that, doctor does.
+    cfg = resolve_loop_config(args)
+    required = {"test_cmd": cfg["test_cmd"], "wall_time_s": cfg["wall_time_s"],
+                "token_budget": cfg["token_budget"],
+                "attempt_cap": cfg["attempt_cap"], "iterations": cfg["cap"]}
+    missing = sorted(k for k, v in required.items() if v is None)
+    checks.append({
+        "check": "loop-config", "ok": not missing,
+        "configured": {k: v for k, v in required.items() if v is not None},
+        "missing": missing,
+        "detail": ("every headless ceiling is configured" if not missing else
+                   "an unattended run would have no ceiling for: "
+                   + ", ".join(missing) + " — set them in the scenarios "
+                   "file's \"loop\" block or pass the init flags"),
+    })
+
+    # 2. Base freshness — the same measurement init fails closed on (issue #2).
+    fresh = check_base_freshness(repo, base)
+    stale_ok = fresh["behind"] == 0 or args.allow_stale_base
+    if fresh["behind"] == 0:
+        detail = (fresh["note"] or
+                  f"base '{base}' is current with {fresh['upstream']}")
+    elif args.allow_stale_base:
+        detail = (f"local base '{base}' is {fresh['behind']} commit(s) behind "
+                  f"'{fresh['upstream']}' — acceptable only because "
+                  "--allow-stale-base was given (init will need it too)")
+    else:
+        detail = (f"local base '{base}' is {fresh['behind']} commit(s) behind "
+                  f"'{fresh['upstream']}' — init will fail closed; "
+                  f"fast-forward it (git -C {repo} merge --ff-only "
+                  f"{fresh['upstream']}) or plan --allow-stale-base")
+    checks.append({"check": "base-freshness", "ok": stale_ok,
+                   "upstream": fresh["upstream"], "behind": fresh["behind"],
+                   "detail": detail})
+
+    # 3. Baseline test_cmd on the base tip — a failure there means every
+    #    iteration would trip the test breaker on inherited state, not a
+    #    regression. Run in a throwaway detached worktree, removed afterward:
+    #    the operator's tree is never touched and the repo nets zero change.
+    if not cfg["test_cmd"]:
+        checks.append({"check": "baseline-test", "ok": False,
+                       "detail": "no test_cmd to check — configure one first "
+                                 "(the loop's test breaker is the headless "
+                                 "run's only regression gate)"})
+    else:
+        tmpdir = tempfile.mkdtemp(prefix="tanuki-doctor-")
+        wt = os.path.join(tmpdir, "base")
+        rc, err = git(repo, "worktree", "add", "--detach", wt, base_sha)
+        if rc != 0:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            checks.append({"check": "baseline-test", "ok": False,
+                           "detail": "could not create the throwaway "
+                                     f"worktree for the baseline run: {err}"})
+        else:
+            try:
+                r = subprocess.run(cfg["test_cmd"], shell=True, cwd=wt,
+                                   capture_output=True, text=True)
+                tail = ((r.stdout or "") + (r.stderr or "")).strip()[-300:]
+                checks.append({
+                    "check": "baseline-test", "ok": r.returncode == 0,
+                    "exit": r.returncode,
+                    "detail": (f"test_cmd passes on the base tip "
+                               f"({base_sha[:12]})" if r.returncode == 0 else
+                               f"test_cmd FAILS on the base tip (exit "
+                               f"{r.returncode}) — every iteration would trip "
+                               "the test breaker on inherited state, not a "
+                               f"regression: …{tail}"),
+                })
+            finally:
+                git(repo, "worktree", "remove", "--force", wt)
+                git(repo, "worktree", "prune")
+                shutil.rmtree(tmpdir, ignore_errors=True)
+
+    # 4. Policy coverage — which actionable findings have no policy answer and
+    #    would therefore DEFER ("questions only in iteration 1"; a headless
+    #    run never asks). Informational, never fatal: deferral is the
+    #    designed-safe headless outcome — but a night of it is worth knowing
+    #    about before launching, not at the morning gate.
+    bad, decisions, source = _doctor_policy(args)
+    if bad:
+        checks.append(bad)
+    else:
+        actionable = [f for f in ledger_findings(args.target)
+                      if not f.get("tombstone")
+                      and f.get("status") in ("open", "proposed")]
+        uncovered = [{"id": f["id"], "title": f.get("title")}
+                     for f in actionable if f["id"] not in decisions]
+        if not actionable:
+            detail = "ledger has no actionable findings — nothing to cover"
+        elif uncovered:
+            detail = (f"{len(uncovered)} of {len(actionable)} actionable "
+                      "finding(s) have no policy answer — each one DEFERS to "
+                      "the morning queue if it needs judgment (informational)")
+        else:
+            detail = (f"every actionable finding ({len(actionable)}) has a "
+                      "policy answer")
+        checks.append({"check": "policy-coverage", "ok": True,
+                       "policy_source": source,
+                       "actionable": len(actionable),
+                       "covered": len(actionable) - len(uncovered),
+                       "would_defer": uncovered, "detail": detail})
+
+    failed = [c["check"] for c in checks if not c["ok"]]
+    report = {"phase": args.phase, "target": args.target, "base": base,
+              "base_sha": base_sha, "ready": not failed, "checks": checks}
+    if failed:
+        report["breaker"] = (f"doctor: {len(failed)} check(s) failed "
+                             f"({', '.join(failed)}) — not ready for "
+                             f"phase {args.phase} headless execution")
+        out(report)
+        sys.exit(3)
+    out(report)
 
 
 def _worktree_head(state):
@@ -955,6 +1168,19 @@ def main():
     sp.add_argument("--test-cmd", default=None)
     sp.add_argument("--allow-stale-base", action="store_true")
 
+    sp = sub.add_parser("doctor")
+    sp.add_argument("--loop-repo", required=True)
+    sp.add_argument("--scenarios", default=None)
+    sp.add_argument("--cap", type=int, default=None)
+    sp.add_argument("--base", default=None)
+    sp.add_argument("--phase", type=int, default=2, choices=(2, 3))
+    sp.add_argument("--wall-time", type=int, default=None)
+    sp.add_argument("--token-budget", type=int, default=None)
+    sp.add_argument("--policy", default=None)
+    sp.add_argument("--attempt-cap", type=int, default=None)
+    sp.add_argument("--test-cmd", default=None)
+    sp.add_argument("--allow-stale-base", action="store_true")
+
     sub.add_parser("iter-start")
     sp = sub.add_parser("iter-verify"); sp.add_argument("--no-patch", action="store_true")
     sub.add_parser("rollback")
@@ -981,7 +1207,8 @@ def main():
     sub.add_parser("status")
 
     args = p.parse_args()
-    {"init": cmd_init, "iter-start": cmd_iter_start, "iter-verify": cmd_iter_verify,
+    {"init": cmd_init, "doctor": cmd_doctor,
+     "iter-start": cmd_iter_start, "iter-verify": cmd_iter_verify,
      "rollback": cmd_rollback, "test": cmd_test, "attempt": cmd_attempt,
      "record-cycle": cmd_record_cycle, "defer": cmd_defer, "log": cmd_log,
      "gate-check": cmd_gate_check, "gate-push": cmd_gate_push,
