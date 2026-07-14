@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fixture for tanuki-ledger's human-feedback ingest (q_a/18 D5, #1):
+# Fixture for tanuki-ledger's human-feedback ingest:
 #   - `ingest-note` records feedback verbatim as an unjudged note event
 #     (type: note, source: human, run id manual-<date>), on disk and in the
 #     ledger, with a resolvable evidence pointer — the human classifies nothing;

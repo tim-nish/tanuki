@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fixture for tanuki-drive's intra-command decision points (q_a/18 D3, #2):
+# Fixture for tanuki-drive's intra-command decision points:
 # a scenario may PIN the internal forks a command presents so two charters run
 # the SAME command down DIFFERENT internal branches.
 #

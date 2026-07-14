@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fixture for tanuki-ledger's growth policy (q_a/18 A2, #3):
+# Fixture for tanuki-ledger's growth policy:
 #   - capped evidence: a finding hit many times keeps a bounded exemplar set
 #     (oldest + most recent), never one pointer per occurrence;
 #   - first_seen / last_seen tracking on findings and events;
