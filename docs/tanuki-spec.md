@@ -1,40 +1,36 @@
 # Tanuki — automated dogfooding prototype (spec)
 
-Status: prototype v0. Origin: product-lab q_a/15 §5, q_a/16 §3–4, q_a/17 §1,
-q_a/18 §3–4 (charter dimensions, human ingest, ledger growth policy — 2026-07-13).
-Implementation tracking (spec ahead of code): #1 human `--ingest` (D5), #2
-intra-command charter dimensions (D3), #3 ledger growth policy (A2).
+Status: prototype v0 (2026-07-13).
 Goal: reduce the manual work of dogfooding a Claude Code plugin — explore
 scenarios, collect events, derive findings, consolidate actionable proposals.
-This is a working vertical slice, not a framework. First target:
-writing-assistant.
+This is a working vertical slice, not a framework.
 
 ## Standing constraints (inherited, non-negotiable)
 
-- **Three roles over one shared ledger** (q_a/16 D5): the Driver *drives*, the
+- **Three roles over one shared ledger**: the Driver *drives*, the
   Miner *mines*, the Consolidator *consolidates*. "Tanuki" names the umbrella;
   the seams stay.
-- **Vocabulary** (q_a/17 §1B): **Event** = raw, factual, per-run record, never
+- **Vocabulary**: **Event** = raw, factual, per-run record, never
   judged, 0..n per run. **Finding** = judged, deduped, ledger-tracked signal
   with recurrence count; chronic at 3 occurrences. **Proposal** = a finding
   promoted through the human gate. No "Observations". Information flows one
   way: events → findings → proposals.
-- **Mechanical violations are lint territory** (q_a/17 D3): a preflight stage
+- **Mechanical violations are lint territory**: a preflight stage
   catches them deterministically before any scenario runs; a mechanical
   violation surfacing *during* a run proposes a new preflight rule, not a UX
   finding.
-- **Proposals-only** (q_a/15 D8/D10): nothing merges, nothing writes to the
+- **Proposals-only**: nothing merges, nothing writes to the
   target repo, findings never auto-update specs. The output is a capped ranked
   brief plus proposal drafts for human review.
-- **Isolation = run against clones, never the real repos** (q_a/15 D9); verify
-  pollution after every run (snapshot-diff-discard, q_a/16 D6).
-- **Model routing** (q_a/16 D8, refined after runs 20260712-a1/-manual): route
+- **Isolation = run against clones, never the real repos**; verify
+  pollution after every run (snapshot-diff-discard).
+- **Model routing** (refined after early prototype runs): route
   by determinism first, then by judgment density — see the tier table below.
   A cheaper driver is not just cheaper, it is a **more sensitive instrument**:
   real users include weak agents, and a frontier driver quietly works around
-  the very friction Tanuki exists to detect (F2 was found because Sonnet
-  churned where a frontier model would have coped).
-- **Deterministic tools do deterministic work** (LESSONS): workspace prep,
+  the very friction Tanuki exists to detect (an early finding surfaced only
+  because the Sonnet driver churned where a frontier model would have coped).
+- **Deterministic tools do deterministic work**: workspace prep,
   event capture/normalization, ledger mechanics, recurrence counting, and
   promotion thresholds are scripts; the LLM only judges (friction extraction,
   semantic dedupe, proposal writing).
@@ -53,8 +49,7 @@ writing-assistant.
 
 Downgrade order if cost ever forces a choice: execution model first (Sonnet→
 Haiku per scenario), extraction second; dedupe and the brief never. Attribute
-per-stage cost from run manifests before tuning further (q_a/15 §2: measure,
-then optimize).
+per-stage cost from run manifests before tuning further (measure, then optimize).
 
 **Model ceiling.** `model_ceiling` (config, default `sonnet`) is the highest
 tier Tanuki may *launch*: it governs the driver's headless runs and the
@@ -76,7 +71,7 @@ exists — Tanuki runs with zero configuration.
 |---|---|---|---|
 | `driver_model` | `claude-sonnet-5` | drive | model for scenario execution |
 | `model_ceiling` | `sonnet` | drive (+ command, for extraction) | highest tier Tanuki may launch |
-| `max_scenarios` | `6` | drive | hard cap per invocation; exceeding it requires `--allow-extra` (the fan-out cap, q_a/15 D1) |
+| `max_scenarios` | `6` | drive | hard cap per invocation; exceeding it requires `--allow-extra` (the fan-out cap) |
 | `max_turns` | `40` | drive | per-scenario turn cap (scenario `max_turns` overrides) |
 | `timeout_s` | `900` | drive | per-scenario wall-clock cap |
 | `est_cost_per_scenario_usd` | `1.5` | drive `--estimate` | fallback when no run history exists |
@@ -146,11 +141,10 @@ scenario, it:
    `events/<run>/<scenario>.raw.jsonl`, a max-turn cap, and permissions
    confined to the workspace (prototype: `--dangerously-skip-permissions`
    inside the disposable clone — see deviations).
-3. The scenario prompt wraps a **charter** (exploratory-testing style,
-   q_a/17 D15): the simulated user's goal, persona, and the branch being
+3. The scenario prompt wraps a **charter** (exploratory-testing style): the simulated user's goal, persona, and the branch being
    explored. Charter dimensions cover both *external* setup (host repo ×
    skill flow × article purpose × entry state) and **intra-command decision
-   points** (q_a/18 D3): the choices a single command presents during its
+   points**: the choices a single command presents during its
    flow — framework selection, review depth, visuals, any AskUserQuestion
    fork — are first-class grid dimensions. A scenario may pin a decision
    point ("at the framework question, choose X") so two charters can run the
@@ -167,7 +161,7 @@ scenario, it:
    itself an event (`type: note, detail: pollution`).
 
 One run produces **zero or more** events. Repetition of an unchanged scenario
-is only for chronic-vs-flaky; the matrix prefers breadth (q_a/15 D15).
+is only for chronic-vs-flaky; the matrix prefers breadth.
 
 The driver is never silent: it prints the current stage per scenario
 (`clone + setup` → `scenario running` → `normalize + verify isolation`) and,
@@ -212,7 +206,7 @@ The judgment half runs in two passes at different tiers:
    integrity — the promotion signal — and is never downgraded. The dedupe
    call is the LLM's; the arithmetic is the tool's.
 
-**Human feedback ingest (q_a/18 D5).** Manual dogfooding is one more event
+**Human feedback ingest.** Manual dogfooding is one more event
 source, with one hard UX rule: **the human never classifies**. Feedback is
 handed to Tanuki as free-form natural language (in-session, or
 `/tanuki <target> --ingest "<feedback>"`); Tanuki records it *verbatim* as an
@@ -227,12 +221,12 @@ feedback phrased as a ready-made proposal enters as an event with the
 proposed action attached, and surfaces through the normal brief.
 
 Every finding is **pointed**: it carries `evidence: [run/scenario#seq, …]`
-(claim–evidence binding, q_a/15 D3).
+(claim–evidence binding).
 
 Finding shape: `{id, title, kind: friction|papercut|gap, first_seen,
 recurrence, evidence[], status: open|proposed|accepted|dismissed}`.
 
-**Ledger growth policy (q_a/18 D6/A2, revised after O2 clarification).**
+**Ledger growth policy.**
 `ledger.json` is an internal state file — deduplicated significant events
 (skill start/end, tool errors, results, cost) with per-run occurrence
 tracking plus findings, each holding pointers back to `raw.jsonl` for

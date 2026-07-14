@@ -48,8 +48,8 @@ testable).
 ## 2. Ad-hoc scenarios (free-text)
 
 ```
-/tanuki "try drafting an article about X"            # target resolved per §1
-/tanuki writing-assistant "try drafting an article about X"   # explicit
+/tanuki "try the export flow with a huge file"            # target resolved per §1
+/tanuki my-plugin "try the export flow with a huge file"      # explicit
 ```
 
 Free text is **never raw plugin input**: it becomes a one-off exploratory

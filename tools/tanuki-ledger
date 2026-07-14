@@ -31,7 +31,7 @@ Usage:
 (P1/P2/P3) so the brief's ordering mirrors `status` without the caller
 recomputing it.
 
-Ledger growth policy (docs/tanuki-spec.md "Ledger growth policy", q_a/18 A2).
+Ledger growth policy (docs/tanuki-spec.md "Ledger growth policy").
 `ledger.json` may grow indefinitely on disk, bounded by three invariants:
   1. Read-path invariant — no LLM stage ever loads ledger.json whole. Every
      model-facing access goes through a bounded subcommand VIEW (`findings`,
@@ -199,7 +199,7 @@ def cmd_ingest(args, ledger):
 
 def cmd_ingest_note(args, ledger):
     """Record human feedback verbatim as an Event — the human never classifies
-    (docs/tanuki-spec.md "Human feedback ingest", q_a/18 D5). Writes an
+    (docs/tanuki-spec.md "Human feedback ingest"). Writes an
     unjudged `note` event (source: human, run id manual-<date>) to the run's
     events file and into the ledger. Semantic judgment — whether it yields a
     finding, its kind, bump-vs-new — is the caller's downstream extraction +

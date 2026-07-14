@@ -1,9 +1,9 @@
 # Spec: /tanuki-loop — unattended cumulative dogfooding on an integration branch
 
-Status: PROPOSED 2026-07-13 (q_a/18 follow-on). Implemented in
+Status: PROPOSED 2026-07-13. Implemented in
 `commands/tanuki-loop.md`. Depends on the Tanuki pipeline
 (`docs/tanuki-spec.md`) and the shared executables (`tanuki-loop`,
-`tanuki-drive`, `tanuki-ledger`, `story-sync`). Its classification and implementation
+`tanuki-drive`, `tanuki-ledger`). Its classification and implementation
 **judgment is an intentional fork** of `/triage-gh` and `/implement-story`:
 the rules are copied into this command and allowed to diverge — the judgment
 layer is not reused. Only the tools and the (issue-free) ledger are shared.
@@ -144,7 +144,7 @@ prior successful iterations are untouched.
    of the base matrix — regression scenarios kept unchanged (their silence
    verifies the landed fixes), flow scenarios' `decision_points` varied to
    internal branches this run hasn't walked. Re-driving an identical matrix
-   only re-confirms known findings (q_a/18 D3: repetition is redundant unless
+   only re-confirms known findings (repetition is redundant unless
    it repeats the internal path — and here it does, so vary it).
 2. **Mine.** Extraction + frontier dedupe → findings in the ledger, recurrence
    updated (`docs/tanuki-spec.md` §2, unchanged).

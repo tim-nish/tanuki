@@ -4,18 +4,31 @@
 
 # Tanuki 🦝
 
-**Automated dogfooding for Claude Code plugins.**
+**Tanuki automatically executes realistic user scenarios against your Claude
+Code plugin and turns the recurring usability problems it discovers into a
+ranked list of concrete improvement proposals.**
 
-You built a Claude Code plugin. It works when *you* use it — but you know
-exactly which buttons to press. What happens when a first-time user follows
-your README? When someone picks the option you never test? When the config
-file is missing?
+Unit tests and linters verify the code you wrote: functions return the right
+values, links resolve, schemas parse. They cannot tell you that a first-time
+user gets lost after step 2 of your README, that an error message gives no
+hint how to recover, or that one branch of your command asks a question
+nobody understands. Those problems only surface when someone actually *uses*
+the plugin — and collecting them normally means hours of manual dogfooding or
+waiting for user complaints. Tanuki automates the user.
 
-Tanuki finds out for you. It plays the role of a realistic user: it runs your
-plugin through scripted user scenarios in disposable clones of your repo,
-records everything that happens, and distills the recurring pain points into
-a short, ranked list of concrete improvement proposals — with evidence
-pointing back to the exact moment each problem occurred.
+The central idea: **Claude acts as a simulated user, not as a code
+generator.** For each scenario, Tanuki launches a headless Claude session on
+a deliberately *cheap* model that plays a persona — "a new user follows the
+quickstart", "a user picks the option you never test", "a user whose config
+file is broken" — inside a disposable clone of your repo. The cheap model is
+the point: a frontier model quietly works around rough edges, while a weaker
+one trips over them, which is exactly the signal a plugin author needs. No
+existing test tool exercises your plugin this way, because the thing being
+tested is not the code — it's the experience of using it.
+
+So if you've built a plugin that works when *you* use it — because you know
+exactly which buttons to press — Tanuki answers the questions you can't
+answer yourself: what happens to everyone else?
 
 **You stay in control.** Tanuki never merges anything, never files issues on
 its own, and never writes into the repo under test. Its output is a brief of
@@ -26,20 +39,14 @@ Full technical contract: [docs/tanuki-spec.md](docs/tanuki-spec.md).
 ## How it works, in one paragraph
 
 Tanuki clones your plugin (and optionally a "host" repo it operates on) into
-a throwaway workspace, then launches a **headless Claude session on a cheap
-model** that acts out a scenario — "a new user tries the quickstart", "a user
-picks the unusual option", "the config file is broken". The transcript is
-mechanically normalized into **Events** (tool errors, retries, user choices,
-friction notes). A mining pass turns events into **Findings** — deduplicated
-problems with a recurrence count, so a problem seen in three runs counts as
-chronic, not three separate complaints. Chronic findings get promoted into a
-**brief**: at most 10 ranked **Proposals**, each written as
-Problem → Proposed fix → Evidence. You then accept, dismiss, or defer each
-one in-session.
-
-Why a *cheap* model as the simulated user? Because real users include weak
-agents. A frontier model quietly works around rough edges; a weaker one trips
-over them — which is exactly the signal you want.
+a throwaway workspace and drives one simulated-user session per scenario.
+Each transcript is mechanically normalized into **Events** (tool errors,
+retries, user choices, friction notes). A mining pass turns events into
+**Findings** — deduplicated problems with a recurrence count, so a problem
+seen in three runs counts as chronic, not three separate complaints. Chronic
+findings get promoted into a **brief**: at most 10 ranked **Proposals**, each
+written as Problem → Proposed fix → Evidence. You then accept, dismiss, or
+defer each one in-session.
 
 ```
 preflight (lint, code)          mechanical violations stop here — never

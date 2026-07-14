@@ -1,5 +1,6 @@
 {
   "name": "tanuki",
+  "description": "Marketplace for the Tanuki plugin — automated dogfooding for Claude Code plugins: simulated users drive your plugin through realistic scenarios and recurring friction becomes a ranked proposal brief.",
   "owner": {
     "name": "tim-nish"
   },

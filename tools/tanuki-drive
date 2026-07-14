@@ -4,8 +4,8 @@ in disposable clone workspaces, and record Events.
 
 Contract: docs/tanuki-spec.md §1. Zero dependencies beyond git + the claude CLI.
 The real plugin/host repos are never executed against — every scenario gets
-fresh clones (product-lab q_a/15 D9), and isolation is verified after each run
-(snapshot-diff-discard, q_a/16 D6).
+fresh clones, and isolation is verified after each run
+(snapshot-diff-discard).
 
 Usage:
   tanuki-drive --target <slug> --plugin <repo> [--plugin-ref <ref>] [--host <repo>] \
@@ -23,7 +23,7 @@ Scenario config (JSON):
 
 Charter dimensions (docs/tanuki-spec.md §1, Driver step 3) cover both external
 setup (host repo × skill flow × article purpose × entry state) and
-intra-command decision points (q_a/18 D3). A scenario may *pin* the internal
+intra-command decision points. A scenario may *pin* the internal
 forks a single command presents during its flow via "decision_points": a list
 of {"point", "choice"} objects (a bare string is accepted too). The driver
 wraps them into the simulated-user prompt so two charters can run the *same
@@ -99,7 +99,7 @@ def sh(cmd, cwd=None, timeout=None, capture=True):
 
 
 def decision_pins(scenario):
-    """Render a scenario's pinned intra-command decision points (q_a/18 D3) as
+    """Render a scenario's pinned intra-command decision points as
     instruction lines. Each pin is {"point", "choice"} (a bare string is taken
     as the whole instruction). Returns [] when the scenario pins nothing."""
     lines = []
@@ -125,7 +125,7 @@ def prepare_workspace(ws, plugin_repo, host_repo, host_setup, plugin_ref=None):
     currently has checked out, which is not always what the caller intends.
 
     host_repo is OPTIONAL: a host exists only for plugins that operate on a
-    repository's content (writing-assistant works over product-lab's files).
+    repository's content (e.g. a docs generator working over a docs repo).
     A self-contained plugin has no host — pass None and the scenario runs in a
     fabricated empty workspace (git-init'd so the isolation/pollution check
     still works), which is still never the user's real checkout."""
@@ -312,7 +312,7 @@ def drive_scenario(args, scenario, run_dir, cfg, prog=None):
     pin_block = ""
     if pins:
         pin_block = (
-            "PINNED DECISIONS (intra-command decision points — q_a/18 D3). This "
+            "PINNED DECISIONS (intra-command decision points). This "
             "charter explores one specific internal branch of the command. When "
             "the command presents any of these choices during its flow (a "
             "prompt, an AskUserQuestion fork, an offered option), make exactly "
@@ -375,7 +375,7 @@ def drive_scenario(args, scenario, run_dir, cfg, prog=None):
     print(f"  [{sid}] stage: normalize + verify isolation", flush=True)
     stage("normalize + verify isolation")
     events = normalize(raw_path, args.run, sid)
-    # Isolation verification (q_a/16 D6): the plugin clone must stay clean;
+    # Isolation verification: the plugin clone must stay clean;
     # host-clone writes are expected (that's the product working) but recorded.
     plugin_dirt = pollution_check(plugin_clone)
     if plugin_dirt:
@@ -470,7 +470,7 @@ def main():
 
     if len(scenarios) > cfg["max_scenarios"] and not args.allow_extra:
         print(f"error: {len(scenarios)} scenarios exceeds max_scenarios="
-              f"{cfg['max_scenarios']} (the fan-out cap, q_a/15 D1); trim with "
+              f"{cfg['max_scenarios']} (the fan-out cap); trim with "
               "--only, raise max_scenarios in config, or pass --allow-extra",
               file=sys.stderr)
         return 2

@@ -24,7 +24,7 @@ Argument handling ($ARGUMENTS):
   ask which to run via AskUserQuestion. Selection beats typing names with no
   completion.
 - `<target>`: a slug with a scenario config at
-  `~/.tanuki/scenarios/<target>.scenarios.json`. Example: `writing-assistant`.
+  `~/.tanuki/scenarios/<target>.scenarios.json`. Example: `my-plugin`.
 - `<target> <scenario-id>[,<scenario-id>…]`: drive only those scenarios.
 - `"<free text>"` (with or without a preceding `<target>`): an **ad-hoc
   scenario** — see "Ad-hoc scenarios" below. Disambiguation: a non-flag
@@ -105,7 +105,7 @@ Cost display: user-facing output (plan, progress, brief, summaries) uses
 **time and turns, never dollars**. USD lives in manifests as estimate
 history only.
 
-Vocabulary (fixed — q_a/17): an **Event** is a raw per-run fact, never judged;
+Vocabulary (fixed): an **Event** is a raw per-run fact, never judged;
 a **Finding** is a judged, deduped, ledger-tracked signal with a recurrence
 count; a **Proposal** is a finding promoted through the human gate. There are
 no "observations".
@@ -129,13 +129,13 @@ fan-out cap enforced by tanuki-drive).
 
 1. Read the scenario config; expand `~` in its `plugin`/`host` paths. `host`
    is **optional** — it exists only for plugins that operate on a repository's
-   content (writing-assistant works over a host repo's files). A
+   content (e.g. a docs generator that works over a host repo's files). A
    self-contained plugin omits it, and the driver fabricates an empty
    isolated workspace per scenario instead (omit `--host` from the
    tanuki-drive invocation). Generate a run id: `<YYYYMMDD>-<short-random>`.
 2. Run `${CLAUDE_PLUGIN_ROOT}/tools/tanuki-preflight <plugin-repo>`. **If it fails, stop
    and report the failures** — mechanical violations are lint territory;
-   dogfooding time is never spent rediscovering them (q_a/17 D3). Do not
+   dogfooding time is never spent rediscovering them. Do not
    "quickly fix" the violations yourself unless the user asks: report first.
 3. `${CLAUDE_PLUGIN_ROOT}/tools/tanuki-ledger --target <target> init` (idempotent).
 
@@ -150,7 +150,7 @@ regression-pool members. Drive the planned subset via `--only`. A target
 with no scheduler state yet behaves as before (first `sync` marks the whole
 hand-written matrix active).
 
-**Plan gate first (q_a/15 D1: plan before fan-out).** Run
+**Plan gate first (plan before fan-out).** Run
 `tanuki-drive … --estimate` and show the user the plan: scenario ids, models,
 turn caps, and the **expected duration** (`est_total_duration_s` when run
 history exists — convert to minutes; never surface the USD fields), plus
@@ -185,7 +185,7 @@ duration and when the next update will come, so the user never has to ask
 
 The tool clones both repos per scenario (never executes against the real
 checkouts), drives each scenario headless on a cheaper model
-(default `claude-sonnet-5` — q_a/16 D8; a scenario config may set `"model"`
+(default `claude-sonnet-5`; a scenario config may set `"model"`
 per scenario, e.g. `claude-haiku-4-5-20251001` for a sensitivity experiment —
 never a frontier model, which would cope with the friction instead of
 surfacing it), captures the raw stream, normalizes
@@ -295,7 +295,7 @@ brief path, and total duration/turns (never dollars).
 
 Manual dogfooding feeds the *same* pipeline as a driven run; the only
 difference is the event source. The hard UX rule (docs/tanuki-spec.md "Human
-feedback ingest", q_a/18 D5): **the human never classifies.** "Is this an
+feedback ingest"): **the human never classifies.** "Is this an
 Event or a Finding?" is internal storage vocabulary, never a question the
 user answers. So this mode skips step 0's preflight and step 1's driving and
 does exactly this:
@@ -326,7 +326,7 @@ human-gate path. Promoted items surface in the next brief / `--brief` exactly
 like driven findings. Evidence pointers still bind every finding
 (`manual-<date>/ingest#<seq>`).
 
-Hard rules, restated because they are the product (q_a/15 D8/D10, q_a/16 D6/D7):
+Hard rules, restated because they are the product:
 clones only; proposals only; one-way flow events → findings → proposals; the
 decision pass ratifies — it never merges, and issue filing is its own
 confirmation. **Tanuki ends at the labeled issue**: it knows nothing about

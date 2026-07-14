@@ -2,7 +2,7 @@
 """tanuki-preflight: deterministic mechanical lint of a Claude Code plugin repo.
 
 Contract: docs/tanuki-spec.md §0. Mechanical/specification violations belong
-here, not in dogfooding findings (product-lab q_a/17 D3). Zero dependencies.
+here, not in dogfooding findings. Zero dependencies.
 
 Usage: tanuki-preflight <plugin-repo> [--json]
 Exit: 0 = all checks pass, 1 = failures, 2 = usage/IO error.
