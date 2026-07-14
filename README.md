@@ -4,6 +4,11 @@
 
 # Tanuki 🦝
 
+<p align="center">
+  <a href="https://github.com/tim-nish/tanuki/actions/workflows/tests.yml"><img src="https://github.com/tim-nish/tanuki/actions/workflows/tests.yml/badge.svg" alt="tests"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="license: MIT"></a>
+</p>
+
 **Tanuki automatically executes realistic user scenarios against your Claude
 Code plugin and turns the recurring usability problems it discovers into a
 ranked list of concrete improvement proposals.**

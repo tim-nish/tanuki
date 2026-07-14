@@ -1,0 +1,35 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          bash --version | head -1
+          python3 --version
+          git --version
+
+      # Some fixtures create throwaway repos; give git a global identity so
+      # commits inside them never fail on a bare runner.
+      - name: Configure git identity
+        run: |
+          git config --global user.email ci@tanuki.test
+          git config --global user.name tanuki-ci
+
+      - name: Run tool test suite
+        run: |
+          fail=0
+          for t in tools/tests/test-*; do
+            echo "::group::$t"
+            if bash "$t"; then echo "PASS $t"; else echo "FAIL $t"; fail=1; fi
+            echo "::endgroup::"
+          done
+          exit $fail
