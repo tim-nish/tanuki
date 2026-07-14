@@ -241,4 +241,70 @@ git -C "$repo" merge -q --no-ff "$integ" -m "merge integration"
 "${L[@]}" gate-check | jget '["reachable"]' | grep -q True || fail "gate-check should see integration reachable from base"
 pass "gate-check confirms integration reachable from base after merge"
 
+# --- #5: gate-push pushes the base to its remote; refuses a diverged remote ---
+gorigin="$tmp/gorigin"; git init -q --bare "$gorigin"
+git -C "$gorigin" symbolic-ref HEAD refs/heads/main
+grepo="$tmp/grepo"
+git init -q "$grepo" && git -C "$grepo" config user.email t@e && git -C "$grepo" config user.name t
+git -C "$grepo" checkout -qb main && echo g0 > "$grepo/f" && git -C "$grepo" add -A \
+  && git -C "$grepo" commit -qm g0
+git -C "$grepo" remote add origin "$gorigin" && git -C "$grepo" push -qu origin main
+Lg=("$loop" --target gg)
+wtg="$("${Lg[@]}" init --loop-repo "$grepo" --cap 1 | jget '["worktree"]')"
+ibrg="$("${Lg[@]}" status | jget '["integration_branch"]')"
+git -C "$wtg" commit -q --allow-empty -m iter
+git -C "$grepo" merge -q --no-ff "$ibrg" -m "gate merge"          # gate step 2
+"${Lg[@]}" gate-check | jget '["reachable"]' | grep -q True || fail "gg gate-check"
+"${Lg[@]}" gate-push | jget '["pushed"]' | grep -q True || fail "gate-push should push the base"
+[ "$(git -C "$grepo" rev-parse main)" = "$(git -C "$gorigin" rev-parse main)" ] \
+  || fail "the merge commit must exist on the remote after gate-push"
+pass "#5: gate-push pushes the merged base branch to its remote"
+
+# Diverge origin/main out-of-band, then a local commit — gate-push must refuse.
+oclone="$tmp/oclone"; git clone -q "$gorigin" "$oclone"
+git -C "$oclone" config user.email t@e && git -C "$oclone" config user.name t
+git -C "$oclone" checkout -q main && echo remote >> "$oclone/f" \
+  && git -C "$oclone" commit -qam remote-change && git -C "$oclone" push -q origin main
+git -C "$grepo" commit -q --allow-empty -m local-change           # local also moves
+rc=0; "${Lg[@]}" gate-push >/tmp/gp.json 2>&1 || rc=$?
+[ "$rc" = "3" ] && grep -q '"diverged": true' /tmp/gp.json \
+  || fail "gate-push must refuse a diverged remote (exit 3): $(cat /tmp/gp.json)"
+[ "$(git -C "$gorigin" rev-parse main)" != "$(git -C "$grepo" rev-parse main)" ] \
+  || fail "gate-push must NOT force-push over a diverged remote"
+pass "#5: gate-push refuses a diverged remote instead of force-pushing"
+
+# --- #6: finish/init delete merged integration branches, keep unmerged tips --
+crepo="$tmp/crepo"
+git init -q "$crepo" && git -C "$crepo" config user.email t@e && git -C "$crepo" config user.name t
+git -C "$crepo" checkout -qb main && echo x > "$crepo/f" && git -C "$crepo" add -A \
+  && git -C "$crepo" commit -qm c0
+git -C "$crepo" branch "tanuki-loop/cc/20200101-000000" main       # merged (== main tip)
+git -C "$crepo" branch "tanuki-loop/cc/20200102-000000" main       # will become unmerged
+git -C "$crepo" checkout -q "tanuki-loop/cc/20200102-000000"
+git -C "$crepo" commit -q --allow-empty -m unmerged
+git -C "$crepo" checkout -q main
+Lc=("$loop" --target cc)
+initout="$("${Lc[@]}" init --loop-repo "$crepo" --cap 1)"
+echo "$initout" | python3 -c "import json,sys;c=json.load(sys.stdin)['branch_cleanup'];assert 'tanuki-loop/cc/20200101-000000' in c['deleted'],c;assert 'tanuki-loop/cc/20200102-000000' in c['kept'],c" \
+  || fail "init should delete the merged integration branch and keep the unmerged one: $initout"
+git -C "$crepo" show-ref --verify -q "refs/heads/tanuki-loop/cc/20200101-000000" \
+  && fail "merged branch still present after init sweep"
+git -C "$crepo" show-ref --verify -q "refs/heads/tanuki-loop/cc/20200102-000000" \
+  || fail "unmerged branch was wrongly deleted"
+pass "#6: init sweeps merged integration branches, keeps unmerged tips"
+
+# finish deletes THIS run's branch once it's merged into base.
+Ld=("$loop" --target dd)
+wtd="$("${Ld[@]}" init --loop-repo "$crepo" --cap 1 | jget '["worktree"]')"
+ibrd="$("${Ld[@]}" status | jget '["integration_branch"]')"
+git -C "$wtd" commit -q --allow-empty -m iter
+git -C "$crepo" merge -q --no-ff "$ibrd" -m "gate merge"
+git -C "$crepo" worktree remove --force "$wtd"                     # gate step 6, pre-finish
+finout="$("${Ld[@]}" finish --reason gate-ratified)"
+echo "$finout" | python3 -c "import json,sys;assert '$ibrd' in json.load(sys.stdin)['branch_cleanup']['deleted']" \
+  || fail "finish should delete the ratified run's merged integration branch: $finout"
+git -C "$crepo" show-ref --verify -q "refs/heads/$ibrd" \
+  && fail "ratified run's merged branch still present after finish"
+pass "#6: finish deletes the ratified run's merged integration branch"
+
 echo "all checks passed"

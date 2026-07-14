@@ -187,20 +187,32 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
 2. **Merge `integration → main`** (executed by the gate only after approval;
    never unattended).
 3. **Verify** with `tanuki-loop gate-check` (integration HEAD reachable from
-   base). Only past this does anything outward-facing run.
-4. **Materialize** issues — **one per resolved problem** (keyed by the lead
+   base).
+4. **Push the base branch** with `tanuki-loop gate-push` — the first
+   outward-facing step, run **before** any issue is materialized. Until the
+   merge commit exists on the remote, the commit links step 5 stamps onto
+   issues 404 and a local-only `main` diverges the remote for the next
+   workflow's `git pull --ff-only`. `gate-push` fetches first and, if the
+   remote has moved, **refuses rather than force-pushing** (exit 3,
+   `diverged: true`): reconcile the remote in, re-run the final tests, and
+   re-run `gate-push`. Only past a successful push does anything else
+   outward-facing run.
+5. **Materialize** issues — **one per resolved problem** (keyed by the lead
    ledger finding id, or a `+`-joined set), describing **what landed**, each
    body stamped `tanuki-loop: <run-id>/<problem-key>`. Before creating,
    `tanuki-loop issue-get --key <problem-key>` (and a marker search) returns
    any existing issue; create only the missing ones and record each with
    `tanuki-loop issue-put --key <problem-key> --issue <n>` — a mid-gate death
    re-runs from here without duplicating.
-5. **Link** each to the merge commit, **close as completed**, reconcile the
-   board to Done (where project-board tooling is configured).
-6. Remove the loop worktree (`git worktree remove`); leave the integration
-   branch for later branch cleanup once the merge is confirmed. Close the run
+6. **Link** each to the (now pushed) merge commit, **close as completed**,
+   reconcile the board to Done (where project-board tooling is configured).
+7. Remove the loop worktree (`git worktree remove`), then close the run
    machine-readably: `tanuki-loop finish --reason gate-ratified` (likewise
-   `converged` / `cap` / `aborted` when a run ends without a gate).
+   `converged` / `cap` / `aborted` when a run ends without a gate). **`finish`
+   owns the branch cleanup** — it deletes integration branches whose tip is
+   reachable from the base branch and reports any it kept (unmerged tips stay);
+   the next `init` for the target is the backstop. No branch is left to
+   accumulate until an unrelated tool collects it.
 
 ## Monitoring (the operator's window)
 
@@ -254,5 +266,10 @@ the loop never decides a spec alternative on its own.
   ask — unanswered judgment defers. A finding is re-fixed up to its attempt
   cap (default 4), then frozen — never a whole-loop stop.
 - `integration → main` runs only after explicit approval, merge-first and
-  idempotent. Phases differ only in supervision and cap — one code path,
-  Phase-3-ready from the first run.
+  idempotent, and is **pushed to the remote before any issue is materialized**
+  (`gate-push`, refusing a diverged remote rather than force-pushing) — a
+  local-only merge leaves dangling issue links and a diverged remote. Phases
+  differ only in supervision and cap — one code path, Phase-3-ready from the
+  first run.
+- Merged integration branches are deleted by `tanuki-loop finish` (backstop:
+  the next `init`); an unmerged tip is never deleted.
