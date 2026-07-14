@@ -219,7 +219,9 @@ def cmd_plan(args):
     for f in load_ledger(args.target)["findings"]:
         if f.get("status") == "accepted" and not f.get("tombstone"):
             verify.update(s for s in f.get("scenarios", []) if s in scen)
-    # 2. Exploration quota — the anti-Goodhart guard.
+    # 2. Exploration quota — the anti-Goodhart guard. Reserved BEFORE verify
+    #    (spec "Verify / cap interaction"): a large verify backlog must never
+    #    consume the whole cap and starve coverage exploration.
     unexplored = sorted(s for s, st in scen.items() if st["state"] == "unexplored")
     explore = unexplored[:cfg["exploration_quota"]]
     # 3. Active rotation, least-recently-planned first.
@@ -229,8 +231,18 @@ def cmd_plan(args):
     due = sorted(s for s, st in scen.items() if st["state"] == "regression"
                  and st["since_regression"] >= cfg["regression_every"])
 
+    # Verify fills the budget left after the reserved quota, least-recently-
+    # planned first so every accepted-finding scenario eventually replays and
+    # the backlog drains — bounded, never a silent truncation. Overflow is
+    # surfaced as `verify_deferred` (a bounded WIP signal); driven-absence
+    # compaction makes a deferred replay safe (it accrues no false absence).
+    verify_lru = sorted(verify, key=lambda s: (scen[s]["last_planned"], s))
+    verify_budget = max(0, cap - len(explore))
+    verify_sel = verify_lru[:verify_budget]
+    verify_deferred = verify_lru[verify_budget:]
+
     plan, seen = [], set()
-    for group in (sorted(verify), explore, active, due):
+    for group in (verify_sel, explore, active, due):
         for s in group:
             if s not in seen and len(plan) < cap:
                 plan.append(s)
@@ -240,6 +252,7 @@ def cmd_plan(args):
         scen[s]["last_planned"] = tick
     record = {"run": args.run, "plan": plan, "quota_met": quota_met,
               "verify": sorted(verify & seen),
+              "verify_deferred": sorted(verify_deferred),
               "explore": [s for s in explore if s in seen],
               "due_regression": [s for s in due if s in seen],
               "unexplored_remaining": [s for s in unexplored if s not in seen]}
