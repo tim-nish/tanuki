@@ -133,8 +133,9 @@ new-actionable from the `iter-start` ledger snapshot minus frozen/deferred,
 and "patched" from the iteration SHAs; convergence never trusts a
 model-supplied count). A cycle is **quiet** when there are no new actionable
 findings and no accepted patch — **and it counts toward the streak only if
-its scheduler plan reported `quota_met: true`** (a run that skipped
-exploration while unexplored branches remained cannot manufacture
+its scheduler plan reported `quota_met: true`**, which `record-cycle`
+enforces itself by reading the iteration's persisted plan record (a run that
+skipped exploration while unexplored branches remained cannot manufacture
 convergence; spec-tanuki-scenario-lifecycle's loop amendment). **Two
 consecutive quiet cycles** (the tool reports `converged: true` at streak ≥ 2)
 end the run — one quiet drive can be luck. A finding may be re-fixed up to its attempt cap (default 4), then it is
@@ -187,13 +188,34 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
 
 ## Monitoring (the operator's window)
 
-`${CLAUDE_PLUGIN_ROOT}/tools/tanuki-loop --target <target> dashboard` renders one screen:
-iterations done/cap + quiet streak, the currently-driving scenario and stage
-(live from `progress.json`), the latest iteration's per-scenario results,
-findings discovered vs unresolved (from the ledger), deferred/frozen items,
-why the loop stopped (breaker / finished reason), and what runs next. Add
-`--follow 10` for a self-refreshing terminal view during an unattended run —
-it reads only state files, so it's always safe to run alongside the loop.
+`${CLAUDE_PLUGIN_ROOT}/tools/tanuki-loop --target <target> dashboard` renders one screen
+of **operational status, not internal state** — within seconds the operator
+can answer: is the loop healthy, did anything unexpected happen, what did
+this run change, is the scheduler behaving as intended, and what decision
+comes next. Sections, in order:
+- **health** — one OK / ATTENTION / DONE verdict with the reason (breaker,
+  unmatched anomaly, cap-without-convergence, pending gate decisions).
+- **latest drive** — live progress plus per-scenario results, every
+  anomalous result classified against the ledger: `known: F2 deferred, …`
+  (expected — already ruled on) vs `UNMATCHED` (new problem or mining not
+  done — the only class that needs eyes mid-run).
+- **this run** — run-scoped deltas (new / fixed / recurred findings,
+  deferred/frozen with their reasons inline); cumulative lifetime counts are
+  a single pointer line to `--history`, where they belong.
+- **scheduler decisions** — from the iteration's persisted plan: what is
+  being verified (replaying accepted fixes), what was picked for exploration,
+  the active rotation, what is waiting for future iterations, and whether the
+  exploration quota was met (runs predating persisted plans degrade to
+  per-state pools with a note).
+- **convergence** — the definition spelled out (no new actionable finding +
+  no patch + quota met), which conditions held last cycle, and what is still
+  required (`one more quiet cycle ends the run`).
+- **why stopped / NEXT** — a breaker points at the audit trail; a
+  converged/capped run lists the morning gate's concrete decisions (review
+  the N-commit diff, rule on the deferred/frozen items, approve the merge).
+Add `--follow 10` for a self-refreshing terminal view during an unattended
+run — it reads only state files, so it's always safe to run alongside the
+loop.
 The dashboard is the live view; for the cross-run long view (per-scenario
 execution history, transitions, coverage, selection history) use
 `tanuki-scheduler --target <t> history` (surfaced as `/tanuki <t> --history`).

@@ -142,6 +142,51 @@ grep -q "scenarios: active 1 · regression 1 · unexplored 1" /tmp/dash.txt \
 grep -q "unexplored: s2" /tmp/dash.txt || fail "dashboard missing unexplored list"
 pass "policy recorded; finish + dashboard show stop reason, findings, iterations, scheduler"
 
+# --- quota-gated quiet + dashboard operational status --------------------------
+"${L[@]}" init --loop-repo "$repo" --cap 4 >/dev/null
+run2="$(cat "$TANUKI_ROOT/t/loop/current")"
+cat > "$TANUKI_ROOT/t/scheduler.json" <<EOF
+{"scenarios": {"s1": {"state": "active"}, "s2": {"state": "unexplored"}},
+ "runs_recorded": [],
+ "plans": [{"run": "${run2}-iter1", "plan": ["s1"], "quota_met": false,
+            "verify": [], "explore": [], "due_regression": [],
+            "unexplored_remaining": ["s2"]},
+           {"run": "${run2}-iter2", "plan": ["s1", "s2"], "quota_met": true,
+            "verify": ["s1"], "explore": ["s2"], "due_regression": [],
+            "unexplored_remaining": []}]}
+EOF
+"${L[@]}" iter-start >/dev/null
+"${L[@]}" iter-verify --no-patch >/dev/null
+"${L[@]}" record-cycle > /tmp/rcq.json
+grep -q '"quota_met": false' /tmp/rcq.json && grep -q '"quiet": false' /tmp/rcq.json \
+  || fail "a cycle whose plan missed the exploration quota must not be quiet"
+"${L[@]}" iter-start >/dev/null
+"${L[@]}" iter-verify --no-patch >/dev/null
+"${L[@]}" record-cycle | jget '["quiet"]' | grep -q True \
+  || fail "a quota-met quiet cycle must count toward the streak"
+pass "record-cycle gates quiet on the persisted plan's exploration quota"
+
+"${L[@]}" dashboard > /tmp/dash2.txt
+grep -q "health: " /tmp/dash2.txt || fail "dashboard missing health verdict"
+grep -q "this run: new findings" /tmp/dash2.txt || fail "dashboard missing run deltas"
+grep -q "scheduler decisions (iter 2 plan — exploration quota met)" /tmp/dash2.txt \
+  || fail "dashboard missing scheduler decisions from the persisted plan"
+grep -q "verifying fixes (replay): s1" /tmp/dash2.txt || fail "dashboard missing verify set"
+grep -q "exploring (never driven): s2" /tmp/dash2.txt || fail "dashboard missing exploration pick"
+grep -q "last cycle (iter 2): quiet — no new findings · no patch · quota met" /tmp/dash2.txt \
+  || fail "dashboard missing convergence explanation"
+pass "dashboard: health verdict, run deltas, scheduler decisions, convergence explanation"
+
+"${L[@]}" defer --finding F5 --reason "needs operator judgment" >/dev/null
+"${L[@]}" finish --reason cap >/dev/null
+"${L[@]}" dashboard > /tmp/dash3.txt
+grep -q "NEXT: morning gate — your decisions:" /tmp/dash3.txt \
+  || fail "dashboard missing the morning-gate decision list"
+grep -q "deferred F5: needs operator judgment" /tmp/dash3.txt \
+  || fail "dashboard missing the deferred item's reason"
+grep -q "ATTENTION" /tmp/dash3.txt || fail "cap-without-convergence should be ATTENTION"
+pass "dashboard: finished run lists the concrete morning-gate decisions"
+
 # --- cap breaker + gate-check on a fresh cap-1 run ----------------------------
 "${L[@]}" init --loop-repo "$repo" --cap 1 >/dev/null
 wt2="$("${L[@]}" status | jget '["worktree"]')"

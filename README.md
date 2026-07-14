@@ -167,6 +167,12 @@ reads state files):
 <plugin-root>/tools/tanuki-loop --target my-plugin dashboard --follow 10
 ```
 
+It's an operational-status view, not a state dump: a one-line health verdict
+(OK / ATTENTION / DONE), the latest drive with each anomaly classified against
+the ledger (a known finding vs an **unmatched** one that needs your eyes),
+what *this run* changed, what the scheduler decided, and — when it stops — the
+exact decisions the morning gate will ask of you.
+
 The loop needs one thing from you: a `test_cmd` — your repo's regression
 gate, run after every iteration. A failing gate stops the loop immediately.
 On the first run without one configured, Tanuki derives a candidate from

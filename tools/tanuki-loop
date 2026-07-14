@@ -27,7 +27,10 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
   attempt --finding F            per-finding attempt count; freezes past the cap
   record-cycle                   two-quiet convergence; new-actionable computed from
                                  the ledger snapshot and patched from the iteration
-                                 SHAs (--new-actionable / --patched override)
+                                 SHAs (--new-actionable / --patched override); a
+                                 cycle is quiet only if the iteration's persisted
+                                 scheduler plan reported quota_met (the
+                                 spec-tanuki-scenario-lifecycle loop amendment)
   defer --finding F --reason "…" append to the morning queue
   log --audit "…"                append to the audit artifact
   gate-check                     integration HEAD reachable from base after the merge
@@ -38,9 +41,14 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
   finish --reason R              mark the run terminal (converged | cap |
                                  gate-ratified | aborted) — machine-readable
   status                         JSON summary for the morning gate
-  dashboard [--follow SECS]      human monitoring view: recent + running
-                                 scenarios, findings discovered/unresolved,
-                                 stop reason, what runs next
+  dashboard [--follow SECS]      operational status, one screen: health verdict,
+                                 latest drive with each anomaly classified against
+                                 the ledger (known/deferred/frozen vs unmatched),
+                                 this-run deltas (new/fixed/recurred findings),
+                                 the scheduler's actual decisions (verify/explore/
+                                 rotation/waiting), convergence conditions met vs
+                                 missing, stop reason, and the concrete decisions
+                                 the morning gate will ask for
 
 Sequencing is guarded: each iteration must move started -> (verified |
 rolled_back) before the next iter-start, and record-cycle refuses an open
@@ -124,13 +132,29 @@ def breaker(state, reason):
     sys.exit(3)
 
 
-def ledger_finding_ids(target):
-    """Finding ids currently in the target's ledger (read-only)."""
+def ledger_findings(target):
+    """Findings currently in the target's ledger (read-only)."""
     path = os.path.join(TANUKI_ROOT, target, "ledger.json")
     if not os.path.exists(path):
         return []
     with open(path, encoding="utf-8") as f:
-        return [fd["id"] for fd in json.load(f).get("findings", [])]
+        return json.load(f).get("findings", [])
+
+
+def ledger_finding_ids(target):
+    return [fd["id"] for fd in ledger_findings(target)]
+
+
+def plan_record(state, iter_n):
+    """The persisted scheduler plan for this loop iteration's drive run
+    (<run>-iterN), or None for runs/schedulers that predate persisted plans."""
+    spath = os.path.join(TANUKI_ROOT, state["target"], "scheduler.json")
+    if not os.path.exists(spath):
+        return None
+    with open(spath, encoding="utf-8") as f:
+        plans = json.load(f).get("plans", [])
+    rid = f"{state['run']}-iter{iter_n}"
+    return next((p for p in reversed(plans) if p.get("run") == rid), None)
 
 
 # --- subcommands -------------------------------------------------------------
@@ -241,9 +265,12 @@ def cmd_iter_start(args):
     n = len(state["iterations"]) + 1
     state["iterations"].append({
         "n": n, "start": head, "end": None, "phase": "started", "removed": [],
-        # Ledger snapshot: record-cycle derives "new actionable" from this,
-        # so convergence never trusts a model-supplied count.
-        "findings_before": ledger_finding_ids(state["target"]),
+        # Ledger snapshot: record-cycle derives "new actionable" from its ids,
+        # so convergence never trusts a model-supplied count; status/recurrence
+        # let the dashboard report this-run deltas (fixed/recurred).
+        "findings_before": {fd["id"]: {"status": fd.get("status"),
+                                       "recurrence": fd.get("recurrence", 1)}
+                            for fd in ledger_findings(state["target"])},
     })
     save_state(state)
     audit(state, f"iter {n}: start @ {head[:12]}")
@@ -354,14 +381,26 @@ def cmd_record_cycle(args):
     else:
         patched = bool(it.get("phase") == "verified" and it.get("end")
                        and it["end"] != it["start"])
-    quiet = new_actionable == 0 and not patched
+    # Loop amendment (spec-tanuki-scenario-lifecycle): a cycle counts as quiet
+    # only if its scheduler plan met the exploration quota — a run that skipped
+    # exploration while unexplored branches remained cannot manufacture
+    # convergence. No persisted plan (pre-scheduler runs) => not gated.
+    plan = plan_record(state, it["n"])
+    quota_met = plan.get("quota_met", True) if plan else True
+    quiet = new_actionable == 0 and not patched and quota_met
     state["quiet_streak"] = state["quiet_streak"] + 1 if quiet else 0
     converged = state["quiet_streak"] >= 2
+    # Persisted so the dashboard can explain the streak, not just count it.
+    state["last_cycle"] = {"iter": it["n"], "new_actionable": new_actionable,
+                           "patched": patched, "quota_met": quota_met,
+                           "quiet": quiet}
     save_state(state)
     audit(state, f"cycle: new_actionable={new_actionable} "
-                 f"patched={patched} quiet_streak={state['quiet_streak']}"
+                 f"patched={patched} quota_met={quota_met} "
+                 f"quiet_streak={state['quiet_streak']}"
                  + (" -> CONVERGED" if converged else ""))
-    out({"new_actionable": new_actionable, "patched": patched, "quiet": quiet,
+    out({"new_actionable": new_actionable, "patched": patched,
+         "quota_met": quota_met, "quiet": quiet,
          "quiet_streak": state["quiet_streak"], "converged": converged})
 
 
@@ -441,69 +480,196 @@ def cmd_finish(args):
     out({"ok": True, "reason": args.reason})
 
 
+def _fmt_ids(ids, cap=6):
+    ids = list(ids)
+    if not ids:
+        return "none"
+    s = ", ".join(ids[:cap])
+    return s + (f" +{len(ids) - cap} more" if len(ids) > cap else "")
+
+
+def _short(text, n=90):
+    text = " ".join((text or "").split())
+    return text if len(text) <= n else text[:n - 1] + "…"
+
+
+def _queue_reasons(state):
+    """{finding-id: reason} parsed from the morning queue's DEFER/FROZEN lines."""
+    path = os.path.join(loop_dir(state["target"], state["run"]), "queue.md")
+    reasons = {}
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            for ln in f:
+                for tag in ("- DEFER ", "- FROZEN "):
+                    if ln.startswith(tag) and ":" in ln[len(tag):]:
+                        fid, reason = ln[len(tag):].split(":", 1)
+                        reasons[fid.strip()] = reason.strip()
+    return reasons
+
+
+def _classify_anomaly(scenario, findings, state):
+    """Classify an anomalous drive result against the ledger: is it a known
+    finding (and what was decided about it this run), or unmatched — the
+    distinction between 'expected noise' and 'look at this now'."""
+    tags = []
+    for fd in findings:
+        if scenario not in fd.get("scenarios", []) or fd.get("tombstone"):
+            continue
+        if fd["id"] in state.get("deferred", []):
+            tags.append((0, f"{fd['id']} deferred"))
+        elif fd["id"] in state.get("frozen", []):
+            tags.append((0, f"{fd['id']} frozen"))
+        elif fd.get("status") in ("open", "proposed"):
+            tags.append((1, f"{fd['id']} open"))
+    tags.sort()
+    if tags:
+        more = f" +{len(tags) - 3}" if len(tags) > 3 else ""
+        return True, "known: " + ", ".join(t for _, t in tags[:3]) + more
+    return False, "UNMATCHED — no ledger finding yet; check this iter's mining"
+
+
+def _run_deltas(state, findings):
+    """This-run ledger movement, from the run-start snapshot (iteration 1's
+    findings_before). Legacy id-list snapshots yield only the 'new' delta."""
+    if not state["iterations"]:
+        return None
+    snap = state["iterations"][0].get("findings_before", [])
+    legacy = isinstance(snap, list)
+    before = {i: None for i in snap} if legacy else snap
+    cur = {fd["id"]: fd for fd in findings}
+    return {
+        "new": [i for i in cur if i not in before],
+        "fixed": [i for i, b in before.items() if b and i in cur
+                  and b.get("status") in ("open", "proposed")
+                  and cur[i].get("status") == "accepted"],
+        "recurred": [i for i, b in before.items() if b and i in cur
+                     and cur[i].get("recurrence", 1) > b.get("recurrence", 1)],
+        "legacy": legacy,
+    }
+
+
+def _health(state, driving, unmatched):
+    """One verdict line: OK / ATTENTION / DONE, with the reason — the answer
+    to 'do I need to look at anything?' before any detail is read."""
+    n_done = len(state["iterations"])
+    pend = []
+    if state.get("deferred"):
+        pend.append(f"{len(state['deferred'])} deferred decision(s)")
+    if state.get("frozen"):
+        pend.append(f"{len(state['frozen'])} frozen finding(s)")
+    gate_note = f"; {' + '.join(pend)} await your ruling" if pend else ""
+    fin = state.get("finished")
+    if fin:
+        return {"gate-ratified": "DONE — ratified at the morning gate",
+                "converged": f"OK — converged; run the morning gate{gate_note}",
+                "cap": "ATTENTION — cap hit without convergence; run the "
+                       f"morning gate{gate_note}",
+                }.get(fin["reason"],
+                      f"ATTENTION — run ended: {fin['reason']}{gate_note}")
+    if state.get("last_breaker"):
+        return ("ATTENTION — stopped by breaker: "
+                f"{state['last_breaker']['reason']}{gate_note}")
+    if unmatched:
+        return (f"ATTENTION — {unmatched} scenario anomal"
+                f"{'ies' if unmatched > 1 else 'y'} match no ledger finding "
+                "yet (new problem or mining not done)")
+    if driving:
+        return f"OK — iteration {n_done} driving; anomalies (if any) are known"
+    if state["quiet_streak"] >= 2:
+        return f"OK — converged; run the morning gate{gate_note}"
+    if n_done >= state["cap"]:
+        return ("ATTENTION — cap hit without convergence; run the morning "
+                f"gate{gate_note}")
+    return f"OK — between iterations ({n_done}/{state['cap']} done){gate_note}"
+
+
 def cmd_dashboard(args):
-    """Human monitoring view (plain text, one screen). Answers: what ran
-    recently, what is running now, findings discovered/unresolved, why the
-    loop stopped, and what runs next. --follow N re-renders every N seconds."""
+    """Operational status (plain text, one screen). Within seconds the
+    operator can answer: is the loop healthy, did anything unexpected happen,
+    what did THIS run change, what is the scheduler doing and why, how far is
+    convergence, and what decision comes next. Cumulative/lifetime numbers are
+    a single pointer line — the long view is `tanuki-scheduler history`.
+    --follow N re-renders every N seconds; reads state files only."""
     while True:
         state = load_state(args.target, args.run)
-        lines = []
+        findings = ledger_findings(state["target"])
         n_done = len(state["iterations"])
-        elapsed = int(time.time() - state["wall_start"])
-        lines.append(f"tanuki-loop — {state['target']} / {state['run']}")
-        lines.append(f"  integration: {state['integration_branch']}  "
-                     f"(base {state['base']})")
-        lines.append(f"  iterations: {n_done}/{state['cap']} · quiet streak "
-                     f"{state['quiet_streak']}/2 · elapsed {elapsed//60}m")
-
-        # Current / recent scenarios, from the newest iteration's drive.
         cur = state["iterations"][-1] if state["iterations"] else None
+        elapsed = int(time.time() - state["wall_start"])
+
+        # -- latest drive: progress + per-scenario results, anomalies classified
+        drive_lines, driving, unmatched = [], False, 0
         if cur:
-            run_dir = os.path.join(TANUKI_ROOT, state["target"], "events",
-                                   f"{state['run']}-iter{cur['n']}")
-            ppath = os.path.join(run_dir, "progress.json")
+            ppath = os.path.join(TANUKI_ROOT, state["target"], "events",
+                                 f"{state['run']}-iter{cur['n']}",
+                                 "progress.json")
             if os.path.exists(ppath):
                 with open(ppath, encoding="utf-8") as f:
                     p = json.load(f)
-                if p.get("stage") != "complete" and cur["phase"] == "started":
-                    lines.append(f"  NOW: iter {cur['n']} driving "
-                                 f"[{p['done']}/{p['total']}] {p.get('current')}"
-                                 f" — {p.get('stage')} "
-                                 f"({p.get('elapsed_s', 0)}s, "
-                                 f"{p.get('captured_kb', 0)}KB)")
-                lines.append(f"  recent scenarios (iter {cur['n']}):")
+                driving = (p.get("stage") != "complete"
+                           and cur["phase"] == "started")
+                if driving:
+                    drive_lines.append(
+                        f"  NOW: iter {cur['n']} driving "
+                        f"[{p['done']}/{p['total']}] {p.get('current')} — "
+                        f"{p.get('stage')} ({p.get('elapsed_s', 0)}s, "
+                        f"{p.get('captured_kb', 0)}KB)")
+                drive_lines.append(f"  latest drive (iter {cur['n']}):")
                 for r in p.get("results", []):
-                    lines.append(f"    {r['scenario']:<22} {r['status'][:28]:<28}"
-                                 f" {r['events']:>3} events "
-                                 f"{int(r.get('duration_s') or 0):>4}s")
+                    line = (f"    {r['scenario']:<22} {r['status'][:28]:<28}"
+                            f" {r['events']:>3} events "
+                            f"{int(r.get('duration_s') or 0):>4}s")
+                    if not str(r.get("status", "")).startswith("ok"):
+                        known, tag = _classify_anomaly(r["scenario"],
+                                                       findings, state)
+                        unmatched += 0 if known else 1
+                        line += f"  <- {tag}"
+                    drive_lines.append(line)
             elif cur["phase"] == "started":
-                lines.append(f"  NOW: iter {cur['n']} in progress "
-                             "(pre-drive or mining/implementing)")
+                driving = True
+                drive_lines.append(f"  NOW: iter {cur['n']} in progress "
+                                   "(pre-drive or mining/implementing)")
 
-        # Findings: discovered vs unresolved, straight from the ledger.
-        lpath = os.path.join(TANUKI_ROOT, state["target"], "ledger.json")
-        if os.path.exists(lpath):
-            with open(lpath, encoding="utf-8") as f:
-                findings = json.load(f).get("findings", [])
+        lines = [f"tanuki-loop — {state['target']} / {state['run']}",
+                 f"  health: {_health(state, driving, unmatched)}",
+                 f"  integration: {state['integration_branch']}  "
+                 f"(base {state['base']})",
+                 f"  iterations: {n_done}/{state['cap']} · elapsed "
+                 f"{elapsed // 60}m"]
+        lines += drive_lines
+
+        # -- this run's ledger movement (run-scoped; lifetime is one pointer)
+        deltas = _run_deltas(state, findings)
+        reasons = _queue_reasons(state)
+        if deltas:
+            def part(label, ids):
+                return f"{label} {len(ids)}" + \
+                    (f" ({_fmt_ids(ids)})" if ids else "")
+            lines.append("  this run: " + " · ".join((
+                part("new findings", deltas["new"]),
+                part("fixed", deltas["fixed"]),
+                part("recurred", deltas["recurred"]),
+                f"deferred {len(state.get('deferred', []))}",
+                f"frozen {len(state.get('frozen', []))}")))
+            if deltas["legacy"]:
+                lines.append("    (run predates status snapshots — "
+                             "fixed/recurred not computable)")
+            for fid in state.get("deferred", []):
+                lines.append(f"    deferred {fid}: "
+                             f"{_short(reasons.get(fid, 'see queue.md'))}")
+            for fid in state.get("frozen", []):
+                lines.append(f"    frozen {fid} (attempt cap): "
+                             f"{_short(reasons.get(fid, 'see queue.md'))}")
+        if findings:
             by = {}
             for fd in findings:
                 by[fd["status"]] = by.get(fd["status"], 0) + 1
-            lines.append(f"  findings: {len(findings)} total — " +
-                         " · ".join(f"{k} {v}" for k, v in sorted(by.items())))
-            unresolved = sorted((fd for fd in findings
-                                 if fd["status"] in ("open", "proposed")
-                                 and not fd.get("tombstone")),
-                                key=lambda fd: -fd.get("recurrence", 0))
-            if unresolved:
-                tops = ", ".join(f"{fd['id']} rec:{fd.get('recurrence', 1)}"
-                                 for fd in unresolved[:6])
-                lines.append(f"  unresolved (top by recurrence): {tops}")
-        if state.get("deferred") or state.get("frozen"):
-            lines.append(f"  deferred: {', '.join(state['deferred']) or '-'}"
-                         f" · frozen: {', '.join(state['frozen']) or '-'}")
+            lines.append(f"  findings: {len(findings)} lifetime — " +
+                         " · ".join(f"{k} {v}" for k, v in sorted(by.items())) +
+                         f" (history: /tanuki {state['target']} --history)")
 
-        # Scheduler view (specs/spec-tanuki-scenario-lifecycle): per-scenario
-        # exploration state, when the adaptive scheduler is in use.
+        # -- scheduler: its DECISIONS for this iteration when a persisted plan
+        #    exists; per-state pools otherwise (pre-revision runs).
         spath = os.path.join(TANUKI_ROOT, state["target"], "scheduler.json")
         if os.path.exists(spath):
             with open(spath, encoding="utf-8") as f:
@@ -511,31 +677,93 @@ def cmd_dashboard(args):
             by = {}
             for sid, st in sched.get("scenarios", {}).items():
                 by.setdefault(st["state"], []).append(sid)
-            summary = " · ".join(f"{k} {len(v)}" for k, v in sorted(by.items()))
-            lines.append(f"  scenarios: {summary}")
-            if by.get("unexplored"):
-                lines.append(f"    unexplored: {', '.join(sorted(by['unexplored'])[:6])}")
-            if by.get("regression"):
-                lines.append(f"    regression pool: {', '.join(sorted(by['regression'])[:6])}")
+            lines.append("  scenarios: " + " · ".join(
+                f"{k} {len(v)}" for k, v in sorted(by.items())))
+            plan = plan_record(state, cur["n"]) if cur else None
+            if plan:
+                picked = set(plan.get("verify", []) + plan.get("explore", [])
+                             + plan.get("due_regression", []))
+                rotation = [s for s in plan.get("plan", []) if s not in picked]
+                lines.append(f"  scheduler decisions (iter {cur['n']} plan — "
+                             "exploration quota "
+                             f"{'met' if plan.get('quota_met') else 'NOT met'}):")
+                lines.append("    verifying fixes (replay): "
+                             f"{_fmt_ids(plan.get('verify', []))}")
+                lines.append("    exploring (never driven): "
+                             f"{_fmt_ids(plan.get('explore', []))}")
+                lines.append(f"    active rotation:          {_fmt_ids(rotation)}")
+                if plan.get("due_regression"):
+                    lines.append("    regression due:           "
+                                 f"{_fmt_ids(plan['due_regression'])}")
+                lines.append("    waiting (future iters):   "
+                             f"{_fmt_ids(plan.get('unexplored_remaining', []))}")
+            else:
+                if by.get("unexplored"):
+                    lines.append("    unexplored: "
+                                 f"{', '.join(sorted(by['unexplored'])[:6])}")
+                if by.get("regression"):
+                    lines.append("    regression pool: "
+                                 f"{', '.join(sorted(by['regression'])[:6])}")
+                if cur:
+                    lines.append("    (no persisted plan for this run — "
+                                 "selection reasons unavailable; states only)")
 
-        # Why stopped / what's next.
+        # -- convergence: which conditions held last cycle, what's still needed
+        lines.append(f"  convergence: quiet streak {state['quiet_streak']}/2 — "
+                     "a cycle is quiet when it finds no new actionable "
+                     "finding, lands no patch, and met the exploration quota")
+        lc = state.get("last_cycle")
+        if lc:
+            held = [("no new findings" if lc["new_actionable"] == 0 else
+                     f"{lc['new_actionable']} NEW actionable finding(s)"),
+                    ("no patch" if not lc["patched"] else "a patch LANDED"),
+                    ("quota met" if lc.get("quota_met", True) else
+                     "exploration quota NOT met")]
+            lines.append(f"    last cycle (iter {lc['iter']}): "
+                         f"{'quiet' if lc['quiet'] else 'not quiet'} — "
+                         + " · ".join(held))
+            if not state.get("finished") and state["quiet_streak"] == 1:
+                lines.append("    one more quiet cycle ends the run (converged)")
+
+        # -- why stopped / the concrete next decision
+        at_gate = False
         if state.get("finished"):
             lines.append(f"  STOPPED: {state['finished']['reason']} "
                          f"(at {state['finished']['at']})")
+            at_gate = state["finished"]["reason"] in ("converged", "cap")
         elif state.get("last_breaker"):
-            lines.append(f"  STOPPED: breaker — {state['last_breaker']['reason']}"
-                         f" (at {state['last_breaker']['at']})")
+            lines.append(f"  STOPPED: breaker — "
+                         f"{state['last_breaker']['reason']} "
+                         f"(at {state['last_breaker']['at']})")
+            lines.append("  NEXT: inspect the audit trail, fix the breaker "
+                         "cause, then resume or run the morning gate on what "
+                         "already landed")
         elif cur and cur["phase"] == "started":
-            lines.append(f"  NEXT: finish iteration {cur['n']} "
-                         "(implement/test/commit/verify)")
-        elif state["quiet_streak"] >= 2:
-            lines.append("  NEXT: converged — morning gate "
-                         "(review diff, merge integration -> base)")
-        elif n_done >= state["cap"]:
-            lines.append("  NEXT: iteration cap reached — morning gate "
-                         "(review diff, merge integration -> base)")
+            lines.append(f"  NEXT: loop finishes iteration {cur['n']} "
+                         "(mine -> classify -> implement -> test -> commit) — "
+                         "no action needed from you")
+        elif state["quiet_streak"] >= 2 or n_done >= state["cap"]:
+            reason = ("converged" if state["quiet_streak"] >= 2
+                      else "iteration cap reached")
+            lines.append(f"  STOPPED-PENDING: {reason} — run not closed yet")
+            at_gate = True
         else:
-            lines.append(f"  NEXT: iteration {n_done + 1}")
+            lines.append(f"  NEXT: iteration {n_done + 1} of {state['cap']} — "
+                         "no action needed from you")
+        if at_gate:
+            rc, ncommits = git(state["loop_repo"], "rev-list", "--count",
+                               f"{state['base_sha']}..{state['head_expected']}")
+            n_rule = len(state.get("deferred", [])) + len(state.get("frozen", []))
+            lines.append("  NEXT: morning gate — your decisions:")
+            lines.append(f"    1. review the integration diff "
+                         f"({ncommits if rc == 0 else '?'} commit(s), "
+                         f"{state['base']}..{state['integration_branch']})")
+            if n_rule:
+                lines.append(f"    2. rule on {n_rule} deferred/frozen "
+                             "item(s) — reasons listed above")
+            lines.append(f"    {3 if n_rule else 2}. approve or reject the "
+                         f"merge {state['integration_branch']} -> "
+                         f"{state['base']}")
 
         print("\n".join(lines))
         if not args.follow:

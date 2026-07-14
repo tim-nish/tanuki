@@ -92,8 +92,7 @@ The tool also owns the operator surface: `policy` (records iteration-1
 judgment answers — the mechanism behind "questions only in iteration 1"),
 `finish` (machine-readable terminal reason: converged | cap | gate-ratified |
 aborted; breakers persist `last_breaker` the same way), and `dashboard`
-(one-screen monitoring: current scenario + stage, recent results, findings
-discovered/unresolved, deferred/frozen, stop reason, what runs next;
+(one-screen **operational status** — see "Dashboard revision" below;
 `--follow N` self-refreshes). Per-target run settings — `test_cmd`,
 `iterations`, `wall_time_s`, `token_budget`, `attempt_cap` — live in the
 scenarios file's `"loop"` block, read by `init --scenarios`, so the normal
@@ -115,6 +114,49 @@ finding id** (stable across iterations because dedupe bumps the same id):
 "spec|story|direct", "disposition": "defer" | "<chosen resolution>",
 "iter": 1}}}`. From iteration 2 the loop consults this map and never asks; an
 absent answer for a genuine `spec` decision is a defer, not a question.
+
+## Dashboard revision (REVISED 2026-07-14 — operational status, not internal state)
+
+Operator feedback from the first unattended run: the dashboard exposed
+internal state (cumulative counters, raw scenario statuses, `quiet streak
+1/2`, `NEXT: morning gate`) that required too much interpretation — it could
+not answer, within seconds, *is the loop healthy, did anything unexpected
+happen, is the scheduler behaving as intended, what will I have to decide?*
+The dashboard's contract is therefore restated: **it classifies and
+explains; it never presents a raw number or status the operator must join
+against other state by hand.** Concretely:
+
+1. **Health verdict first.** One line — `OK` / `ATTENTION` / `DONE` — with
+   the reason (breaker, unmatched anomaly, cap-without-convergence, pending
+   gate decisions). Everything below it is detail.
+2. **Anomalies are classified, never bare.** A non-ok scenario result (e.g.
+   `timeout after 900s`) is joined against the ledger's `scenarios` links
+   and the run's deferred/frozen sets and tagged `known: F2 deferred, …`
+   (already ruled on — expected) or `UNMATCHED` (no ledger finding yet — the
+   only class that warrants mid-run attention, and an ATTENTION trigger).
+3. **Run-scoped deltas, not cumulative counters.** The live view reports what
+   *this run* changed — new / fixed / recurred findings, deferred/frozen with
+   reasons inline — computed from the run-start ledger snapshot (`iter-start`
+   now snapshots `{id: {status, recurrence}}`, not bare ids). Lifetime totals
+   are one pointer line to the history view (`tanuki-scheduler history`),
+   which owns the long view.
+4. **Scheduler decisions, not pool sizes.** From the iteration's persisted
+   plan record (spec-tanuki-scenario-lifecycle): the verify set, the
+   exploration pick, the active rotation, what waits for future iterations,
+   and `quota_met`. Runs predating persisted plans degrade to per-state pools
+   with an explicit note — never silently.
+5. **Convergence is explained.** The quiet-cycle definition is spelled out
+   (no new actionable finding + no patch + exploration quota met), with which
+   conditions held last cycle (`record-cycle` persists `last_cycle`) and what
+   is still required.
+6. **NEXT is a decision list.** A stopped run enumerates the morning gate's
+   actual asks — review the N-commit diff, rule on each deferred/frozen item
+   (reason shown), approve the merge — not a location name.
+
+Enforcement note (same revision): `record-cycle` now *enforces* the loop
+amendment itself — quiet requires the iteration's persisted plan to report
+`quota_met: true` (absent plan record ⇒ ungated, for pre-scheduler runs).
+Previously the amendment was documented but the tool did not check it.
 
 **Materialization key.** The morning gate stamps each issue body with
 `tanuki-loop: <run-id>/<problem-key>`, where `<problem-key>` is the lead ledger
@@ -180,10 +222,15 @@ stops on **convergence or cap, whichever comes first.**
 
 A drive → mine is **quiet** when all three hold: **no new actionable
 findings**, **no accepted patch** was generated, and every remaining finding is
-a **duplicate**, **deferred**, or **frozen**. **Convergence requires two
-consecutive quiet cycles** — a single quiet drive can be luck given the
-deliberately weak driver. `tanuki-loop record-cycle` tracks the streak and
-reports `converged` at streak ≥ 2 (a non-quiet cycle resets it to 0).
+a **duplicate**, **deferred**, or **frozen**. Per the
+spec-tanuki-scenario-lifecycle loop amendment, a cycle additionally counts as
+quiet **only if its scheduler plan met the exploration quota** —
+`record-cycle` reads the iteration's persisted plan record and gates on
+`quota_met` itself (see "Dashboard revision", enforcement note).
+**Convergence requires two consecutive quiet cycles** — a single quiet drive
+can be luck given the deliberately weak driver. `tanuki-loop record-cycle`
+tracks the streak and reports `converged` at streak ≥ 2 (a non-quiet cycle
+resets it to 0).
 
 Zero findings is *not* required. A finding may be **fixed repeatedly**: track
 attempts per finding (default cap **4**). Do not treat the first recurrence as
