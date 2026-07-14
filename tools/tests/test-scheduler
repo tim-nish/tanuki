@@ -205,4 +205,14 @@ assert r1["actionable"] == 0, r1
 PY
 pass "tanuki-ledger scenario-yield attributes findings to (run, scenario) correctly"
 
+# --- missing scenarios config fails closed naming the canonical path (issue #4)
+rc=0; "$here/tanuki-scheduler" --target demo sync \
+  --scenarios "$TANUKI_ROOT/scenarios/demo.scenarios.json" >/tmp/miss.txt 2>&1 || rc=$?
+[ "$rc" = "2" ] || fail "missing scenarios config must exit 2 (got $rc)"
+grep -q "canonical location: $TANUKI_ROOT/scenarios/demo.scenarios.json" /tmp/miss.txt \
+  || fail "missing-config error must name the canonical path: $(cat /tmp/miss.txt)"
+grep -q "templates/tanuki/ is NOT read" /tmp/miss.txt \
+  || fail "missing-config error should warn the undocumented path is not read"
+pass "loader fails closed on a missing scenarios config, naming the canonical path"
+
 echo "all checks passed"

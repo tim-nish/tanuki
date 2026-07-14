@@ -106,8 +106,8 @@ def load_ledger(target):
                      {"events": {}, "findings": []})
 
 
-def matrix_ids(scenarios_file):
-    with open(os.path.expanduser(scenarios_file), encoding="utf-8") as f:
+def matrix_ids(scenarios_file, target=None):
+    with open_scenarios(scenarios_file, target) as f:
         data = json.load(f)
     ids = [s["id"] for s in data["scenarios"]]
     for sid in ids:
@@ -144,6 +144,21 @@ def die(msg):
     sys.exit(2)
 
 
+def open_scenarios(path, target):
+    """Open a scenarios config, or die naming the CANONICAL location so a
+    misplaced or absent config surfaces immediately (issue #4). The only
+    supported home is ~/.tanuki/scenarios/<target>.scenarios.json."""
+    p = os.path.expanduser(path)
+    if not os.path.exists(p):
+        canon = os.path.join(TANUKI_ROOT, "scenarios",
+                             f"{target or '<target>'}.scenarios.json")
+        die(f"scenarios config not found: {p}\n"
+            f"  canonical location: {canon}\n"
+            "  (create it with `/tanuki init`; "
+            "~/.claude/templates/tanuki/ is NOT read)")
+    return open(p, encoding="utf-8")
+
+
 # --- subcommands -------------------------------------------------------------
 
 def cmd_register(args):
@@ -175,7 +190,7 @@ def cmd_sync(args):
     first = not os.path.exists(sched_path(args.target))
     sched = read_json(sched_path(args.target), {"scenarios": {}, "runs_recorded": []})
     added = []
-    for sid in matrix_ids(args.scenarios):
+    for sid in matrix_ids(args.scenarios, args.target):
         if sid not in sched["scenarios"]:
             sched["scenarios"][sid] = {
                 "state": "active" if first else "unexplored",
@@ -194,7 +209,7 @@ def cmd_plan(args):
     sched = read_json(sched_path(args.target), None)
     if sched is None:
         die("no scheduler state; run `sync --scenarios <file>` first")
-    known = set(matrix_ids(args.scenarios))
+    known = set(matrix_ids(args.scenarios, args.target))
     scen = {k: v for k, v in sched["scenarios"].items() if k in known}
     tick = len(sched["runs_recorded"]) + 1
 
@@ -381,7 +396,7 @@ def cmd_history(args):
     # only — never modifies the matrix.
     axes_cov, debt, recs = None, None, []
     if args.scenarios:
-        with open(os.path.expanduser(args.scenarios), encoding="utf-8") as fh:
+        with open_scenarios(args.scenarios, args.target) as fh:
             matrix = json.load(fh)
         axes = matrix.get("axes") or {}
         if axes:

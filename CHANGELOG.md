@@ -17,6 +17,11 @@ All notable changes to Tanuki are documented here. The format follows
   upstream (`--allow-stale-base` overrides; the base is never silently moved to
   the upstream tip). The base tip and any behind-count are recorded in
   `state.json` and the audit. (#2)
+- Scenarios config location is now enforced as canonical: the loaders
+  (`tanuki-drive`, `tanuki-loop init`, `tanuki-scheduler`) fail closed naming
+  `~/.tanuki/scenarios/<target>.scenarios.json` when the config is absent,
+  instead of a raw traceback or silently reading a stale copy from an
+  undocumented path. (#4)
 
 ## [0.1.0] — 2026-07-14
 

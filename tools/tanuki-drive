@@ -82,6 +82,22 @@ def model_tier(model):
     return max(MODEL_TIERS.values()) + 1  # unknown or frontier: fail closed
 
 
+def open_scenarios(path, target):
+    """Open a scenarios config, or exit naming the CANONICAL location so a
+    misplaced or absent config surfaces immediately (issue #4) instead of a raw
+    traceback. The only supported home is
+    ~/.tanuki/scenarios/<target>.scenarios.json."""
+    p = os.path.expanduser(path)
+    if not os.path.exists(p):
+        canon = os.path.join(TANUKI_ROOT, "scenarios", f"{target}.scenarios.json")
+        print(f"error: scenarios config not found: {p}\n"
+              f"  canonical location: {canon}\n"
+              "  (create it with `/tanuki init`; "
+              "~/.claude/templates/tanuki/ is NOT read)", file=sys.stderr)
+        sys.exit(2)
+    return open(p, encoding="utf-8")
+
+
 def load_config(scenario_file_data=None):
     cfg = dict(CONFIG_DEFAULTS)
     path = os.path.join(TANUKI_ROOT, "config.json")
@@ -422,7 +438,7 @@ def main():
     p.add_argument("--allow-extra", action="store_true")
     args = p.parse_args()
 
-    with open(args.scenarios, encoding="utf-8") as f:
+    with open_scenarios(args.scenarios, args.target) as f:
         scenario_file = json.load(f)
     scenarios = scenario_file["scenarios"]
     cfg = load_config(scenario_file)

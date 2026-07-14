@@ -126,6 +126,21 @@ def die(msg):
     sys.exit(2)
 
 
+def open_scenarios(path, target):
+    """Open a scenarios config, or die naming the CANONICAL location so a
+    misplaced or absent config surfaces immediately (issue #4) instead of a raw
+    traceback or a silently-read stale copy. The only supported home is
+    ~/.tanuki/scenarios/<target>.scenarios.json."""
+    p = os.path.expanduser(path)
+    if not os.path.exists(p):
+        canon = os.path.join(TANUKI_ROOT, "scenarios", f"{target}.scenarios.json")
+        die(f"scenarios config not found: {p}\n"
+            f"  canonical location: {canon}\n"
+            "  (create it with `/tanuki init`; "
+            "~/.claude/templates/tanuki/ is NOT read)")
+    return open(p, encoding="utf-8")
+
+
 def breaker(state, reason):
     # Persist machine-readably so a dashboard can answer "why did it stop?"
     state["last_breaker"] = {"reason": reason,
@@ -172,7 +187,7 @@ def cmd_init(args):
     # run needs no repo-specific flags typed each time. CLI flags override.
     loopcfg = {}
     if args.scenarios:
-        with open(os.path.expanduser(args.scenarios), encoding="utf-8") as f:
+        with open_scenarios(args.scenarios, args.target) as f:
             loopcfg = json.load(f).get("loop", {})
     cap = args.cap if args.cap is not None else loopcfg.get("iterations")
     if not cap:
