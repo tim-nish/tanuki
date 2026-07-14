@@ -45,6 +45,17 @@ fully reversible runs unattended.
   approval — every phase, Phase 3 included.** The loop never merges
   unattended; once approved, the morning gate performs the merge, merge-first
   (below). No iteration writes `main`.
+- **The scheduler plan is pre-approved — no plan gate in the loop.** The
+  attended `/tanuki` "confirm execution before anything runs" plan gate
+  (`docs/tanuki-spec.md`) **does not apply at any phase of the loop**. Once the
+  target is initialized and `tanuki-scheduler plan` has produced the scenario
+  set, that set is authoritative and the drive starts automatically — the
+  operator never re-approves it. This is a corollary of the relocated gate:
+  scenario selection is deterministic (spec-tanuki-scenario-lifecycle), so an
+  execution-confirmation prompt is redundant and would block the unattended
+  run. If genuine human judgment surfaces, it **defers to the morning gate**
+  (per "Questions only in iteration 1" and the defer rules) — never an inline
+  prompt during the run.
 - **Questions only in iteration 1.** Iteration 1 may ask judgment questions and
   records the answers as the **run policy**. From iteration 2 on, the loop
   never asks and never stops for judgment — it applies the policy and

@@ -89,9 +89,10 @@ exists — Tanuki runs with zero configuration.
 scenario budget: `tanuki-drive --estimate` prints the plan — scenario ids,
 models, and an estimated total cost (mean per-scenario cost from prior run
 manifests when available, else `est_cost_per_scenario_usd`) — without driving
-anything. The command surfaces this estimate and lets the user trim or
-approve before execution; `max_scenarios` remains the hard backstop
-regardless of approval. Manifests record actual per-scenario cost
+anything. Attended `/tanuki` surfaces this estimate and lets the user trim or
+approve before execution; `/tanuki-loop` drives its scheduler-chosen set
+without that approval step (§"The plan gate confirms execution", loop exempt).
+`max_scenarios` remains the hard backstop regardless of approval. Manifests record actual per-scenario cost
 (`cost_usd`), so estimates improve with every run.
 
 ## Prototype deviations (explicit, to revisit before any generalization)
@@ -304,10 +305,14 @@ decision pass. UX rules, from dogfooding Tanuki itself:
   (AskUserQuestion — selection beats typing names without completion).
   Adding a target = copying an existing scenarios file; no config edit is
   needed to switch targets.
-- **The plan gate confirms execution before anything runs**: scenario list,
-  models, expected duration (from run history) and turn caps, and *how* it
-  will execute (headless `claude` processes via `tanuki-drive`, normally in
-  the background). Nothing drives until the user answers.
+- **The plan gate confirms execution before anything runs** (attended
+  `/tanuki` only): scenario list, models, expected duration (from run history)
+  and turn caps, and *how* it will execute (headless `claude` processes via
+  `tanuki-drive`, normally in the background). Nothing drives until the user
+  answers. **`/tanuki-loop` is exempt**: its scenario set is chosen
+  deterministically by `tanuki-scheduler plan`, so that set is pre-approved and
+  the loop drives immediately with no execution-confirmation gate — surfacing
+  one would block unattended overnight runs (see `specs/spec-tanuki-loop/SPEC.md`).
 - **Cost is displayed as time and turns, never dollars.** USD figures stay in
   manifests as estimate history; user-facing surfaces (plan gate, progress,
   brief) show duration and turn counts.
