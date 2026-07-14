@@ -84,6 +84,7 @@ exists — Tanuki runs with zero configuration.
 | `low_yield_threshold` | `0` | scheduler | actionable findings at or below which a run counts as low-yield |
 | `brief_max_proposals` | `10` | command (consolidate) | ranked-proposal cap in the brief |
 | `issue_label_prefix` | `tanuki` | command (decide) | label namespace on filed issues: marker `<prefix>` + kind `<prefix>:<kind>` |
+| `policy_source` | unset | ledger policy-surface → command (consolidate + decide only) | opt-in advisory block `{path, files: [≤4 .md]}`: a local policy checkout read read-only and pinned at the brief/gate; never consulted at ingest/drive/extraction, never blocking (specs/spec-policy-advisory) |
 
 **Plan gate (scenario count + cost).** The user never has to pre-compute a
 scenario budget: `tanuki-drive --estimate` prints the plan — scenario ids,

@@ -26,6 +26,7 @@ Usage:
   tanuki-ledger --target <slug> scenario-yield [--runs N]
   tanuki-ledger --target <slug> status   # human-readable "where was I?" view
   tanuki-ledger --target <slug> stats
+  tanuki-ledger --target <slug> policy-surface   # specs/spec-policy-advisory
 
 `findings` and `promote` emit each finding with a computed `priority`
 (P1/P2/P3) so the brief's ordering mirrors `status` without the caller
@@ -54,6 +55,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import date
 
@@ -506,6 +508,95 @@ def cmd_status(args, ledger):
           "recurring")
 
 
+# specs/spec-policy-advisory: the read allowlist is capped and code-enforced.
+POLICY_FILES_CAP = 4
+
+
+def load_policy_source(target):
+    """The optional policy_source block, normal precedence: ~/.tanuki/config.json
+    < the target scenarios file's "defaults" block. None when unset — the
+    feature then does not exist (zero behavior change anywhere)."""
+    block = None
+    path = os.path.join(TANUKI_ROOT, "config.json")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            block = json.load(f).get("policy_source", block)
+    spath = os.path.join(TANUKI_ROOT, "scenarios", f"{target}.scenarios.json")
+    if os.path.exists(spath):
+        with open(spath, encoding="utf-8") as f:
+            block = json.load(f).get("defaults", {}).get("policy_source", block)
+    return block
+
+
+def cmd_policy_surface(args, ledger):
+    """Bounded, pinned, read-only policy reader (specs/spec-policy-advisory §2).
+    Reads ONLY the configured `files` allowlist under policy_source.path, pins
+    the checkout (`git rev-parse HEAD`), and emits numbered lines to stdout so
+    the consolidate/decide pass can quote file:line@commit. Stdout only: a
+    judgment-time input for the brief and the human gate — nothing here reads
+    or writes the ledger, events, or scheduler state, and this subcommand is
+    never invoked at ingest, drive, or extraction. Degradation (enhancer,
+    never a dependency): unset -> {"configured": false}; path unusable -> one
+    stderr line + {"available": false}. A malformed block is a configuration
+    error and fails loud."""
+    block = load_policy_source(args.target)
+    if block is None:
+        print(json.dumps({"configured": False}))
+        return
+    if not isinstance(block, dict) or not isinstance(block.get("path"), str):
+        print("error: policy_source must be an object with a string 'path' and "
+              "a 'files' list — see specs/spec-policy-advisory", file=sys.stderr)
+        sys.exit(2)
+    files = block.get("files")
+    if (not isinstance(files, list) or not files
+            or len(files) > POLICY_FILES_CAP
+            or not all(isinstance(x, str) for x in files)):
+        print(f"error: policy_source.files must be a non-empty list of at most "
+              f"{POLICY_FILES_CAP} repo-relative markdown paths", file=sys.stderr)
+        sys.exit(2)
+    for rel in files:
+        if os.path.isabs(rel) or ".." in rel.split("/") or not rel.endswith(".md"):
+            print(f"error: policy_source.files entry {rel!r} must be a "
+                  "repo-relative .md path (no absolute paths, no '..')",
+                  file=sys.stderr)
+            sys.exit(2)
+    root = os.path.realpath(os.path.expanduser(block["path"]))
+    try:
+        sha = subprocess.run(
+            ["git", "-C", root, "rev-parse", "--short=12", "HEAD"],
+            capture_output=True, text=True, check=True).stdout.strip()
+    except (subprocess.CalledProcessError, OSError):
+        print(f"policy_source unavailable: {block['path']} is missing or not a "
+              "git checkout — advisory off for this run", file=sys.stderr)
+        print(json.dumps({"configured": True, "available": False}))
+        return
+    try:
+        emit_policy_lines(root, sha, files)
+    except BrokenPipeError:
+        # Downstream (e.g. `| head`) closed the pipe — normal, not an error.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+
+
+def emit_policy_lines(root, sha, files):
+    print(f"pin: {os.path.basename(root)}@{sha}")
+    for rel in files:
+        fpath = os.path.realpath(os.path.join(root, rel))
+        # Containment despite symlinks: every allowlist entry must resolve
+        # inside the checkout; anything else is refused, not followed.
+        if not fpath.startswith(root + os.sep):
+            print(f"refused: {rel} resolves outside the policy checkout",
+                  file=sys.stderr)
+            continue
+        if not os.path.isfile(fpath):
+            print(f"skipped: {rel} not present in the policy checkout",
+                  file=sys.stderr)
+            continue
+        print(f"== {rel} @{sha} ==")
+        with open(fpath, encoding="utf-8") as f:
+            for n, line in enumerate(f, 1):
+                print(f"{n}: {line.rstrip()}")
+
+
 def cmd_stats(args, ledger):
     by_status = {}
     for f in ledger["findings"]:
@@ -541,6 +632,7 @@ def main():
     sp.add_argument("--runs", type=int, default=5)
     sub.add_parser("stats")
     sub.add_parser("status")
+    sub.add_parser("policy-surface")
     args = p.parse_args()
 
     if args.cmd == "upsert-finding" and not args.match and not args.title:
@@ -552,7 +644,7 @@ def main():
      "findings": cmd_findings, "upsert-finding": cmd_upsert,
      "promote": cmd_promote, "set-status": cmd_set_status,
      "compact": cmd_compact, "scenario-yield": cmd_scenario_yield,
-     "stats": cmd_stats,
+     "stats": cmd_stats, "policy-surface": cmd_policy_surface,
      "status": cmd_status}[args.cmd](args, ledger)
     return 0
 

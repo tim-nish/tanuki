@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# Fixture for tanuki-ledger policy-surface (specs/spec-policy-advisory):
+#   - unset policy_source -> {"configured": false}, exit 0, no other output
+#     (the feature does not exist; byte-identical pipeline behavior);
+#   - configured -> pin line (<repo>@<sha>) + numbered lines for exactly the
+#     allowlisted files, so the gate can quote file:line@commit;
+#   - allowlist is code-enforced: absolute paths, '..' escapes, non-.md
+#     entries, empty and >4-entry lists are configuration errors (exit 2);
+#   - a symlink escaping the checkout is refused, not followed;
+#   - degradation: missing/non-git path -> exit 0, one stderr line,
+#     {"available": false} (enhancer, never a dependency);
+#   - per-target defaults block overrides the global config block;
+#   - strictly read-only: the policy checkout is untouched.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
+export TANUKI_ROOT="$root/tanuki-home"
+mkdir -p "$TANUKI_ROOT"
+L=("$here/tanuki-ledger" --target t)
+"${L[@]}" init >/dev/null
+
+# --- A policy repo fixture ----------------------------------------------------
+policy="$root/policy-repo"
+mkdir -p "$policy/topics"
+printf '# GLOSSARY\n\n## thing\nstate: decided\n' > "$policy/GLOSSARY.md"
+printf '# LESSONS\n- lesson one\n' > "$policy/LESSONS.md"
+printf 'secret\n' > "$root/outside.md"
+ln -s "$root/outside.md" "$policy/escape.md"
+git -C "$policy" init -q && git -C "$policy" add -A \
+  && git -C "$policy" -c user.email=t@t -c user.name=t commit -qm x
+sha="$(git -C "$policy" rev-parse --short=12 HEAD)"
+
+# --- Unset: feature does not exist -------------------------------------------
+out="$("${L[@]}" policy-surface)"
+[ "$out" = '{"configured": false}' ] || fail "unset should be configured:false, got: $out"
+pass "unset policy_source -> {\"configured\": false}, exit 0"
+
+# --- Configured: pin + numbered allowlisted lines -----------------------------
+cat > "$TANUKI_ROOT/config.json" <<EOF
+{"policy_source": {"path": "$policy", "files": ["GLOSSARY.md", "LESSONS.md"]}}
+EOF
+out="$("${L[@]}" policy-surface)"
+echo "$out" | head -1 | grep -q "^pin: policy-repo@$sha$" || fail "missing/wrong pin line"
+echo "$out" | grep -q "== GLOSSARY.md @$sha ==" || fail "missing GLOSSARY header"
+echo "$out" | grep -q "^3: ## thing$" || fail "missing numbered GLOSSARY line"
+echo "$out" | grep -q "^2: - lesson one$" || fail "missing numbered LESSONS line"
+pass "configured -> pin + numbered lines for the allowlist"
+
+# --- Allowlist violations are loud config errors ------------------------------
+for files in '["/etc/passwd.md"]' '["../up.md"]' '["GLOSSARY.txt"]' '[]' \
+             '["a.md","b.md","c.md","d.md","e.md"]'; do
+  cat > "$TANUKI_ROOT/config.json" <<EOF
+{"policy_source": {"path": "$policy", "files": $files}}
+EOF
+  if "${L[@]}" policy-surface >/dev/null 2>&1; then
+    fail "files=$files should exit 2"
+  fi
+done
+pass "absolute / '..' / non-.md / empty / >4 allowlists all refused (exit 2)"
+
+# --- Symlink escaping the checkout is refused, not followed -------------------
+cat > "$TANUKI_ROOT/config.json" <<EOF
+{"policy_source": {"path": "$policy", "files": ["escape.md"]}}
+EOF
+out="$("${L[@]}" policy-surface 2>"$root/err")"
+grep -q "refused: escape.md" "$root/err" || fail "escape symlink not refused"
+echo "$out" | grep -q "secret" && fail "escape symlink content leaked"
+pass "symlink escaping the checkout refused, content never read"
+
+# --- Degradation: missing / non-git path -> off, exit 0 -----------------------
+cat > "$TANUKI_ROOT/config.json" <<EOF
+{"policy_source": {"path": "$root/nope", "files": ["GLOSSARY.md"]}}
+EOF
+out="$("${L[@]}" policy-surface 2>"$root/err")"
+[ "$out" = '{"configured": true, "available": false}' ] \
+  || fail "missing path should degrade to available:false, got: $out"
+[ "$(wc -l < "$root/err")" = "1" ] || fail "degradation should log exactly one line"
+pass "missing path -> one stderr line, available:false, exit 0"
+
+# --- Per-target defaults block overrides global config ------------------------
+mkdir -p "$TANUKI_ROOT/scenarios"
+policy2="$root/policy2"; mkdir -p "$policy2"
+printf 'override surface\n' > "$policy2/P.md"
+git -C "$policy2" init -q && git -C "$policy2" add -A \
+  && git -C "$policy2" -c user.email=t@t -c user.name=t commit -qm x
+cat > "$TANUKI_ROOT/config.json" <<EOF
+{"policy_source": {"path": "$policy", "files": ["GLOSSARY.md"]}}
+EOF
+cat > "$TANUKI_ROOT/scenarios/t.scenarios.json" <<EOF
+{"defaults": {"policy_source": {"path": "$policy2", "files": ["P.md"]}}}
+EOF
+out="$("${L[@]}" policy-surface)"
+echo "$out" | grep -q "^1: override surface$" || fail "defaults block did not override"
+echo "$out" | grep -q "GLOSSARY" && fail "global config leaked past defaults override"
+pass "target defaults block overrides ~/.tanuki/config.json"
+
+# --- Read-only: the policy checkout is untouched -------------------------------
+[ -z "$(git -C "$policy" status --porcelain)" ] || fail "policy checkout modified"
+pass "policy checkout untouched (read-only)"
+
+echo "ALL PASS"
