@@ -1,0 +1,613 @@
+#!/usr/bin/env python3
+"""tanuki-loop: the deterministic safety substrate for unattended cumulative
+dogfooding (contract: specs/spec-tanuki-loop/SPEC.md). It owns every scriptable
+check, invariant, and rollback so the orchestrating model is responsible ONLY
+for judgment — classification, implementation, and running the target's tests.
+
+Zero dependencies. State lives under ~/.tanuki/<target>/loop/<run>/:
+  state.json   the loop's machine state (SHAs, attempts, quiet streak, …)
+  audit.md     append-only human record of what the loop did
+  policy.json  iteration-1 judgment answers, applied unasked from iteration 2
+  queue.md     the morning review queue (deferred / frozen items)
+A `current` pointer names the active run so subcommands need only --target.
+
+Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
+  init --loop-repo P [--scenarios F] [--cap N] [--base B] [--worktree W]
+       [--phase 1|2|3] [--wall-time S] [--token-budget N] [--policy F]
+       [--attempt-cap K] [--test-cmd "<shell cmd>"]
+       --scenarios reads the per-target "loop" block from the scenarios file
+       ({"test_cmd", "iterations", "wall_time_s", "token_budget",
+        "attempt_cap"}) so a run needs no repo-specific flags; CLI overrides.
+  iter-start                     cap / wall-time / external-modification breakers;
+                                 records the iteration start SHA + ledger snapshot
+  iter-verify [--no-patch]       the four-part integration invariant; records end SHA
+  rollback                       reset --hard start + clean -fd + verify; records removed
+  test                           run the configured test_cmd in the worktree;
+                                 failure is a breaker (skipped if none configured)
+  attempt --finding F            per-finding attempt count; freezes past the cap
+  record-cycle                   two-quiet convergence; new-actionable computed from
+                                 the ledger snapshot and patched from the iteration
+                                 SHAs (--new-actionable / --patched override)
+  defer --finding F --reason "…" append to the morning queue
+  log --audit "…"                append to the audit artifact
+  gate-check                     integration HEAD reachable from base after the merge
+  issue-get --key K              print the issue already materialized for a problem key
+  issue-put --key K --issue N    record a materialized issue (idempotency)
+  policy --finding F --decision "…"   record an iteration-1 judgment answer as
+                                 run policy (applied unasked from iteration 2)
+  finish --reason R              mark the run terminal (converged | cap |
+                                 gate-ratified | aborted) — machine-readable
+  status                         JSON summary for the morning gate
+  dashboard [--follow SECS]      human monitoring view: recent + running
+                                 scenarios, findings discovered/unresolved,
+                                 stop reason, what runs next
+
+Sequencing is guarded: each iteration must move started -> (verified |
+rolled_back) before the next iter-start, and record-cycle refuses an open
+iteration — a skipped check is itself a breaker, never a silent pass.
+
+The token budget is stored but NOT enforced here — token accounting is the
+runtime's; the loop treats it as an operator-supplied ceiling the harness trips.
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+
+TANUKI_ROOT = os.environ.get("TANUKI_ROOT", os.path.expanduser("~/.tanuki"))
+
+
+def git(repo, *args):
+    """Run git in <repo>; return (returncode, stdout-stripped)."""
+    r = subprocess.run(["git", "-C", repo, *args],
+                       capture_output=True, text=True)
+    return r.returncode, (r.stdout or "").strip()
+
+
+def loop_dir(target, run):
+    return os.path.join(TANUKI_ROOT, target, "loop", run)
+
+
+def current_run(target):
+    p = os.path.join(TANUKI_ROOT, target, "loop", "current")
+    if not os.path.exists(p):
+        die("no active loop run; call `init` first")
+    with open(p, encoding="utf-8") as f:
+        return f.read().strip()
+
+
+def load_state(target, run=None):
+    run = run or current_run(target)
+    with open(os.path.join(loop_dir(target, run), "state.json"),
+              encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_state(state):
+    d = loop_dir(state["target"], state["run"])
+    tmp = os.path.join(d, "state.json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+    os.replace(tmp, os.path.join(d, "state.json"))
+
+
+def append(target, run, name, text):
+    with open(os.path.join(loop_dir(target, run), name), "a",
+              encoding="utf-8") as f:
+        f.write(text.rstrip("\n") + "\n")
+
+
+def audit(state, msg):
+    append(state["target"], state["run"], "audit.md",
+           f"- [{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
+
+
+def out(obj):
+    print(json.dumps(obj, indent=2))
+
+
+def die(msg):
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(2)
+
+
+def breaker(state, reason):
+    # Persist machine-readably so a dashboard can answer "why did it stop?"
+    state["last_breaker"] = {"reason": reason,
+                             "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    save_state(state)
+    audit(state, f"BREAKER (immediate stop): {reason}")
+    out({"breaker": reason})
+    sys.exit(3)
+
+
+def ledger_finding_ids(target):
+    """Finding ids currently in the target's ledger (read-only)."""
+    path = os.path.join(TANUKI_ROOT, target, "ledger.json")
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as f:
+        return [fd["id"] for fd in json.load(f).get("findings", [])]
+
+
+# --- subcommands -------------------------------------------------------------
+
+def cmd_init(args):
+    repo = os.path.abspath(os.path.expanduser(args.loop_repo))
+    rc, _ = git(repo, "rev-parse", "--git-dir")
+    if rc != 0:
+        die(f"--loop-repo is not a git repo: {repo}")
+    # Per-target loop config from the scenarios file's "loop" block — so a
+    # run needs no repo-specific flags typed each time. CLI flags override.
+    loopcfg = {}
+    if args.scenarios:
+        with open(os.path.expanduser(args.scenarios), encoding="utf-8") as f:
+            loopcfg = json.load(f).get("loop", {})
+    cap = args.cap if args.cap is not None else loopcfg.get("iterations")
+    if not cap:
+        die("no iteration cap: pass --cap or set loop.iterations in the "
+            "scenarios file")
+    test_cmd = args.test_cmd or loopcfg.get("test_cmd")
+    wall = args.wall_time if args.wall_time is not None \
+        else loopcfg.get("wall_time_s")
+    tokens = args.token_budget if args.token_budget is not None \
+        else loopcfg.get("token_budget")
+    attempt_cap = args.attempt_cap if args.attempt_cap is not None \
+        else loopcfg.get("attempt_cap", 4)
+    base = args.base
+    if not base:
+        rc, base = git(repo, "symbolic-ref", "--short", "HEAD")
+        if rc != 0:
+            die("loop repo has a detached HEAD; pass --base <branch>")
+    rc, base_sha = git(repo, "rev-parse", base)
+    if rc != 0:
+        die(f"cannot resolve base '{base}'")
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    # Same-second re-init must not collide on the branch/run/worktree names.
+    n, suffix = 2, ""
+    while git(repo, "rev-parse", "--verify",
+              f"refs/heads/tanuki-loop/{args.target}/{ts}{suffix}")[0] == 0:
+        suffix, n = f"-{n}", n + 1
+    ts += suffix
+    run = f"loop-{ts}"
+    integration = f"tanuki-loop/{args.target}/{ts}"
+    worktree = os.path.abspath(os.path.expanduser(args.worktree)) if args.worktree \
+        else os.path.join(os.path.dirname(repo), f".tanuki-loop-{args.target}-{ts}")
+    rc, err = git(repo, "worktree", "add", "-b", integration, worktree, base)
+    if rc != 0:
+        die(f"git worktree add failed (no shared-tree fallback): {err}")
+
+    d = loop_dir(args.target, run)
+    os.makedirs(d, exist_ok=True)
+    policy = {}
+    if args.policy and os.path.exists(os.path.expanduser(args.policy)):
+        with open(os.path.expanduser(args.policy), encoding="utf-8") as f:
+            policy = json.load(f)
+    with open(os.path.join(d, "policy.json"), "w", encoding="utf-8") as f:
+        json.dump(policy, f, indent=2)
+    for name, head in (("audit.md", f"# tanuki-loop audit — {run}\n"),
+                       ("queue.md", f"# morning review queue — {run}\n")):
+        with open(os.path.join(d, name), "w", encoding="utf-8") as f:
+            f.write(head)
+    state = {
+        "run": run, "target": args.target, "loop_repo": repo,
+        "base": base, "base_sha": base_sha,
+        "integration_branch": integration, "worktree": worktree,
+        "phase": args.phase, "cap": cap, "attempt_cap": attempt_cap,
+        "wall_start": time.time(), "wall_limit_s": wall,
+        "token_budget": tokens, "test_cmd": test_cmd,
+        "iterations": [], "attempts": {}, "frozen": [], "deferred": [],
+        "quiet_streak": 0, "head_expected": base_sha, "materialized": {},
+    }
+    save_state(state)
+    with open(os.path.join(TANUKI_ROOT, args.target, "loop", "current"),
+              "w", encoding="utf-8") as f:
+        f.write(run)
+    audit(state, f"init: integration {integration} @ {base_sha[:12]} "
+                 f"in worktree {worktree}; cap={cap} phase={args.phase}")
+    out({"run": run, "integration_branch": integration, "worktree": worktree,
+         "base_sha": base_sha})
+
+
+def _worktree_head(state):
+    rc, sha = git(state["worktree"], "rev-parse", "HEAD")
+    return sha if rc == 0 else None
+
+
+def _clean(state):
+    rc, o = git(state["worktree"], "status", "--porcelain")
+    return rc == 0 and o == ""
+
+
+def cmd_iter_start(args):
+    state = load_state(args.target, args.run)
+    if state["iterations"] and state["iterations"][-1].get("phase") == "started":
+        breaker(state, "sequencing violation: previous iteration was never "
+                       "closed by iter-verify or rollback")
+    if len(state["iterations"]) >= state["cap"]:
+        breaker(state, "iteration cap reached")
+    if state["wall_limit_s"] and \
+            time.time() - state["wall_start"] >= state["wall_limit_s"]:
+        breaker(state, "wall-time limit exceeded")
+    head = _worktree_head(state)
+    if head != state["head_expected"]:
+        breaker(state, f"external modification of the integration worktree "
+                       f"(HEAD {head} != expected {state['head_expected']})")
+    if not _clean(state):
+        breaker(state, "external modification: worktree not clean at iteration start")
+    n = len(state["iterations"]) + 1
+    state["iterations"].append({
+        "n": n, "start": head, "end": None, "phase": "started", "removed": [],
+        # Ledger snapshot: record-cycle derives "new actionable" from this,
+        # so convergence never trusts a model-supplied count.
+        "findings_before": ledger_finding_ids(state["target"]),
+    })
+    save_state(state)
+    audit(state, f"iter {n}: start @ {head[:12]}")
+    out({"ok": True, "iteration": n, "start_sha": head})
+
+
+def cmd_iter_verify(args):
+    state = load_state(args.target, args.run)
+    if not state["iterations"] or state["iterations"][-1].get("phase") != "started":
+        breaker(state, "sequencing violation: iter-verify without an open iteration")
+    it = state["iterations"][-1]
+    wt = state["worktree"]
+    start = it["start"]
+    rc, branch = git(wt, "symbolic-ref", "--short", "HEAD")
+    if rc != 0 or branch != state["integration_branch"]:
+        breaker(state, f"integration invariant: HEAD not on {state['integration_branch']} "
+                       f"(got {branch or 'detached'})")
+    head = _worktree_head(state)
+    rc, _ = git(wt, "merge-base", "--is-ancestor", start, head)
+    if rc != 0:
+        breaker(state, "integration invariant: start SHA is not an ancestor of HEAD")
+    if not args.no_patch and head == start:
+        breaker(state, "integration invariant: HEAD == start SHA but a patch was expected")
+    if not _clean(state):
+        breaker(state, "integration invariant: worktree not clean after commit")
+    it["end"] = head
+    it["phase"] = "verified"
+    state["head_expected"] = head
+    save_state(state)
+    audit(state, f"iter {it['n']}: verified, end @ {head[:12]}")
+    out({"ok": True, "iteration": it["n"], "end_sha": head})
+
+
+def cmd_rollback(args):
+    state = load_state(args.target, args.run)
+    if not state["iterations"] or state["iterations"][-1].get("phase") != "started":
+        breaker(state, "sequencing violation: rollback without an open iteration")
+    it = state["iterations"][-1]
+    wt, start = state["worktree"], it["start"]
+    rc, removed = git(wt, "clean", "-nd")        # preview untracked to be removed
+    removed_paths = [ln[len("Would remove "):] for ln in removed.splitlines()
+                     if ln.startswith("Would remove ")]
+    git(wt, "reset", "--hard", start)
+    git(wt, "clean", "-fd")
+    if not _clean(state) or _worktree_head(state) != start:
+        breaker(state, "rollback failed to restore a clean tree at the start SHA")
+    it["removed"] = removed_paths
+    it["phase"] = "rolled_back"
+    state["head_expected"] = start
+    save_state(state)
+    audit(state, f"iter {it['n']}: rolled back to {start[:12]}; "
+                 f"removed untracked: {removed_paths or 'none'}")
+    out({"ok": True, "reset_to": start, "removed": removed_paths})
+
+
+def cmd_attempt(args):
+    state = load_state(args.target, args.run)
+    cur = state["attempts"].get(args.finding, 0)
+    if cur >= state["attempt_cap"]:
+        if args.finding not in state["frozen"]:
+            state["frozen"].append(args.finding)
+            append(state["target"], state["run"], "queue.md",
+                   f"- FROZEN {args.finding}: exceeded {state['attempt_cap']} "
+                   f"fix attempts — needs human review")
+            audit(state, f"froze {args.finding} after {cur} attempts")
+        save_state(state)
+        out({"finding": args.finding, "attempts": cur, "frozen": True})
+        return
+    state["attempts"][args.finding] = cur + 1
+    save_state(state)
+    out({"finding": args.finding, "attempts": cur + 1, "frozen": False})
+
+
+def cmd_test(args):
+    state = load_state(args.target, args.run)
+    cmd = state.get("test_cmd")
+    if not cmd:
+        audit(state, "test: no test_cmd configured — skipped "
+                     "(configure one for unattended runs)")
+        out({"skipped": True})
+        return
+    r = subprocess.run(cmd, shell=True, cwd=state["worktree"],
+                       capture_output=True, text=True)
+    tail = ((r.stdout or "") + (r.stderr or "")).strip()[-300:]
+    if r.returncode != 0:
+        audit(state, f"test FAILED (exit {r.returncode}): …{tail}")
+        breaker(state, f"test failure (exit {r.returncode})")
+    audit(state, "test: passed")
+    out({"ok": True})
+
+
+def cmd_record_cycle(args):
+    state = load_state(args.target, args.run)
+    if not state["iterations"] or state["iterations"][-1].get("phase") == "started":
+        breaker(state, "sequencing violation: record-cycle before the "
+                       "iteration was closed by iter-verify or rollback")
+    it = state["iterations"][-1]
+    # Computed by default — convergence never trusts a model-supplied count.
+    if args.new_actionable is not None:
+        new_actionable = args.new_actionable
+    else:
+        before = set(it.get("findings_before", []))
+        excluded = set(state["frozen"]) | set(state.get("deferred", []))
+        new_actionable = len([f for f in ledger_finding_ids(state["target"])
+                              if f not in before and f not in excluded])
+    if args.patched is not None:
+        patched = args.patched
+    else:
+        patched = bool(it.get("phase") == "verified" and it.get("end")
+                       and it["end"] != it["start"])
+    quiet = new_actionable == 0 and not patched
+    state["quiet_streak"] = state["quiet_streak"] + 1 if quiet else 0
+    converged = state["quiet_streak"] >= 2
+    save_state(state)
+    audit(state, f"cycle: new_actionable={new_actionable} "
+                 f"patched={patched} quiet_streak={state['quiet_streak']}"
+                 + (" -> CONVERGED" if converged else ""))
+    out({"new_actionable": new_actionable, "patched": patched, "quiet": quiet,
+         "quiet_streak": state["quiet_streak"], "converged": converged})
+
+
+def cmd_defer(args):
+    state = load_state(args.target, args.run)
+    if args.finding not in state.setdefault("deferred", []):
+        state["deferred"].append(args.finding)
+    save_state(state)
+    append(state["target"], state["run"], "queue.md",
+           f"- DEFER {args.finding}: {args.reason}")
+    audit(state, f"deferred {args.finding}: {args.reason}")
+    out({"ok": True})
+
+
+def cmd_log(args):
+    state = load_state(args.target, args.run)
+    audit(state, args.audit)
+    out({"ok": True})
+
+
+def cmd_gate_check(args):
+    state = load_state(args.target, args.run)
+    repo, base = state["loop_repo"], state["base"]
+    rc, integ_head = git(repo, "rev-parse", state["integration_branch"])
+    rc2, _ = git(repo, "merge-base", "--is-ancestor",
+                 state["integration_branch"], base)
+    reachable = rc == 0 and rc2 == 0
+    audit(state, f"gate-check: integration reachable from {base}: {reachable}")
+    if not reachable:
+        out({"reachable": False})
+        sys.exit(3)
+    out({"reachable": True, "integration_head": integ_head})
+
+
+def cmd_issue_get(args):
+    state = load_state(args.target, args.run)
+    print(state["materialized"].get(args.key, ""))
+
+
+def cmd_issue_put(args):
+    state = load_state(args.target, args.run)
+    state["materialized"][args.key] = args.issue
+    save_state(state)
+    audit(state, f"materialized problem '{args.key}' -> issue #{args.issue}")
+    out({"ok": True, "key": args.key, "issue": args.issue})
+
+
+def cmd_policy(args):
+    """Record an iteration-1 judgment answer as run policy — the mechanism
+    behind 'questions only in iteration 1': iterations >= 2 consult this map
+    instead of asking."""
+    state = load_state(args.target, args.run)
+    d = loop_dir(state["target"], state["run"])
+    ppath = os.path.join(d, "policy.json")
+    policy = {}
+    if os.path.exists(ppath):
+        with open(ppath, encoding="utf-8") as f:
+            policy = json.load(f) or {}
+    policy.setdefault("decisions", {})[args.finding] = {
+        "decision": args.decision,
+        "iter": len(state["iterations"]) or 1,
+    }
+    with open(ppath, "w", encoding="utf-8") as f:
+        json.dump(policy, f, indent=2)
+    audit(state, f"policy: {args.finding} -> {args.decision}")
+    out({"ok": True, "finding": args.finding})
+
+
+def cmd_finish(args):
+    """Mark the run terminal, machine-readably: converged | cap |
+    gate-ratified | aborted. The dashboard's answer to 'why did it stop?'."""
+    state = load_state(args.target, args.run)
+    state["finished"] = {"reason": args.reason,
+                         "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    save_state(state)
+    audit(state, f"run finished: {args.reason}")
+    out({"ok": True, "reason": args.reason})
+
+
+def cmd_dashboard(args):
+    """Human monitoring view (plain text, one screen). Answers: what ran
+    recently, what is running now, findings discovered/unresolved, why the
+    loop stopped, and what runs next. --follow N re-renders every N seconds."""
+    while True:
+        state = load_state(args.target, args.run)
+        lines = []
+        n_done = len(state["iterations"])
+        elapsed = int(time.time() - state["wall_start"])
+        lines.append(f"tanuki-loop — {state['target']} / {state['run']}")
+        lines.append(f"  integration: {state['integration_branch']}  "
+                     f"(base {state['base']})")
+        lines.append(f"  iterations: {n_done}/{state['cap']} · quiet streak "
+                     f"{state['quiet_streak']}/2 · elapsed {elapsed//60}m")
+
+        # Current / recent scenarios, from the newest iteration's drive.
+        cur = state["iterations"][-1] if state["iterations"] else None
+        if cur:
+            run_dir = os.path.join(TANUKI_ROOT, state["target"], "events",
+                                   f"{state['run']}-iter{cur['n']}")
+            ppath = os.path.join(run_dir, "progress.json")
+            if os.path.exists(ppath):
+                with open(ppath, encoding="utf-8") as f:
+                    p = json.load(f)
+                if p.get("stage") != "complete" and cur["phase"] == "started":
+                    lines.append(f"  NOW: iter {cur['n']} driving "
+                                 f"[{p['done']}/{p['total']}] {p.get('current')}"
+                                 f" — {p.get('stage')} "
+                                 f"({p.get('elapsed_s', 0)}s, "
+                                 f"{p.get('captured_kb', 0)}KB)")
+                lines.append(f"  recent scenarios (iter {cur['n']}):")
+                for r in p.get("results", []):
+                    lines.append(f"    {r['scenario']:<22} {r['status'][:28]:<28}"
+                                 f" {r['events']:>3} events "
+                                 f"{int(r.get('duration_s') or 0):>4}s")
+            elif cur["phase"] == "started":
+                lines.append(f"  NOW: iter {cur['n']} in progress "
+                             "(pre-drive or mining/implementing)")
+
+        # Findings: discovered vs unresolved, straight from the ledger.
+        lpath = os.path.join(TANUKI_ROOT, state["target"], "ledger.json")
+        if os.path.exists(lpath):
+            with open(lpath, encoding="utf-8") as f:
+                findings = json.load(f).get("findings", [])
+            by = {}
+            for fd in findings:
+                by[fd["status"]] = by.get(fd["status"], 0) + 1
+            lines.append(f"  findings: {len(findings)} total — " +
+                         " · ".join(f"{k} {v}" for k, v in sorted(by.items())))
+            unresolved = sorted((fd for fd in findings
+                                 if fd["status"] in ("open", "proposed")
+                                 and not fd.get("tombstone")),
+                                key=lambda fd: -fd.get("recurrence", 0))
+            if unresolved:
+                tops = ", ".join(f"{fd['id']} rec:{fd.get('recurrence', 1)}"
+                                 for fd in unresolved[:6])
+                lines.append(f"  unresolved (top by recurrence): {tops}")
+        if state.get("deferred") or state.get("frozen"):
+            lines.append(f"  deferred: {', '.join(state['deferred']) or '-'}"
+                         f" · frozen: {', '.join(state['frozen']) or '-'}")
+
+        # Scheduler view (specs/spec-tanuki-scenario-lifecycle): per-scenario
+        # exploration state, when the adaptive scheduler is in use.
+        spath = os.path.join(TANUKI_ROOT, state["target"], "scheduler.json")
+        if os.path.exists(spath):
+            with open(spath, encoding="utf-8") as f:
+                sched = json.load(f)
+            by = {}
+            for sid, st in sched.get("scenarios", {}).items():
+                by.setdefault(st["state"], []).append(sid)
+            summary = " · ".join(f"{k} {len(v)}" for k, v in sorted(by.items()))
+            lines.append(f"  scenarios: {summary}")
+            if by.get("unexplored"):
+                lines.append(f"    unexplored: {', '.join(sorted(by['unexplored'])[:6])}")
+            if by.get("regression"):
+                lines.append(f"    regression pool: {', '.join(sorted(by['regression'])[:6])}")
+
+        # Why stopped / what's next.
+        if state.get("finished"):
+            lines.append(f"  STOPPED: {state['finished']['reason']} "
+                         f"(at {state['finished']['at']})")
+        elif state.get("last_breaker"):
+            lines.append(f"  STOPPED: breaker — {state['last_breaker']['reason']}"
+                         f" (at {state['last_breaker']['at']})")
+        elif cur and cur["phase"] == "started":
+            lines.append(f"  NEXT: finish iteration {cur['n']} "
+                         "(implement/test/commit/verify)")
+        elif state["quiet_streak"] >= 2:
+            lines.append("  NEXT: converged — morning gate "
+                         "(review diff, merge integration -> base)")
+        elif n_done >= state["cap"]:
+            lines.append("  NEXT: iteration cap reached — morning gate "
+                         "(review diff, merge integration -> base)")
+        else:
+            lines.append(f"  NEXT: iteration {n_done + 1}")
+
+        print("\n".join(lines))
+        if not args.follow:
+            return
+        print("-" * 64)
+        time.sleep(args.follow)
+
+
+def cmd_status(args):
+    state = load_state(args.target, args.run)
+    out({
+        "run": state["run"], "integration_branch": state["integration_branch"],
+        "worktree": state["worktree"], "base": state["base"],
+        "iterations_done": len(state["iterations"]), "cap": state["cap"],
+        "quiet_streak": state["quiet_streak"], "frozen": state["frozen"],
+        "attempts": state["attempts"],
+        "elapsed_s": round(time.time() - state["wall_start"], 1),
+        "materialized": state["materialized"],
+    })
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--target", required=True)
+    p.add_argument("--run", default=None)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sp = sub.add_parser("init")
+    sp.add_argument("--loop-repo", required=True)
+    sp.add_argument("--scenarios", default=None)
+    sp.add_argument("--cap", type=int, default=None)
+    sp.add_argument("--base", default=None)
+    sp.add_argument("--worktree", default=None)
+    sp.add_argument("--phase", type=int, default=1)
+    sp.add_argument("--wall-time", type=int, default=None)
+    sp.add_argument("--token-budget", type=int, default=None)
+    sp.add_argument("--policy", default=None)
+    sp.add_argument("--attempt-cap", type=int, default=None)
+    sp.add_argument("--test-cmd", default=None)
+
+    sub.add_parser("iter-start")
+    sp = sub.add_parser("iter-verify"); sp.add_argument("--no-patch", action="store_true")
+    sub.add_parser("rollback")
+    sub.add_parser("test")
+    sp = sub.add_parser("attempt"); sp.add_argument("--finding", required=True)
+    sp = sub.add_parser("record-cycle")
+    sp.add_argument("--new-actionable", type=int, default=None)
+    sp.add_argument("--patched", dest="patched", action="store_true")
+    sp.add_argument("--no-patched", dest="patched", action="store_false")
+    sp.set_defaults(patched=None)
+    sp = sub.add_parser("defer")
+    sp.add_argument("--finding", required=True); sp.add_argument("--reason", required=True)
+    sp = sub.add_parser("log"); sp.add_argument("--audit", required=True)
+    sub.add_parser("gate-check")
+    sp = sub.add_parser("issue-get"); sp.add_argument("--key", required=True)
+    sp = sub.add_parser("issue-put")
+    sp.add_argument("--key", required=True); sp.add_argument("--issue", required=True)
+    sp = sub.add_parser("policy")
+    sp.add_argument("--finding", required=True); sp.add_argument("--decision", required=True)
+    sp = sub.add_parser("finish"); sp.add_argument("--reason", required=True)
+    sp = sub.add_parser("dashboard")
+    sp.add_argument("--follow", type=int, default=None)
+    sub.add_parser("status")
+
+    args = p.parse_args()
+    {"init": cmd_init, "iter-start": cmd_iter_start, "iter-verify": cmd_iter_verify,
+     "rollback": cmd_rollback, "test": cmd_test, "attempt": cmd_attempt,
+     "record-cycle": cmd_record_cycle, "defer": cmd_defer, "log": cmd_log,
+     "gate-check": cmd_gate_check, "issue-get": cmd_issue_get,
+     "issue-put": cmd_issue_put, "policy": cmd_policy, "finish": cmd_finish,
+     "dashboard": cmd_dashboard, "status": cmd_status}[args.cmd](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

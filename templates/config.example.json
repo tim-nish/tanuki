@@ -1,0 +1,17 @@
+{
+  "_comment": "Copy to ~/.tanuki/config.json. Every key is optional — these are the built-in defaults (docs/tanuki-spec.md 'Configuration'). A per-target 'defaults' block in ~/.tanuki/scenarios/<target>.scenarios.json overrides this file; CLI flags override both.",
+  "driver_model": "claude-sonnet-5",
+  "model_ceiling": "sonnet",
+  "max_scenarios": 6,
+  "max_turns": 40,
+  "timeout_s": 900,
+  "est_cost_per_scenario_usd": 1.5,
+  "min_recurrence": 3,
+  "min_scenarios": 2,
+  "compaction_unseen_runs": 3,
+  "demote_after": 2,
+  "regression_every": 3,
+  "exploration_quota": 1,
+  "low_yield_threshold": 0,
+  "brief_max_proposals": 10
+}

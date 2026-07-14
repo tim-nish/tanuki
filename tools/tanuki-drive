@@ -1,0 +1,518 @@
+#!/usr/bin/env python3
+"""tanuki-drive: Tanuki's Driver — run dogfooding scenarios against a plugin,
+in disposable clone workspaces, and record Events.
+
+Contract: docs/tanuki-spec.md §1. Zero dependencies beyond git + the claude CLI.
+The real plugin/host repos are never executed against — every scenario gets
+fresh clones (product-lab q_a/15 D9), and isolation is verified after each run
+(snapshot-diff-discard, q_a/16 D6).
+
+Usage:
+  tanuki-drive --target <slug> --plugin <repo> [--plugin-ref <ref>] [--host <repo>] \
+               --scenarios <config.json> --run <run-id> \
+               [--only s1,s2] [--model <model>] [--max-turns N] [--timeout SECS] \
+               [--estimate] [--allow-extra]
+
+Scenario config (JSON):
+  {"defaults": {<config overrides>}?,
+   "scenarios": [{"id": "...", "charter": "...", "prompt": "...",
+                  "host_setup": ["shell cmd", ...]?, "max_turns": N?,
+                  "model": "..."?,
+                  "decision_points": [{"point": "...", "choice": "..."}, ...]?},
+                 ...]}
+
+Charter dimensions (docs/tanuki-spec.md §1, Driver step 3) cover both external
+setup (host repo × skill flow × article purpose × entry state) and
+intra-command decision points (q_a/18 D3). A scenario may *pin* the internal
+forks a single command presents during its flow via "decision_points": a list
+of {"point", "choice"} objects (a bare string is accepted too). The driver
+wraps them into the simulated-user prompt so two charters can run the *same
+command* down *different internal branches* — repeated runs of one command are
+redundant only when they also repeat its internal path.
+
+Configuration (docs/tanuki-spec.md "Configuration"): built-in defaults <
+~/.tanuki/config.json < the scenario file's "defaults" block < CLI flags.
+Per-scenario "model" must stay at or below model_ceiling (haiku < sonnet <
+opus; Fable/Mythos-class is above every ceiling; unknown names fail closed) —
+a frontier driver copes with the friction the run exists to surface.
+
+--estimate prints the plan (scenarios, models, estimated cost from prior
+manifests, falling back to est_cost_per_scenario_usd) as JSON and exits.
+Driving more than max_scenarios in one invocation requires --allow-extra.
+
+Events out: ~/.tanuki/<target>/events/<run>/<scenario>.events.jsonl
+Raw stream:  ~/.tanuki/<target>/events/<run>/<scenario>.raw.jsonl
+Manifest:    ~/.tanuki/<target>/events/<run>/manifest.json
+Progress:    ~/.tanuki/<target>/events/<run>/progress.json — live status
+             (total/done, current scenario + stage, elapsed, per-scenario
+             results), atomically rewritten at every stage transition and
+             ~20s liveness tick, so an orchestrating session can relay real
+             progress while the drive runs in the background.
+Exit: 0 = all scenarios drove to completion (findings may still be plentiful),
+      1 = one or more scenarios failed to execute, 2 = usage error.
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+
+TANUKI_ROOT = os.environ.get("TANUKI_ROOT", os.path.expanduser("~/.tanuki"))
+
+CONFIG_DEFAULTS = {
+    "driver_model": "claude-sonnet-5",
+    "model_ceiling": "sonnet",
+    "max_scenarios": 6,
+    "max_turns": 40,
+    "timeout_s": 900,
+    "est_cost_per_scenario_usd": 1.5,
+}
+
+# Launchable tiers. Fable/Mythos-class is deliberately absent: above every
+# ceiling. Unknown names fail closed (treated as above the ceiling).
+MODEL_TIERS = {"haiku": 1, "sonnet": 2, "opus": 3}
+
+
+def model_tier(model):
+    for name, tier in MODEL_TIERS.items():
+        if name in model.lower():
+            return tier
+    return max(MODEL_TIERS.values()) + 1  # unknown or frontier: fail closed
+
+
+def load_config(scenario_file_data=None):
+    cfg = dict(CONFIG_DEFAULTS)
+    path = os.path.join(TANUKI_ROOT, "config.json")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            cfg.update(json.load(f))
+    if scenario_file_data:
+        cfg.update(scenario_file_data.get("defaults", {}))
+    return cfg
+
+
+def sh(cmd, cwd=None, timeout=None, capture=True):
+    return subprocess.run(cmd, cwd=cwd, timeout=timeout,
+                          capture_output=capture, text=True)
+
+
+def decision_pins(scenario):
+    """Render a scenario's pinned intra-command decision points (q_a/18 D3) as
+    instruction lines. Each pin is {"point", "choice"} (a bare string is taken
+    as the whole instruction). Returns [] when the scenario pins nothing."""
+    lines = []
+    for dp in scenario.get("decision_points") or []:
+        if isinstance(dp, dict):
+            point = str(dp.get("point", "")).strip()
+            choice = str(dp.get("choice", "")).strip()
+            if point and choice:
+                lines.append(f"- When the command reaches «{point}», choose: {choice}")
+            elif choice:
+                lines.append(f"- {choice}")
+        elif isinstance(dp, str) and dp.strip():
+            lines.append(f"- {dp.strip()}")
+    return lines
+
+
+def prepare_workspace(ws, plugin_repo, host_repo, host_setup, plugin_ref=None):
+    """Fresh local clones of plugin and host; returns (plugin_clone, host_clone).
+    A local `git clone` checks out the source repo's *current* branch — so to
+    dogfood a specific plugin commit/branch (e.g. an integration branch that is
+    not the source's checked-out branch), pass plugin_ref and it is checked out
+    in the plugin clone. Without it the driver dogfoods whatever the plugin repo
+    currently has checked out, which is not always what the caller intends.
+
+    host_repo is OPTIONAL: a host exists only for plugins that operate on a
+    repository's content (writing-assistant works over product-lab's files).
+    A self-contained plugin has no host — pass None and the scenario runs in a
+    fabricated empty workspace (git-init'd so the isolation/pollution check
+    still works), which is still never the user's real checkout."""
+    os.makedirs(ws, exist_ok=True)
+    clones = {}
+    for name, src in (("plugin", plugin_repo), ("host", host_repo)):
+        dst = os.path.join(ws, name)
+        if os.path.isdir(dst):
+            sh(["rm", "-rf", dst])
+        if name == "host" and not src:
+            os.makedirs(dst)
+            r = sh(["git", "init", "--quiet", dst])
+            if r.returncode != 0:
+                raise RuntimeError(f"host workspace init failed: {r.stderr.strip()}")
+            clones[name] = dst
+            continue
+        r = sh(["git", "clone", "--quiet", "--no-hardlinks", src, dst])
+        if r.returncode != 0:
+            raise RuntimeError(f"clone {name} failed: {r.stderr.strip()}")
+        clones[name] = dst
+    if plugin_ref:
+        r = sh(["git", "-C", clones["plugin"], "checkout", "--quiet", plugin_ref])
+        if r.returncode != 0:
+            raise RuntimeError(
+                f"plugin checkout {plugin_ref} failed: {r.stderr.strip()}")
+    for cmd in host_setup or []:
+        r = subprocess.run(cmd, shell=True, cwd=clones["host"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"host_setup failed ({cmd}): {r.stderr.strip()}")
+    return clones["plugin"], clones["host"]
+
+
+def pollution_check(clone):
+    r = sh(["git", "status", "--porcelain"], cwd=clone)
+    return r.stdout.strip().splitlines() if r.returncode == 0 else ["<git status failed>"]
+
+
+def normalize(raw_path, run, scenario):
+    """Mechanically map the claude stream-json transcript to Tanuki Events.
+    Never judges — extraction of UX findings is the Miner's job."""
+    events, seq = [], 0
+
+    def emit(etype, detail, evidence=None):
+        nonlocal seq
+        seq += 1
+        events.append({"run": run, "scenario": scenario, "seq": seq,
+                       "type": etype, "detail": detail[:2000],
+                       "evidence": evidence or f"{scenario}.raw.jsonl#{seq}"})
+
+    tool_names = {}  # tool_use id -> name
+    with open(raw_path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            t = obj.get("type")
+            if t == "assistant":
+                for block in obj.get("message", {}).get("content", []):
+                    if block.get("type") == "tool_use":
+                        name = block.get("name", "?")
+                        tool_names[block.get("id")] = name
+                        if name == "Skill" or name.startswith("mcp__"):
+                            emit("skill_start",
+                                 f"{name}: {json.dumps(block.get('input', {}))[:500]}")
+                    elif block.get("type") == "text" and block.get("text", "").strip():
+                        txt = block["text"]
+                        if "FRICTION" in txt.upper():
+                            emit("note", txt)
+            elif t == "user":
+                for block in obj.get("message", {}).get("content", []):
+                    if block.get("type") != "tool_result":
+                        continue
+                    content = block.get("content")
+                    if isinstance(content, list):
+                        content = " ".join(c.get("text", "") for c in content
+                                           if isinstance(c, dict))
+                    content = str(content or "")
+                    name = tool_names.get(block.get("tool_use_id"), "?")
+                    if block.get("is_error"):
+                        lowered = content.lower()
+                        etype = ("permission_block"
+                                 if "permission" in lowered or "denied" in lowered
+                                 else "tool_error")
+                        emit(etype, f"{name}: {content[:800]}")
+            elif t == "result":
+                emit("result", json.dumps({
+                    "subtype": obj.get("subtype"),
+                    "num_turns": obj.get("num_turns"),
+                    "duration_ms": obj.get("duration_ms"),
+                    "total_cost_usd": obj.get("total_cost_usd"),
+                    "is_error": obj.get("is_error"),
+                }))
+                final = obj.get("result")
+                if isinstance(final, str) and final.strip():
+                    emit("note", f"final message: {final[:2000]}")
+    return events
+
+
+def resolve_model(scenario, cfg, cli_model):
+    """Scenario model within the ceiling, or raise."""
+    model = scenario.get("model") or cli_model or cfg["driver_model"]
+    ceiling = cfg["model_ceiling"]
+    if ceiling not in MODEL_TIERS:
+        raise RuntimeError(f"config model_ceiling '{ceiling}' is not one of "
+                           f"{sorted(MODEL_TIERS)}")
+    if model_tier(model) > MODEL_TIERS[ceiling]:
+        raise RuntimeError(
+            f"scenario model '{model}' is above the model_ceiling "
+            f"('{ceiling}'); Tanuki never launches above the ceiling "
+            "(docs/tanuki-spec.md, model ceiling)")
+    return model
+
+
+def historical_means(target):
+    """Mean per-scenario (cost_usd, duration_s) across prior manifests.
+    Either element is None when no history exists."""
+    costs, durations = [], []
+    events_dir = os.path.join(TANUKI_ROOT, target, "events")
+    if os.path.isdir(events_dir):
+        for run in os.listdir(events_dir):
+            mpath = os.path.join(events_dir, run, "manifest.json")
+            if not os.path.isfile(mpath):
+                continue
+            try:
+                with open(mpath, encoding="utf-8") as f:
+                    manifest = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                continue
+            for r in manifest.get("results", []):
+                if isinstance(r.get("cost_usd"), (int, float)):
+                    costs.append(r["cost_usd"])
+                if isinstance(r.get("duration_s"), (int, float)):
+                    durations.append(r["duration_s"])
+    return ((sum(costs) / len(costs)) if costs else None,
+            (sum(durations) / len(durations)) if durations else None)
+
+
+def save_progress(run_dir, prog):
+    """Atomically write <run-dir>/progress.json — the machine-readable status
+    an orchestrating session relays to the user while a backgrounded drive
+    runs (a silent multi-minute wait is a UX bug, not patience)."""
+    prog["updated"] = int(time.time())
+    tmp = os.path.join(run_dir, "progress.json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(prog, f, indent=2)
+    os.replace(tmp, os.path.join(run_dir, "progress.json"))
+
+
+def result_stats(events):
+    """(cost_usd, num_turns) from the run's result event. cost_usd is kept as
+    manifest data for estimate history; user-facing output shows turns/time."""
+    for e in events:
+        if e["type"] == "result":
+            try:
+                d = json.loads(e["detail"])
+                return d.get("total_cost_usd"), d.get("num_turns")
+            except (json.JSONDecodeError, TypeError):
+                return None, None
+    return None, None
+
+
+def drive_scenario(args, scenario, run_dir, cfg, prog=None):
+    sid = scenario["id"]
+    model = resolve_model(scenario, cfg, args.model)
+    ws = os.path.join(TANUKI_ROOT, args.target, "ws", args.run, sid)
+
+    def stage(name, **extra):
+        if prog is not None:
+            prog.update({"current": sid, "stage": name, **extra})
+            save_progress(run_dir, prog)
+
+    print(f"  [{sid}] stage: clone + setup", flush=True)
+    stage("clone + setup", elapsed_s=0, captured_kb=0)
+    plugin_clone, host_clone = prepare_workspace(
+        ws, args.plugin, args.host, scenario.get("host_setup"), args.plugin_ref)
+
+    raw_path = os.path.join(run_dir, f"{sid}.raw.jsonl")
+    pins = decision_pins(scenario)
+    pin_block = ""
+    if pins:
+        pin_block = (
+            "PINNED DECISIONS (intra-command decision points — q_a/18 D3). This "
+            "charter explores one specific internal branch of the command. When "
+            "the command presents any of these choices during its flow (a "
+            "prompt, an AskUserQuestion fork, an offered option), make exactly "
+            "the selection named here and do not deviate; for every other "
+            "choice, behave as a typical user would:\n"
+            + "\n".join(pins) + "\n\n"
+        )
+    prompt = (
+        "You are a simulated user dogfooding a Claude Code plugin "
+        "(exploratory-testing session).\n"
+        f"CHARTER: {scenario['charter']}\n\n"
+        f"{scenario['prompt']}\n\n"
+        f"{pin_block}"
+        "Work only inside this repository. When you are done (or stuck), end "
+        "your final message with a section titled 'FRICTION LOG' listing every "
+        "point of friction you hit as a user: confusing instructions, missing "
+        "guidance, surprising output, unnecessary steps, unclear errors. Be "
+        "specific and factual; one line each; say 'FRICTION LOG: none' if none."
+    )
+    cmd = ["claude", "-p", prompt,
+           "--plugin-dir", plugin_clone,
+           "--output-format", "stream-json", "--verbose",
+           "--model", model,
+           "--max-turns", str(scenario.get("max_turns",
+                                           args.max_turns or cfg["max_turns"])),
+           "--dangerously-skip-permissions"]
+    timeout = args.timeout or cfg["timeout_s"]
+    t0 = time.time()
+    status = "ok"
+    stage("scenario running")
+    stderr_path = os.path.join(run_dir, f"{sid}.stderr.log")
+    # Popen + poll loop so the operator sees liveness (stage + elapsed +
+    # captured bytes) instead of a silent multi-minute block. stderr goes to
+    # a file, not a pipe, to avoid deadlock on a full pipe buffer.
+    with open(raw_path, "w", encoding="utf-8") as out, \
+         open(stderr_path, "w", encoding="utf-8") as err:
+        proc = subprocess.Popen(cmd, cwd=host_clone, stdout=out, stderr=err,
+                                text=True)
+        while True:
+            try:
+                proc.wait(timeout=20)
+                break
+            except subprocess.TimeoutExpired:
+                elapsed = int(time.time() - t0)
+                if elapsed >= timeout:
+                    proc.kill()
+                    proc.wait()
+                    status = f"timeout after {timeout}s"
+                    break
+                size_kb = (os.path.getsize(raw_path) // 1024
+                           if os.path.exists(raw_path) else 0)
+                print(f"  [{sid}] stage: scenario running — {elapsed}s "
+                      f"elapsed, {size_kb}KB captured", flush=True)
+                stage("scenario running", elapsed_s=elapsed, captured_kb=size_kb)
+    if status == "ok" and proc.returncode != 0:
+        with open(stderr_path, encoding="utf-8", errors="replace") as f:
+            tail = f.read().strip()[-300:]
+        status = f"claude exit {proc.returncode}: {tail}"
+
+    print(f"  [{sid}] stage: normalize + verify isolation", flush=True)
+    stage("normalize + verify isolation")
+    events = normalize(raw_path, args.run, sid)
+    # Isolation verification (q_a/16 D6): the plugin clone must stay clean;
+    # host-clone writes are expected (that's the product working) but recorded.
+    plugin_dirt = pollution_check(plugin_clone)
+    if plugin_dirt:
+        events.append({"run": args.run, "scenario": sid, "seq": len(events) + 1,
+                       "type": "note",
+                       "detail": f"pollution: plugin clone dirty: {plugin_dirt[:20]}",
+                       "evidence": f"{sid}/plugin git status"})
+    events_path = os.path.join(run_dir, f"{sid}.events.jsonl")
+    with open(events_path, "w", encoding="utf-8") as f:
+        for e in events:
+            f.write(json.dumps(e, ensure_ascii=False) + "\n")
+
+    cost_usd, num_turns = result_stats(events)
+    return {"scenario": sid, "status": status, "events": len(events),
+            "model": model, "cost_usd": cost_usd, "num_turns": num_turns,
+            "duration_s": round(time.time() - t0, 1),
+            "events_path": events_path,
+            # Verbatim pins, not a count: history must distinguish two runs
+            # of one scenario down different internal branches
+            # (specs/spec-tanuki-scenario-lifecycle, History & coverage).
+            "decision_points": scenario.get("decision_points") or [],
+            "host_clone_changes": len(pollution_check(host_clone)),
+            "plugin_clone_dirty": bool(plugin_dirt), "workspace": ws}
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--target", required=True)
+    p.add_argument("--plugin", required=True)
+    p.add_argument("--plugin-ref", default=None,
+                   help="branch/commit to check out in the plugin clone "
+                        "(default: the plugin repo's current branch)")
+    p.add_argument("--host", default=None,
+                   help="host repo the scenarios run inside; omit for a "
+                        "self-contained plugin (an empty isolated workspace "
+                        "is fabricated)")
+    p.add_argument("--scenarios", required=True)
+    p.add_argument("--run", required=True)
+    p.add_argument("--only", default="")
+    p.add_argument("--model", default=None)
+    p.add_argument("--max-turns", type=int, default=None)
+    p.add_argument("--timeout", type=int, default=None)
+    p.add_argument("--estimate", action="store_true")
+    p.add_argument("--allow-extra", action="store_true")
+    args = p.parse_args()
+
+    with open(args.scenarios, encoding="utf-8") as f:
+        scenario_file = json.load(f)
+    scenarios = scenario_file["scenarios"]
+    cfg = load_config(scenario_file)
+    if args.only:
+        wanted = set(args.only.split(","))
+        scenarios = [s for s in scenarios if s["id"] in wanted]
+        missing = wanted - {s["id"] for s in scenarios}
+        if missing:
+            print(f"error: unknown scenario id(s): {sorted(missing)}", file=sys.stderr)
+            return 2
+    if not scenarios:
+        print("error: no scenarios selected", file=sys.stderr)
+        return 2
+
+    # Ceiling violations are usage errors: fail the whole invocation up front,
+    # in --estimate and real runs alike, not scenario-by-scenario mid-run.
+    try:
+        plan = [{"id": s["id"], "model": resolve_model(s, cfg, args.model),
+                 "max_turns": s.get("max_turns", args.max_turns or cfg["max_turns"]),
+                 "decision_points": len(decision_pins(s))}
+                for s in scenarios]
+    except RuntimeError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    if args.estimate:
+        hist_cost, hist_dur = historical_means(args.target)
+        per = (hist_cost if hist_cost is not None
+               else cfg["est_cost_per_scenario_usd"])
+        est = {
+            "scenarios": plan,
+            "max_scenarios": cfg["max_scenarios"],
+            "over_cap": len(plan) > cfg["max_scenarios"],
+            "basis": ("historical mean of prior runs" if hist_cost is not None
+                      else "configured fallback (no run history)"),
+            # cost is data for history; user-facing surfaces show time/turns
+            "est_cost_per_scenario_usd": round(per, 2),
+            "est_total_cost_usd": round(per * len(plan), 2),
+        }
+        if hist_dur is not None:
+            est["est_duration_per_scenario_s"] = int(hist_dur)
+            est["est_total_duration_s"] = int(hist_dur * len(plan))
+        print(json.dumps(est, indent=2))
+        return 0
+
+    if len(scenarios) > cfg["max_scenarios"] and not args.allow_extra:
+        print(f"error: {len(scenarios)} scenarios exceeds max_scenarios="
+              f"{cfg['max_scenarios']} (the fan-out cap, q_a/15 D1); trim with "
+              "--only, raise max_scenarios in config, or pass --allow-extra",
+              file=sys.stderr)
+        return 2
+
+    run_dir = os.path.join(TANUKI_ROOT, args.target, "events", args.run)
+    os.makedirs(run_dir, exist_ok=True)
+
+    prog = {"run": args.run, "total": len(scenarios), "done": 0,
+            "current": None, "stage": "starting", "results": []}
+    save_progress(run_dir, prog)
+
+    results = []
+    for s in scenarios:
+        print(f"driving {s['id']} …", flush=True)
+        try:
+            results.append(drive_scenario(args, s, run_dir, cfg, prog))
+        except (RuntimeError, OSError) as e:
+            results.append({"scenario": s["id"], "status": f"setup failed: {e}",
+                            "events": 0})
+        r = results[-1]
+        print(f"  {r['status']}  ({r['events']} events, "
+              f"{r.get('num_turns') or '?'} turns, "
+              f"{int(r.get('duration_s') or 0)}s)", flush=True)
+        prog["done"] += 1
+        prog["results"].append({"scenario": r["scenario"], "status": r["status"],
+                                "events": r["events"],
+                                "duration_s": r.get("duration_s")})
+        prog.update({"current": None, "stage": "between scenarios"})
+        save_progress(run_dir, prog)
+
+    manifest = {"run": args.run, "target": args.target,
+                "completed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "config": {k: cfg[k] for k in sorted(cfg)},
+                "plugin": args.plugin, "plugin_ref": args.plugin_ref,
+                "host": args.host, "results": results}
+    with open(os.path.join(run_dir, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    prog["stage"] = "complete"
+    save_progress(run_dir, prog)
+    print(f"manifest: {os.path.join(run_dir, 'manifest.json')}")
+    return 0 if all(r["status"] == "ok" for r in results) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

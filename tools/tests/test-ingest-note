@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Fixture for tanuki-ledger's human-feedback ingest (q_a/18 D5, #1):
+#   - `ingest-note` records feedback verbatim as an unjudged note event
+#     (type: note, source: human, run id manual-<date>), on disk and in the
+#     ledger, with a resolvable evidence pointer — the human classifies nothing;
+#   - the recorded event feeds the normal extraction/dedupe path, so a semantic
+#     re-hit bumps recurrence rather than creating a duplicate finding
+#     (the judgment is the caller's; here we assert the substrate supports it).
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
+export TANUKI_ROOT="$root"
+L=("$here/tanuki-ledger" --target t)
+
+"${L[@]}" init >/dev/null
+
+fb="The README says to look for the fact-sheet, but I want to eliminate every remaining Human Gate."
+out="$("${L[@]}" ingest-note --text "$fb")"
+
+# 1. Recorded verbatim, unjudged, correct provenance + resolvable evidence.
+FB="$fb" printf '%s' "$out" | FB="$fb" python3 -c '
+import json, os, sys
+d = json.load(sys.stdin)
+e = d["event"]
+assert e["type"] == "note" and e["source"] == "human", e
+assert e["run"].startswith("manual-") and len(e["run"]) == len("manual-YYYYMMDD"), e["run"]
+assert e["detail"] == os.environ["FB"], "not verbatim"
+assert e["evidence"] == "{}/ingest#{}".format(e["run"], e["seq"]), e
+assert d["ingest"] == "new"
+' || fail "note not recorded verbatim / wrong provenance / bad evidence"
+pass "feedback recorded verbatim as note/source:human, run manual-<date>, evidence pointer resolvable"
+
+# 2. It landed on disk (events file) AND in the ledger (mineable like any run).
+run="$(echo "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin)["run"])')"
+ef="$root/t/events/$run/ingest.events.jsonl"
+[ -s "$ef" ] || fail "events file $ef missing/empty"
+[ "$("${L[@]}" stats | python3 -c 'import json,sys;print(json.load(sys.stdin)["events"])')" = "1" ] \
+  || fail "note not ingested into ledger"
+pass "note persisted to events/<run>/ingest.events.jsonl and into the ledger (1 event)"
+
+# 3. A same-day second ingest appends with a fresh seq (no collision).
+out2="$("${L[@]}" ingest-note --text "A different observation entirely.")"
+seq2="$(echo "$out2" | python3 -c 'import json,sys;print(json.load(sys.stdin)["event"]["seq"])')"
+[ "$seq2" = "2" ] || fail "second same-day ingest did not increment seq (got $seq2)"
+[ "$(grep -c . "$ef")" = "2" ] || fail "second ingest did not append to the run's events file"
+pass "same-day re-ingest appends with seq=2 (no collision)"
+
+# 4. Substrate supports bump-vs-new: the model's dedupe on a manual re-hit bumps
+#    recurrence instead of creating a duplicate finding.
+"${L[@]}" upsert-finding --title "Eliminate remaining human gates" --kind gap \
+  --evidence "$run/ingest#1" >/dev/null
+"${L[@]}" upsert-finding --match F1 --evidence "$run/ingest#1" >/dev/null   # manual re-hit
+rec="$("${L[@]}" findings | python3 -c 'import json,sys;fs=json.load(sys.stdin);print(len(fs), fs[0]["recurrence"])')"
+[ "$rec" = "1 2" ] || fail "manual re-hit should bump one finding to recurrence 2, got [$rec]"
+pass "manual re-hit bumps recurrence (1 finding, rec 2) rather than duplicating"
+
+echo "all checks passed"

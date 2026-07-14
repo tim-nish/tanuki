@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# Fixture for tanuki-loop's deterministic safety substrate (the layer that must
+# be scripted so an unattended run doesn't rely on the model): sequencing
+# guards, the four-part integration invariant, rollback of tracked + untracked
+# changes, per-finding attempt freezing, tool-computed two-consecutive-quiet
+# convergence, the deterministic test runner, the cap breaker, the
+# external-modification breaker, and the post-merge reachability gate.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+loop="$here/tanuki-loop"
+ledger="$here/tanuki-ledger"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+jget() { python3 -c "import json,sys;print(json.load(sys.stdin)$1)"; }
+
+# A loop repo on main.
+repo="$tmp/repo"
+git init -q "$repo" && git -C "$repo" config user.email t@e && git -C "$repo" config user.name t
+git -C "$repo" checkout -qb main && echo v0 > "$repo/f" && git -C "$repo" add -A && git -C "$repo" commit -qm base
+
+L=("$loop" --target t)
+wt="$("${L[@]}" init --loop-repo "$repo" --cap 8 | jget '["worktree"]')"
+[ -d "$wt" ] || fail "worktree not created at $wt"
+gwt() { git -C "$wt" "$@"; }
+pass "init created the integration worktree"
+
+# --- happy path: start -> commit -> verify ----------------------------------
+"${L[@]}" iter-start >/dev/null
+echo v1 > "$wt/f"; gwt commit -qam iter1
+"${L[@]}" iter-verify | jget '["ok"]' | grep -q True || fail "iter-verify should pass on a real commit"
+pass "iter-start / commit / iter-verify happy path"
+
+# --- sequencing guard: iter-start with the previous iteration still open -----
+"${L[@]}" iter-start >/dev/null
+rc=0; "${L[@]}" iter-start >/tmp/seq.json 2>&1 || rc=$?
+[ "$rc" = "3" ] && grep -q "sequencing violation" /tmp/seq.json || fail "expected sequencing breaker on double iter-start"
+pass "sequencing guard: an unclosed iteration blocks the next iter-start"
+
+# --- integration invariant catches "no patch when one was expected" ----------
+rc=0; "${L[@]}" iter-verify >/tmp/iv.json 2>&1 || rc=$?
+[ "$rc" = "3" ] && grep -q "HEAD == start" /tmp/iv.json || fail "expected no-patch invariant breaker (exit 3)"
+"${L[@]}" iter-verify --no-patch | jget '["ok"]' | grep -q True || fail "--no-patch should accept an unchanged HEAD"
+pass "integration invariant: breaks on missing patch; --no-patch accepts no-op"
+
+# --- rollback removes tracked AND untracked iteration changes -----------------
+"${L[@]}" iter-start >/dev/null
+echo dirty > "$wt/f"             # tracked modification
+echo junk > "$wt/untracked.txt"  # untracked new file
+"${L[@]}" rollback >/dev/null
+[ "$(cat "$wt/f")" = "v1" ] || fail "rollback did not restore the tracked file"
+[ ! -e "$wt/untracked.txt" ] || fail "rollback left an untracked file behind"
+[ -z "$(gwt status --porcelain)" ] || fail "tree not clean after rollback"
+pass "rollback restores tracked file and removes untracked file"
+
+# --- external-modification breaker at the top of an iteration ----------------
+echo tampered > "$wt/f"   # external edit, no iter-start yet
+rc=0; "${L[@]}" iter-start >/tmp/is.json 2>&1 || rc=$?
+[ "$rc" = "3" ] && grep -q "external modification" /tmp/is.json || fail "expected external-modification breaker"
+gwt checkout -- f   # undo tamper
+pass "external modification of the worktree trips a breaker"
+
+# --- per-finding attempts: 4 allowed, then frozen ----------------------------
+# (F99: must not collide with real ledger ids used below — frozen findings are
+# rightly excluded from record-cycle's new-actionable count)
+for i in 1 2 3 4; do
+  "${L[@]}" attempt --finding F99 | jget '["frozen"]' | grep -q False || fail "attempt $i should not be frozen"
+done
+"${L[@]}" attempt --finding F99 | jget '["frozen"]' | grep -q True || fail "5th attempt should freeze F99"
+pass "attempt cap: 4 attempts allowed, then the finding freezes"
+
+# --- tool-computed record-cycle + two-consecutive-quiet convergence ----------
+# Busy cycle: a real finding lands in the ledger AND a patch is committed.
+"$ledger" --target t init >/dev/null
+"${L[@]}" iter-start >/dev/null
+"$ledger" --target t upsert-finding --title "New friction" --kind friction \
+  --evidence "r1/s1#1" >/dev/null
+echo v2 > "$wt/f"; gwt commit -qam iter-busy
+"${L[@]}" iter-verify >/dev/null
+"${L[@]}" record-cycle > /tmp/rc1.json
+grep -q '"new_actionable": 1' /tmp/rc1.json && grep -q '"patched": true' /tmp/rc1.json \
+  || fail "busy cycle not computed from ledger+SHAs: $(cat /tmp/rc1.json)"
+[ "$(jget '["converged"]' < /tmp/rc1.json)" = "False" ] || fail "busy cycle must not converge"
+pass "record-cycle computes new-actionable from the ledger and patched from SHAs"
+
+# Quiet cycle 1: nothing new, no patch.
+"${L[@]}" iter-start >/dev/null
+"${L[@]}" iter-verify --no-patch >/dev/null
+"${L[@]}" record-cycle | jget '["converged"]' | grep -q False || fail "one quiet cycle must not converge"
+# Quiet cycle 2 -> converged. A deferred finding must not block convergence.
+"${L[@]}" iter-start >/dev/null
+"$ledger" --target t upsert-finding --title "Spec-shaped" --kind gap \
+  --evidence "r2/s1#1" >/dev/null
+"${L[@]}" defer --finding F2 --reason "spec decision, no policy answer" >/dev/null
+"${L[@]}" iter-verify --no-patch >/dev/null
+"${L[@]}" record-cycle | jget '["converged"]' | grep -q True \
+  || fail "two consecutive quiet cycles (with only a deferred finding) must converge"
+pass "convergence needs two consecutive quiet cycles; deferred findings don't block it"
+
+# --- deterministic test runner ------------------------------------------------
+"${L[@]}" init --loop-repo "$repo" --cap 1 --test-cmd "test -f f" >/dev/null
+"${L[@]}" test | jget '["ok"]' | grep -q True || fail "configured passing test_cmd should pass"
+"${L[@]}" init --loop-repo "$repo" --cap 1 --test-cmd "false" >/dev/null
+rc=0; "${L[@]}" test >/tmp/tc.json 2>&1 || rc=$?
+[ "$rc" = "3" ] && grep -q "test failure" /tmp/tc.json || fail "failing test_cmd must be a breaker"
+pass "test subcommand: passes on ok test_cmd, breaker on failure"
+
+# --- init --scenarios pulls the per-target loop block; CLI overrides ---------
+cat > "$tmp/scen.json" <<'EOF'
+{"loop": {"test_cmd": "test -f f", "iterations": 7, "wall_time_s": 1234}}
+EOF
+"${L[@]}" init --loop-repo "$repo" --scenarios "$tmp/scen.json" >/dev/null
+st="$("${L[@]}" status)"
+[ "$(echo "$st" | jget '["cap"]')" = "7" ] || fail "cap not taken from loop block"
+"${L[@]}" test | jget '["ok"]' | grep -q True || fail "test_cmd not taken from loop block"
+"${L[@]}" init --loop-repo "$repo" --scenarios "$tmp/scen.json" --cap 3 >/dev/null
+[ "$("${L[@]}" status | jget '["cap"]')" = "3" ] || fail "CLI --cap should override loop block"
+rc=0; "${L[@]}" init --loop-repo "$repo" >/tmp/nocap.json 2>&1 || rc=$?
+[ "$rc" = "2" ] || fail "init without any cap source must be a usage error"
+pass "init --scenarios reads loop block (cap+test_cmd); CLI overrides; no-cap errors"
+
+# --- policy + finish + breaker persistence + dashboard ------------------------
+"${L[@]}" policy --finding F2 --decision "defer to morning: spec altitude" >/dev/null
+run="$(cat "$TANUKI_ROOT/t/loop/current")"
+grep -q "spec altitude" "$TANUKI_ROOT/t/loop/$run/policy.json" || fail "policy.json not recorded"
+"${L[@]}" finish --reason cap >/dev/null
+# Scheduler state present -> dashboard shows the per-scenario section.
+mkdir -p "$TANUKI_ROOT/t"
+cat > "$TANUKI_ROOT/t/scheduler.json" <<'EOF'
+{"scenarios": {"s1": {"state": "active"}, "s2": {"state": "unexplored"},
+               "s3": {"state": "regression"}}, "runs_recorded": []}
+EOF
+"${L[@]}" dashboard > /tmp/dash.txt
+grep -q "STOPPED: cap" /tmp/dash.txt || fail "dashboard missing finish reason"
+grep -q "findings: " /tmp/dash.txt || fail "dashboard missing findings summary"
+grep -q "iterations: 0/3" /tmp/dash.txt || fail "dashboard missing iteration count"
+grep -q "scenarios: active 1 · regression 1 · unexplored 1" /tmp/dash.txt \
+  || fail "dashboard missing scheduler section"
+grep -q "unexplored: s2" /tmp/dash.txt || fail "dashboard missing unexplored list"
+pass "policy recorded; finish + dashboard show stop reason, findings, iterations, scheduler"
+
+# --- cap breaker + gate-check on a fresh cap-1 run ----------------------------
+"${L[@]}" init --loop-repo "$repo" --cap 1 >/dev/null
+wt2="$("${L[@]}" status | jget '["worktree"]')"
+"${L[@]}" iter-start >/dev/null
+echo v3 > "$wt2/f"; git -C "$wt2" commit -qam iter1
+"${L[@]}" iter-verify >/dev/null
+rc=0; "${L[@]}" iter-start >/tmp/cap.json 2>&1 || rc=$?
+[ "$rc" = "3" ] && grep -q "iteration cap reached" /tmp/cap.json || fail "expected cap breaker"
+pass "cap breaker fires once the fixed iteration ceiling is hit"
+
+integ="$("${L[@]}" status | jget '["integration_branch"]')"
+git -C "$repo" merge -q --no-ff "$integ" -m "merge integration"
+"${L[@]}" gate-check | jget '["reachable"]' | grep -q True || fail "gate-check should see integration reachable from base"
+pass "gate-check confirms integration reachable from base after merge"
+
+echo "all checks passed"

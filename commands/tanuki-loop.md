@@ -1,0 +1,220 @@
+Unattended cumulative dogfooding: run the Tanuki cycle (drive → mine →
+classify → implement → test → commit) over and over on a dedicated
+integration branch, in an isolated worktree, until it converges or hits a
+fixed iteration cap — then hand one batch to the operator's morning review.
+The Human Gate is relocated, not removed: the loop **prepares**, the operator
+**ratifies**. Contract: `${CLAUDE_PLUGIN_ROOT}/specs/spec-tanuki-loop/SPEC.md`. Reuses the Tanuki
+pipeline (`${CLAUDE_PLUGIN_ROOT}/docs/tanuki-spec.md`) and the *logic* of /triage-gh,
+/implement-direct, /implement-story, /commit-groups — never their GitHub-issue
+substrate.
+
+Every `tanuki-drive` / `tanuki-ledger` here is the executable under
+`${CLAUDE_PLUGIN_ROOT}/tools/` (not on PATH — invoke by full path).
+
+Argument handling ($ARGUMENTS) — **the normal invocation is just
+`/tanuki-loop` or `/tanuki-loop --iterations 5`**; repo-specific settings
+live in the scenarios file's `"loop"` block, stored once, never retyped:
+- *(empty target)*: **target picker**, exactly like /tanuki — list every
+  `~/.tanuki/scenarios/*.scenarios.json` target with its one-line
+  ledger status and ask which to run. One target → use it without asking.
+- `<target>`: a slug with a scenario config at
+  `~/.tanuki/scenarios/<target>.scenarios.json`. The config's `plugin` repo is where
+  the integration branch and worktree live — findings about that plugin are
+  fixed there.
+- **Per-target loop config** comes from the scenarios file's `"loop"` block —
+  `{"test_cmd", "iterations", "wall_time_s", "token_budget", "attempt_cap"}` —
+  which `tanuki-loop init --scenarios <file>` reads directly. CLI flags
+  override it per run. **First run of a target without a `"loop"` block:**
+  derive a sensible `test_cmd` from the repo (its test runner / check
+  scripts, minus checks that already fail on the base branch — those are
+  baseline, not regressions), confirm it with the user once, and offer to
+  save the block into the scenarios file so every later run is zero-config.
+- `--iterations N`: overrides the config cap — a safety ceiling, not the
+  success condition. Phase 1 commissioning uses a small cap (1–2).
+- `--wall-time <dur>` / `--token-budget <N>`: override the config ceilings
+  (breakers). Always ensure they're set (config or flag) for an unattended
+  (Phase 2/3) run.
+- `--phase 1|2|3` (default 1): supervision level only — same loop throughout.
+  Phase 1 runs supervised; Phase 2/3 run headless
+  (`--dangerously-skip-permissions`). **Questions are asked only in iteration 1**
+  and recorded as the **run policy**; iterations ≥ 2 never ask and never stop
+  for judgment. A headless run supplies the policy up front (a prior run's
+  `policy.json` or `--policy <file>`); absent an answer the item is deferred,
+  not asked. No phase files issues overnight or merges to `main`.
+
+## 0. Preflight (once)
+
+1. Resolve the target scenarios config; expand `~` in its `plugin`/`host`
+   paths. The `plugin` repo is the **loop repo**.
+2. **Isolation + state — `tanuki-loop init`.** Run `${CLAUDE_PLUGIN_ROOT}/tools/tanuki-loop
+   --target <target> init --loop-repo <plugin-repo> --scenarios
+   <scenarios-file> --phase <P> [overrides: --cap/--test-cmd/--wall-time/
+   --token-budget] [--policy <file>]` — the `"loop"` block supplies the
+   repo-specific settings. It creates the
+   integration branch `tanuki-loop/<target>/<ts>` in a **dedicated worktree
+   outside the repo**, records the base SHA, and initializes `state.json`,
+   `audit.md`, `policy.json`, and the morning queue. It never touches the
+   operator's normal working tree; if the worktree cannot be created it stops
+   (no shared-tree fallback). It prints the worktree path + integration branch;
+   all iteration work happens in that worktree.
+3. Run `${CLAUDE_PLUGIN_ROOT}/tools/tanuki-preflight <plugin-worktree>`; on failure stop
+   and report (lint is not the loop's job). `tanuki-ledger --target <target>
+   init` (idempotent).
+
+## 1. Iterate (until convergence or the cap or a breaker)
+
+Each iteration is bracketed by `tanuki-loop`; the model does only steps 3–4
+(judgment). Sequencing is guarded by the tool — an out-of-order subcommand
+(e.g. a second `iter-start` on an unclosed iteration) is itself a breaker, so
+a skipped check can never silently pass. Begin with `tanuki-loop --target
+<target> iter-start` — it trips the cap / wall-time / external-modification
+breakers, records the start SHA, and snapshots the ledger (exit 3 +
+`{"breaker": …}` stops the run). Then:
+
+1. **Drive** Tanuki against the **integration-branch state**: `tanuki-drive
+   --plugin <loop-repo> --plugin-ref <integration-branch> … --run <run>-iterN`,
+   so this iteration dogfoods the changes prior iterations landed (`--plugin-ref`
+   clones the integration commit, not the repo's checked-out branch).
+   **Scenario selection (deterministic — supersedes hand-derived rotation).**
+   Each iteration's scenario set comes from `tanuki-scheduler --target <t>
+   plan --scenarios <file> --run <run>-iterN` (`sync` first if the matrix
+   changed; `--run` ties the persisted plan record to the run): verify set →
+   exploration quota (unexplored branches — the anti-Goodhart guard) → active
+   rotation → due regression members. Drive the planned subset via `--only`.
+   After mining (step 2) run `tanuki-scheduler record-run --run <run>-iterN` —
+   demotion/promotion is the tool's arithmetic. When the plan reports an
+   empty unexplored pool across the whole run, note it in the audit: the
+   morning gate should offer a generation pass (new charters, plan-gated —
+   frontier work, but attended). Record the plan + its `quota_met` in the
+   audit (`tanuki-loop log --audit "iterN plan: …"`).
+   While the drive runs in the background, follow /tanuki's
+   **background-liveness rule**: read `<run-dir>/progress.json` on a periodic
+   check (~2–3 min) and relay one compact `[done/total] …` line per update —
+   never a bare "waiting" turn. In a supervised (Phase 1) run this is the
+   operator's window into the loop; unattended, the same lines go to the
+   audit trail.
+2. **Mine.** Ingest events; run extraction + frontier dedupe into the ledger
+   (`${CLAUDE_PLUGIN_ROOT}/docs/tanuki-spec.md` §2). Recurrence updates as normal.
+3. **Classify (internal — forked rules copied from /triage-gh; no GitHub).**
+   Altitude test: **spec** = alters an invariant others depend on; **story** =
+   a plan across files; **direct** = small, self-evident. Bias **toward
+   implementation** — `direct`/`story` → work list. **Defer only** when a fix
+   is physically impossible, self-contradictory, or blocked by missing
+   credentials/config — plus (iteration ≥ 2 / headless) a `spec` decision the
+   run policy can't answer. Iteration 1 may ask the operator and MUST record
+   each answer via `tanuki-loop policy --finding <Fid> --decision "…"` (the
+   mechanism behind "questions only in iteration 1" — an unrecorded answer
+   is a policy gap iteration 2 will defer on); iterations ≥ 2 never ask — an
+   unanswered judgment defers. Record every defer with its reason.
+4. **Implement** each work-list item on the integration worktree from the
+   finding text (forked implement rules; no issue, no PR). Before implementing
+   a finding call `tanuki-loop attempt --finding <Fid>`; if it returns
+   `frozen: true` (past the attempt cap) skip it — already queued for the
+   morning.
+5. **Test / verify** — `tanuki-loop test` runs the configured `test_cmd` in
+   the worktree; failure → immediate-stop breaker. If none is configured it
+   reports skipped and the model verifies manually (always configure one for
+   an unattended run).
+6. **Commit** with forked commit-groups logic — intent-scoped commits on the
+   integration branch (no push, no PR). Then `tanuki-loop iter-verify`
+   (`--no-patch` when no change was expected) — the four-part integration
+   invariant; it records the end SHA and breaks on any violation.
+7. Append the iteration to the audit artifact (start/end SHA, findings
+   bumped/new, items implemented, items deferred). Loop back to step 1.
+
+If an iteration fails after step 4, run `tanuki-loop rollback` (`reset --hard`
+to the start SHA + `git clean -fd` + clean-tree verify, removed paths logged),
+so untracked files don't leak forward and prior successes are untouched, then
+apply the breaker.
+
+**Convergence (stop early — the cap is only a ceiling).** After each closed
+iteration call `tanuki-loop record-cycle` (no counts — the tool computes
+new-actionable from the `iter-start` ledger snapshot minus frozen/deferred,
+and "patched" from the iteration SHAs; convergence never trusts a
+model-supplied count). A cycle is **quiet** when there are no new actionable
+findings and no accepted patch — **and it counts toward the streak only if
+its scheduler plan reported `quota_met: true`** (a run that skipped
+exploration while unexplored branches remained cannot manufacture
+convergence; spec-tanuki-scenario-lifecycle's loop amendment). **Two
+consecutive quiet cycles** (the tool reports `converged: true` at streak ≥ 2)
+end the run — one quiet drive can be luck. A finding may be re-fixed up to its attempt cap (default 4), then it is
+frozen (via `tanuki-loop attempt`); a frozen finding is not a new actionable
+one.
+
+**Breakers.**
+- *Immediate stop* (freeze integration branch, write audit, report): test
+  failure · implementation-command failure · commit failure · integration
+  invariant violation (the four-part check) · iteration cap reached ·
+  wall-time exceeded · token budget exceeded · external modification of the
+  integration worktree.
+- *Defer / freeze, keep going*: a fix physically impossible,
+  self-contradictory, or blocked by missing credentials/config → **defer**; a
+  `spec` decision with no run-policy answer → **defer**; a finding past its
+  attempt cap → **freeze** (that finding only). Keep processing other
+  independent actionable findings; stop **only** if a deferred/frozen item
+  blocks *all* remaining work.
+
+## 2. Morning gate (attended — invariant in every phase)
+
+Do not end at "here is what ran." Present, for one review:
+- the **integration branch diff** (the relocated Human Gate — `git diff
+  <base SHA>..<integration HEAD>`),
+- the **morning review queue** (deferred spec / judgment items, each with its
+  reason), and
+- the **audit artifact** (per-iteration SHAs, auto-decisions, convergence or
+  breaker reason).
+
+Then, behind the operator's single approval, run **merge-first and idempotent**
+— nothing outward-facing until the merge is a fact:
+1. **Final tests** on integration HEAD; abort the gate on failure.
+2. **Merge `integration → main`** (executed by the gate only after approval;
+   never unattended).
+3. **Verify** with `tanuki-loop gate-check` (integration HEAD reachable from
+   base). Only past this does anything outward-facing run.
+4. **Materialize** issues — **one per resolved problem** (keyed by the lead
+   ledger finding id, or a `+`-joined set), describing **what landed**, each
+   body stamped `tanuki-loop: <run-id>/<problem-key>`. Before creating,
+   `tanuki-loop issue-get --key <problem-key>` (and a marker search) returns
+   any existing issue; create only the missing ones and record each with
+   `tanuki-loop issue-put --key <problem-key> --issue <n>` — a mid-gate death
+   re-runs from here without duplicating.
+5. **Link** each to the merge commit, **close as completed**, reconcile the
+   board to Done (where project-board tooling is configured).
+6. Remove the loop worktree (`git worktree remove`); leave the integration
+   branch for later branch cleanup once the merge is confirmed. Close the run
+   machine-readably: `tanuki-loop finish --reason gate-ratified` (likewise
+   `converged` / `cap` / `aborted` when a run ends without a gate).
+
+## Monitoring (the operator's window)
+
+`${CLAUDE_PLUGIN_ROOT}/tools/tanuki-loop --target <target> dashboard` renders one screen:
+iterations done/cap + quiet streak, the currently-driving scenario and stage
+(live from `progress.json`), the latest iteration's per-scenario results,
+findings discovered vs unresolved (from the ledger), deferred/frozen items,
+why the loop stopped (breaker / finished reason), and what runs next. Add
+`--follow 10` for a self-refreshing terminal view during an unattended run —
+it reads only state files, so it's always safe to run alongside the loop.
+The dashboard is the live view; for the cross-run long view (per-scenario
+execution history, transitions, coverage, selection history) use
+`tanuki-scheduler --target <t> history` (surfaced as `/tanuki <t> --history`).
+
+The deferred queue is handed back for a normal attended triage sitting —
+the loop never decides a spec alternative on its own.
+
+## Rules
+
+- Never write `main` during iterations; never touch the operator's normal
+  working tree; never create GitHub issues / labels / PRs / story files during
+  iterations. Outward-facing artifacts are written only at the morning gate,
+  after the merge, describing what landed.
+- The ledger is the source of truth overnight.
+- Cumulative on one integration branch; never fan out per-iteration branches
+  from `main`.
+- Rollback is `reset --hard <start SHA>` **plus** `git clean -fd` in the loop
+  worktree only, recorded in the audit; prior successes are untouched.
+- Questions only in iteration 1 (recorded as run policy); iterations ≥ 2 never
+  ask — unanswered judgment defers. A finding is re-fixed up to its attempt
+  cap (default 4), then frozen — never a whole-loop stop.
+- `integration → main` runs only after explicit approval, merge-first and
+  idempotent. Phases differ only in supervision and cap — one code path,
+  Phase-3-ready from the first run.

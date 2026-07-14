@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# Fixture for tanuki-ledger's growth policy (q_a/18 A2, #3):
+#   - capped evidence: a finding hit many times keeps a bounded exemplar set
+#     (oldest + most recent), never one pointer per occurrence;
+#   - first_seen / last_seen tracking on findings and events;
+#   - tombstone compaction of the dead tail: dismissed, or accepted-and-unseen-
+#     for-N-runs (verified fixed), collapse to one-line tombstones that still
+#     block dedupe resurfacing; fresh dismissals and open findings are spared;
+#   - idempotent (re-compacting a tombstone is a no-op).
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
+export TANUKI_ROOT="$root"
+L=("$here/tanuki-ledger" --target t)
+jqpy() { python3 -c "import json,sys;d=json.load(sys.stdin);print($1)"; }
+
+"${L[@]}" init >/dev/null
+
+# --- Capped evidence + first/last_seen ---------------------------------------
+"${L[@]}" upsert-finding --title "Chronic friction" --kind friction \
+  --evidence "r001/scenA#1" >/dev/null
+for i in $(seq -f "%03g" 2 51); do
+  "${L[@]}" upsert-finding --match F1 --evidence "r$i/scenA#$i" >/dev/null
+done
+f1="$("${L[@]}" findings | python3 -c '
+import json,sys
+f = next(x for x in json.load(sys.stdin) if x["id"]=="F1")
+print(len(f["evidence"]), f["recurrence"],
+      "r001/scenA#1" in f["evidence"], "r051/scenA#051" in f["evidence"],
+      "first_seen" in f, "last_seen" in f)
+')"
+[ "$f1" = "5 51 True True True True" ] \
+  || fail "capped evidence / recurrence / seen-dates wrong: [$f1]"
+pass "51 hits -> 5 exemplar pointers (oldest+recent kept), recurrence=51, first/last_seen set"
+
+# --- Events get first_seen/last_seen, runs capped ----------------------------
+ev="$(mktemp)"; trap 'rm -rf "$root" "$ev"' EXIT
+for i in $(seq -f "%03g" 1 8); do
+  echo "{\"run\":\"r$i\",\"scenario\":\"s\",\"seq\":1,\"type\":\"tool_error\",\"detail\":\"same error\",\"evidence\":\"r$i/s#1\"}"
+done > "$ev"
+"${L[@]}" ingest "$ev" >/dev/null
+evstat="$("${L[@]}" stats | jqpy 'd["events"]')"
+[ "$evstat" = "1" ] || fail "expected 1 deduped event, got $evstat"
+runs_capped="$(python3 -c '
+import json
+d=json.load(open("'"$root"'/t/ledger.json"))
+e=next(iter(d["events"].values()))
+print(len(e["runs"]) <= 5, e["count"], "first_seen" in e, "last_seen" in e)
+')"
+[ "$runs_capped" = "True 8 True True" ] \
+  || fail "event runs not capped / dates missing: [$runs_capped]"
+pass "8 same-error events -> 1 record, count=8, runs capped, first/last_seen set"
+
+# --- Compaction setup: findings in each disposition --------------------------
+"${L[@]}" set-status --id F1 --status dismissed >/dev/null   # stale dismissed
+"${L[@]}" upsert-finding --title "Accepted, fix landed" --kind gap \
+  --evidence "r001/scenB#1" >/dev/null                        # F2 -> accept, stale
+"${L[@]}" set-status --id F2 --status accepted >/dev/null
+"${L[@]}" upsert-finding --title "Just dismissed" --kind papercut \
+  --evidence "r054/scenC#1" >/dev/null                        # F3 -> dismiss, fresh
+"${L[@]}" set-status --id F3 --status dismissed >/dev/null
+"${L[@]}" upsert-finding --title "Still open" --kind friction \
+  --evidence "r001/scenD#1" >/dev/null                        # F4 -> open, spared
+
+# No run dirs after last_seen_run yet -> nothing is stale.
+out="$("${L[@]}" compact)"
+echo "$out" | grep -q "nothing to compact" || fail "compacted with no elapsed runs: $out"
+pass "compaction spares everything before N runs of absence elapse"
+
+# Three runs land after r051/r001 (but not after r054) -> F1,F2 stale; F3 fresh.
+mkdir -p "$root/t/events/r052" "$root/t/events/r053" "$root/t/events/r054"
+out="$("${L[@]}" compact)"
+echo "$out" | grep -q "compacted 2 finding" || fail "expected 2 tombstones: $out"
+verdict="$("${L[@]}" findings | python3 -c '
+import json,sys
+d={x["id"]:x for x in json.load(sys.stdin)}
+F1,F2,F3,F4=d["F1"],d["F2"],d["F3"],d["F4"]
+print(F1.get("tombstone"), F1.get("resolution"), F1["evidence"]==[],
+      F2.get("tombstone"), F2.get("resolution"),
+      F3.get("tombstone"), F4.get("tombstone"),
+      len(d)==4)   # all four still present for dedupe
+')"
+[ "$verdict" = "True dismissed True True fixed None None True" ] \
+  || fail "compaction verdict wrong: [$verdict]"
+pass "stale dismissed->tombstone(dismissed), accepted+gone->tombstone(fixed), fresh dismissed & open spared, all retained for dedupe"
+
+# --- Idempotent --------------------------------------------------------------
+out="$("${L[@]}" compact)"
+echo "$out" | grep -q "nothing to compact" || fail "re-compaction not idempotent: $out"
+pass "re-compacting existing tombstones is a no-op"
+
+# --- Manual runs interleave chronologically (regression) ----------------------
+# ingest-note runs are named 'manual-<YYYYMMDD>', which sorts lexically AFTER
+# every '<YYYYMMDD>-<rand>' driven run; run ordering must key on the embedded
+# date or an accepted finding last seen via manual feedback never verifies
+# fixed (driven-run absence would count as zero forever).
+M=("$here/tanuki-ledger" --target m)
+"${M[@]}" init >/dev/null
+"${M[@]}" upsert-finding --title "Manual-reported friction" --kind friction \
+  --evidence "manual-20260713/ingest#1" >/dev/null
+"${M[@]}" set-status --id F1 --status accepted >/dev/null
+mkdir -p "$root/m/events/manual-20260713" \
+         "$root/m/events/20260714-a1" "$root/m/events/20260715-a1" \
+         "$root/m/events/20260716-a1"
+out="$("${M[@]}" compact --unseen-runs 3)"
+echo "$out" | grep -q "tombstoned F1 (fixed)" \
+  || fail "manual-run ordering: 3 quiet driven runs after a manual note must verify the fix: $out"
+pass "accepted finding last seen in a manual ingest verifies fixed after 3 quiet driven runs"
+
+# A manual note the day AFTER a driven run counts as the latest sighting.
+"${M[@]}" upsert-finding --title "Still recurring" --kind friction \
+  --evidence "20260714-a1/scenA#1" >/dev/null
+"${M[@]}" upsert-finding --match F2 --evidence "manual-20260717/ingest#1" >/dev/null
+last="$("${M[@]}" findings | python3 -c '
+import json,sys
+print(next(x for x in json.load(sys.stdin) if x["id"]=="F2")["last_seen_run"])')"
+[ "$last" = "manual-20260717" ] || fail "latest_run ignored a newer manual run: [$last]"
+pass "a later manual sighting updates last_seen_run past earlier driven runs"
+
+echo "all checks passed"

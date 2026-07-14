@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# Fixture for the adaptive scenario scheduler + registry
+# (specs/spec-tanuki-scenario-lifecycle): registry register/resolve with
+# parent-dir walk, first-sync backward compat (all active), later-sync new ids
+# unexplored, plan priority order + exploration quota, demotion hysteresis
+# (2 consecutive low-yield runs), re-promotion on an actionable finding,
+# regression-pool cadence, and tanuki-ledger scenario-yield attribution.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+sched="$here/tanuki-scheduler"
+ledger="$here/tanuki-ledger"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+jget() { python3 -c "import json,sys;print(json.load(sys.stdin)$1)"; }
+S=("$sched" --target t)
+
+# --- registry: register + resolve with parent walk ----------------------------
+mkdir -p "$tmp/work/myplugin/sub/dir"
+"${S[@]}" register --repo "$tmp/work/myplugin" >/dev/null
+[ "$("$sched" resolve --cwd "$tmp/work/myplugin/sub/dir" | jget '["target"]')" = "t" ] \
+  || fail "resolve should walk up to the registered repo"
+[ "$("$sched" resolve --cwd "$tmp/work" | jget '["target"]')" = "None" ] \
+  || fail "resolve above the repo must yield null"
+pass "registry: register + resolve (parent-dir walk, null outside)"
+
+# --- matrix + first sync = all active (backward compat) -----------------------
+cat > "$tmp/m.json" <<'EOF'
+{"scenarios": [{"id":"a","charter":"c","prompt":"p"},
+               {"id":"b","charter":"c","prompt":"p"},
+               {"id":"c","charter":"c","prompt":"p"}]}
+EOF
+"${S[@]}" sync --scenarios "$tmp/m.json" | jget '["first_sync"]' | grep -q True || fail "first sync flag"
+[ "$("${S[@]}" status | jget '["by_state"]["active"]')" = "['a', 'b', 'c']" ] \
+  || fail "first sync must mark a hand-written matrix all active"
+pass "first sync: hand-written matrix -> all active (no behavior change)"
+
+# --- later sync: new id enters unexplored -------------------------------------
+cat > "$tmp/m.json" <<'EOF'
+{"scenarios": [{"id":"a","charter":"c","prompt":"p"},
+               {"id":"b","charter":"c","prompt":"p"},
+               {"id":"c","charter":"c","prompt":"p"},
+               {"id":"d-new","charter":"c","prompt":"p"}]}
+EOF
+"${S[@]}" sync --scenarios "$tmp/m.json" >/dev/null
+"${S[@]}" status | jget '["by_state"]["unexplored"]' | grep -q "d-new" \
+  || fail "later sync must mark new ids unexplored"
+pass "later sync: generated scenario enters unexplored"
+
+# --- adhoc- prefix reserved ----------------------------------------------------
+cat > "$tmp/bad.json" <<'EOF'
+{"scenarios": [{"id":"adhoc-1","charter":"c","prompt":"p"}]}
+EOF
+rc=0; "${S[@]}" sync --scenarios "$tmp/bad.json" >/dev/null 2>&1 || rc=$?
+[ "$rc" = "2" ] || fail "adhoc- matrix id must be rejected"
+pass "adhoc- prefix is reserved for one-off scenarios"
+
+# --- plan: exploration quota + priority order ---------------------------------
+plan="$("${S[@]}" plan --scenarios "$tmp/m.json" --max 3)"
+echo "$plan" | jget '["plan"]' | grep -q "d-new" || fail "plan must include the unexplored scenario (quota)"
+echo "$plan" | jget '["quota_met"]' | grep -q True || fail "quota_met should be true"
+pass "plan honors the exploration quota (unexplored always scheduled while any exist)"
+
+# --- record-run: hysteresis demotion needs 2 consecutive low-yield runs -------
+"$ledger" --target t init >/dev/null
+mkrun() {  # mkrun <run-id> <scenario...>: manifest with those scenarios driven
+  local run="$1"; shift
+  mkdir -p "$TANUKI_ROOT/t/events/$run"
+  python3 - "$TANUKI_ROOT/t/events/$run/manifest.json" "$@" <<'PY'
+import json, sys
+path, scens = sys.argv[1], sys.argv[2:]
+json.dump({"results": [{"scenario": s, "events": 2} for s in scens]}, open(path, "w"))
+PY
+}
+mkrun r001 a b
+"${S[@]}" record-run --run r001 >/dev/null           # low yield #1 for a,b
+[ "$("${S[@]}" status | jget '["scenarios"]["a"]["state"]')" = "active" ] \
+  || fail "one low-yield run must NOT demote (hysteresis)"
+mkrun r002 a b
+"$ledger" --target t upsert-finding --title "b friction" --kind friction \
+  --evidence "r002/b#1" >/dev/null                    # b actionable in r002
+"${S[@]}" record-run --run r002 >/dev/null            # a: low #2 -> demote; b: reset
+st="$("${S[@]}" status)"
+[ "$(echo "$st" | jget '["scenarios"]["a"]["state"]')" = "regression" ] \
+  || fail "2 consecutive low-yield runs must demote to regression"
+[ "$(echo "$st" | jget '["scenarios"]["b"]["state"]')" = "active" ] \
+  || fail "an actionable finding must keep the scenario active"
+pass "demotion hysteresis: 2 consecutive low runs demote; a finding resets the streak"
+
+# --- regression cadence + re-promotion ----------------------------------------
+for r in r003 r004 r005; do mkrun "$r" b; "${S[@]}" record-run --run "$r" >/dev/null; done
+plan="$("${S[@]}" plan --scenarios "$tmp/m.json" --max 6)"
+echo "$plan" | jget '["plan"]' | grep -q "'a'" || fail "regression member due after regression_every runs must be planned"
+pass "regression pool: member re-enters the plan after regression_every undriven runs"
+mkrun r006 a
+"$ledger" --target t upsert-finding --title "a regressed" --kind friction \
+  --evidence "r006/a#1" >/dev/null
+"${S[@]}" record-run --run r006 | jget '["transitions"]["a"]' | grep -q "active" \
+  || fail "an actionable finding must re-promote a regression scenario"
+pass "re-promotion: a finding pulls a regression scenario back to active"
+
+# --- history: persisted yield snapshots, transitions, plans, coverage ---------
+"${S[@]}" plan --scenarios "$tmp/m.json" --run r007 >/dev/null   # persisted plan record
+hist="$("${S[@]}" history --json)"
+echo "$hist" | python3 -c '
+import json, sys
+h = json.load(sys.stdin)
+rows = {r["scenario"]: r for r in h["scenarios"]}
+# execution counts + last run from manifests: a in r001,r002,r006; b in r001-r005
+assert rows["a"]["driven"] == 3 and rows["b"]["driven"] == 5, (rows["a"]["driven"], rows["b"]["driven"])
+assert rows["a"]["last_run"] == "r006" and rows["b"]["last_run"] == "r005"
+# cumulative recurrence flows from the ledger
+assert rows["b"]["cumulative_recurrence"] >= 1
+# selection history persisted with reasons + run id
+plans = h["selection_history"]
+assert any(p.get("run") == "r007" and "quota_met" in p for p in plans), plans
+# coverage buckets exist
+assert "unexplored" in h["coverage"] and "productive" in h["coverage"]
+# a: actionable finding in r006 (its last 3 executions) -> recently productive;
+# b: last 3 executions r003-r005 all quiet -> not productive
+assert "a" in h["coverage"]["productive"] and "b" not in h["coverage"]["productive"]
+' || fail "repo-wide history wrong"
+pass "history (repo-wide): executions, cumulative recurrence, coverage, persisted plans"
+
+"${S[@]}" history --scenario a --json > /tmp/hista.json
+python3 - /tmp/hista.json <<'PY' || fail "per-scenario history wrong"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["state"] == "active"          # re-promoted in r006
+runs = [e["run"] for e in d["executions"]]
+assert runs == ["r001", "r002", "r006"], runs
+# exact (snapshotted) yield: no approx flag on recorded runs
+assert all(e["approx"] is False for e in d["executions"])
+r6 = d["executions"][-1]
+assert r6["actionable"] == 1 and r6["findings"] == ["F2"], r6
+# transition log carries why + when
+kinds = [(t["run"], t["to"]) for t in d["transitions"]]
+assert ("r002", "regression") in kinds and ("r006", "active") in kinds, kinds
+reasons = " ".join(t["reason"] for t in d["transitions"])
+assert "consecutive low-yield" in reasons and "actionable finding" in reasons
+PY
+pass "history (--scenario): exact per-execution yield, transition log with reasons"
+
+# --- scenario-yield attribution -------------------------------------------------
+"$ledger" --target t scenario-yield --runs 9 > /tmp/yield.json
+python3 - /tmp/yield.json <<'PY' || fail "scenario-yield attribution wrong"
+import json, sys
+y = json.load(open(sys.argv[1]))
+r2 = next(h for h in y["b"] if h["run"] == "r002")
+assert r2["actionable"] == 1 and r2["findings"] == ["F1"], r2
+r1 = next(h for h in y["a"] if h["run"] == "r001")
+assert r1["actionable"] == 0, r1
+PY
+pass "tanuki-ledger scenario-yield attributes findings to (run, scenario) correctly"
+
+echo "all checks passed"

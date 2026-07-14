@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Fixture for tanuki-drive's intra-command decision points (q_a/18 D3, #2):
+# a scenario may PIN the internal forks a command presents so two charters run
+# the SAME command down DIFFERENT internal branches.
+#
+# Asserts:
+#   1. decision_pins() renders {point,choice} objects and bare strings, and is
+#      empty when a scenario pins nothing;
+#   2. two scenarios pinning the same decision to different choices render
+#      different instruction blocks (the different-internal-path guarantee);
+#   3. --estimate reports the per-scenario decision_points count without
+#      driving anything (the plan surfaces the pinned dimension).
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+drive="$here/tanuki-drive"
+
+# 1 + 2: unit-check decision_pins by importing the module (no .py extension, so
+# load it explicitly).
+python3 - "$drive" <<'PY' || fail "decision_pins rendering/divergence"
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("td", sys.argv[1])
+spec = importlib.util.spec_from_loader("td", loader)
+td = importlib.util.module_from_spec(spec); loader.exec_module(td)
+
+f2 = td.decision_pins({"decision_points": [{"point": "framework", "choice": "F2"}]})
+f4 = td.decision_pins({"decision_points": [{"point": "framework", "choice": "F4"}]})
+assert f2 and f4 and f2 != f4, "same pin, different choice must diverge"
+assert td.decision_pins({"decision_points": ["choose deep"]}) == ["- choose deep"]
+assert td.decision_pins({}) == [], "no pins -> empty"
+assert td.decision_pins({"decision_points": [{"point": "", "choice": ""}]}) == []
+PY
+pass "decision_pins renders objects+strings, diverges on choice, empty when unpinned"
+
+# 3: --estimate surfaces the decision_points count per scenario, no execution.
+cfg="$(mktemp)"; trap 'rm -f "$cfg"' EXIT
+cat > "$cfg" <<'EOF'
+{"scenarios": [
+  {"id": "pinned-a", "charter": "c", "prompt": "p",
+   "decision_points": [{"point": "framework", "choice": "F2"}]},
+  {"id": "pinned-b", "charter": "c", "prompt": "p",
+   "decision_points": [{"point": "framework", "choice": "F4"}]},
+  {"id": "unpinned", "charter": "c", "prompt": "p"}
+]}
+EOF
+
+root="$(mktemp -d)"; trap 'rm -f "$cfg"; rm -rf "$root"' EXIT
+plan="$(TANUKI_ROOT="$root" "$drive" --target t --plugin /tmp --host /tmp \
+          --scenarios "$cfg" --run r --estimate)"
+echo "$plan" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+got = {s["id"]: s["decision_points"] for s in d["scenarios"]}
+assert got == {"pinned-a": 1, "pinned-b": 1, "unpinned": 0}, got
+' || fail "--estimate decision_points counts wrong"
+pass "--estimate reports per-scenario decision_points without driving"
+
+echo "all checks passed"

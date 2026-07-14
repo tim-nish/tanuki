@@ -1,0 +1,13 @@
+{
+  "name": "tanuki",
+  "displayName": "Tanuki 🦝",
+  "version": "0.1.0",
+  "description": "Automated dogfooding for Claude Code plugins: drive branching user scenarios in disposable clones, mine Events into deduplicated Findings with recurrence tracking, and consolidate chronic ones into a ranked Proposal brief for human review. Proposals-only — nothing merges, nothing is auto-filed.",
+  "author": {
+    "name": "tim-nish",
+    "url": "https://github.com/tim-nish"
+  },
+  "repository": "https://github.com/tim-nish/tanuki",
+  "license": "MIT",
+  "keywords": ["dogfooding", "testing", "plugin-development", "automation"]
+}

@@ -1,0 +1,516 @@
+#!/usr/bin/env python3
+"""tanuki-ledger: Tanuki's findings ledger — the deterministic substrate under
+the Miner and Consolidator.
+
+Contract: docs/tanuki-spec.md §2–3. Zero dependencies. The ledger does the
+arithmetic (ingest, exact dedupe, recurrence counts, promotion thresholds);
+semantic judgment (what is a finding, whether a candidate matches an existing
+one, what to propose) belongs to the orchestrating model and never happens here
+(deterministic-tool-over-llm-in-loop).
+
+Ledger: ~/.tanuki/<target>/ledger.json
+  {"events": {fingerprint: {…, count, first_seen, last_seen, runs[]}},
+   "findings": [{id, title, kind, first_seen, last_seen, recurrence,
+                 evidence[], scenarios[], status, last_seen_run}]}
+
+Usage:
+  tanuki-ledger --target <slug> init
+  tanuki-ledger --target <slug> ingest <events.jsonl> [...]
+  tanuki-ledger --target <slug> ingest-note --text "<human feedback>"
+  tanuki-ledger --target <slug> findings [--status open|proposed|accepted|dismissed]
+  tanuki-ledger --target <slug> upsert-finding --title T --kind K \
+      --evidence run/scenario#seq[,…] [--match F3] [--note "…"]
+  tanuki-ledger --target <slug> promote [--min-recurrence 3] [--min-scenarios 2]
+  tanuki-ledger --target <slug> set-status --id F3 --status open|proposed|accepted|dismissed
+  tanuki-ledger --target <slug> compact [--unseen-runs N]
+  tanuki-ledger --target <slug> scenario-yield [--runs N]
+  tanuki-ledger --target <slug> status   # human-readable "where was I?" view
+  tanuki-ledger --target <slug> stats
+
+`findings` and `promote` emit each finding with a computed `priority`
+(P1/P2/P3) so the brief's ordering mirrors `status` without the caller
+recomputing it.
+
+Ledger growth policy (docs/tanuki-spec.md "Ledger growth policy", q_a/18 A2).
+`ledger.json` may grow indefinitely on disk, bounded by three invariants:
+  1. Read-path invariant — no LLM stage ever loads ledger.json whole. Every
+     model-facing access goes through a bounded subcommand VIEW (`findings`,
+     `promote`, `status`, `stats`), never a `cat ledger.json`. `load()` is an
+     internal mechanic, not a model surface; token cost is governed by the
+     views, so file size is a disk concern only.
+  2. Capped evidence — an event or finding keeps first_seen, last_seen, an
+     occurrence count, and at most EVIDENCE_CAP exemplar raw.jsonl pointers
+     (oldest + most recent), never one pointer per occurrence. `ingest` and
+     `upsert-finding` cap; the raw logs remain the complete archive.
+  3. Compaction of the dead tail — `compact` turns findings that are
+     dismissed, or accepted-and-unseen-for-N-runs (verified fixed), into
+     one-line tombstones (id, resolution, count): kept so nothing resurfaces
+     as new on dedupe, but stripped of per-run detail (which lives in
+     raw.jsonl).
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import sys
+from datetime import date
+
+TANUKI_ROOT = os.environ.get("TANUKI_ROOT", os.path.expanduser("~/.tanuki"))
+KINDS = ("friction", "papercut", "gap")
+STATUSES = ("open", "proposed", "accepted", "dismissed")
+# Capped-evidence invariant (docs/tanuki-spec.md "Ledger growth policy"): a
+# record keeps at most this many exemplar raw.jsonl pointers — the oldest (the
+# first_seen exemplar) plus the most recent — never one per occurrence.
+EVIDENCE_CAP = 5
+# open: in the ledger, below the promotion bar
+# proposed: in a brief, awaiting the human's decision
+# accepted: human said yes (issue filed / will fix); recurrence still tracked
+#           so a later run can verify the fix landed
+# dismissed: human said no; kept for dedupe so it never resurfaces as new
+
+
+def priority(f):
+    """P1/P2/P3 for display. Deterministic, no judgment."""
+    if f["recurrence"] >= 3 or len(f["scenarios"]) >= 2:
+        return "P1"
+    if f["recurrence"] == 2 or f["kind"] == "gap":
+        return "P2"
+    return "P3"
+
+CONFIG_DEFAULTS = {"min_recurrence": 3, "min_scenarios": 2,
+                   "compaction_unseen_runs": 3}
+
+
+def cap_evidence(pointers, cap=EVIDENCE_CAP):
+    """Bound an evidence/runs list to a handful of exemplars while preserving
+    chronology: dedupe (keeping first-seen order), then keep the oldest pointer
+    plus the most recent (cap-1). The raw logs stay the complete archive."""
+    seen, uniq = set(), []
+    for p in pointers:
+        if p and p not in seen:
+            seen.add(p)
+            uniq.append(p)
+    if len(uniq) <= cap:
+        return uniq
+    return [uniq[0]] + uniq[-(cap - 1):]
+
+
+def run_of(pointer):
+    """The run id embedded in an evidence pointer 'run/scenario#seq'."""
+    return pointer.split("/", 1)[0] if pointer else None
+
+
+def run_key(run):
+    """Chronological sort key for a run id. Driven runs are '<YYYYMMDD>-<rand>'
+    but manual ingests are 'manual-<YYYYMMDD>' (ingest-note), so plain lexical
+    order is NOT chronological ('manual-…' would sort after every dated run
+    forever, starving compaction's absence counting). Key on the embedded
+    8-digit date wherever it appears; an id with no date sorts oldest."""
+    m = re.search(r"\d{8}", run or "")
+    return (m.group(0) if m else "00000000", run or "")
+
+
+def latest_run(pointers, prior=None):
+    """Chronologically-greatest run id across pointers and an optional prior
+    (by run_key — see there for why lexical max is not enough)."""
+    runs = [r for r in (run_of(p) for p in pointers) if r]
+    if prior:
+        runs.append(prior)
+    return max(runs, key=run_key) if runs else prior
+
+
+def load_config():
+    """Promotion thresholds: built-ins overridden by ~/.tanuki/config.json
+    (docs/tanuki-spec.md "Configuration"). CLI flags override both."""
+    cfg = dict(CONFIG_DEFAULTS)
+    path = os.path.join(TANUKI_ROOT, "config.json")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            cfg.update(json.load(f))
+    return cfg
+
+
+def ledger_path(target):
+    return os.path.join(TANUKI_ROOT, target, "ledger.json")
+
+
+def load(target):
+    path = ledger_path(target)
+    if not os.path.exists(path):
+        return {"events": {}, "findings": []}
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save(target, ledger):
+    path = ledger_path(target)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(ledger, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def cmd_init(args, ledger):
+    save(args.target, ledger)
+    print(f"ledger ready: {ledger_path(args.target)}")
+
+
+def ingest_event(ledger, e):
+    """Record one event into the ledger; exact duplicates (same
+    scenario+type+detail) collapse to a count. Returns 'new' or 'dup'. Raw
+    events are facts — nothing here is a finding yet."""
+    today = date.today().isoformat()
+    fp = hashlib.sha1(
+        f"{e.get('scenario')}|{e.get('type')}|{e.get('detail')}"
+        .encode()).hexdigest()[:16]
+    if fp in ledger["events"]:
+        rec = ledger["events"][fp]
+        rec["count"] += 1
+        # Capped runs: exemplars, not one entry per occurrence.
+        rec["runs"] = cap_evidence(rec.get("runs", []) + [e.get("run")])
+        rec.setdefault("first_seen", rec.get("last_seen", today))
+        rec["last_seen"] = today
+        return "dup"
+    e["count"], e["runs"] = 1, [e.get("run")]
+    e["first_seen"] = e["last_seen"] = today
+    ledger["events"][fp] = e
+    return "new"
+
+
+def cmd_ingest(args, ledger):
+    """Record events; exact duplicates collapse to a count."""
+    new, dup = 0, 0
+    for path in args.files:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                if ingest_event(ledger, json.loads(line)) == "new":
+                    new += 1
+                else:
+                    dup += 1
+    save(args.target, ledger)
+    print(f"ingested: {new} new event(s), {dup} exact duplicate(s) collapsed")
+
+
+def cmd_ingest_note(args, ledger):
+    """Record human feedback verbatim as an Event — the human never classifies
+    (docs/tanuki-spec.md "Human feedback ingest", q_a/18 D5). Writes an
+    unjudged `note` event (source: human, run id manual-<date>) to the run's
+    events file and into the ledger. Semantic judgment — whether it yields a
+    finding, its kind, bump-vs-new — is the caller's downstream extraction +
+    dedupe pass, exactly as for a driven run; this tool only stores the fact."""
+    text = args.text.strip()
+    if not text:
+        print("error: --text must be non-empty feedback", file=sys.stderr)
+        sys.exit(2)
+    run = "manual-" + date.today().strftime("%Y%m%d")
+    run_dir = os.path.join(TANUKI_ROOT, args.target, "events", run)
+    os.makedirs(run_dir, exist_ok=True)
+    events_file = os.path.join(run_dir, "ingest.events.jsonl")
+    # Sequence within the day so repeated same-day ingests don't collide.
+    seq = 1
+    if os.path.exists(events_file):
+        with open(events_file, encoding="utf-8") as f:
+            seq = sum(1 for line in f if line.strip()) + 1
+    e = {"run": run, "scenario": "ingest", "seq": seq, "type": "note",
+         "source": "human", "detail": text, "evidence": f"{run}/ingest#{seq}"}
+    with open(events_file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(e, ensure_ascii=False) + "\n")
+    status = ingest_event(ledger, e)
+    save(args.target, ledger)
+    # Emit where the event landed so the command can run extraction + dedupe on
+    # this run dir immediately and report the delta.
+    print(json.dumps({"run": run, "events_file": events_file,
+                      "ingest": status, "event": e},
+                     ensure_ascii=False, indent=2))
+
+
+def with_priority(findings):
+    """Attach the computed priority so JSON consumers never recompute it."""
+    return [{**f, "priority": priority(f)} for f in findings]
+
+
+def cmd_findings(args, ledger):
+    rows = ledger["findings"]
+    if args.status:
+        rows = [f for f in rows if f["status"] == args.status]
+    print(json.dumps(with_priority(rows), indent=2, ensure_ascii=False))
+
+
+def cmd_upsert(args, ledger):
+    evidence = [e.strip() for e in args.evidence.split(",") if e.strip()]
+    scenarios = sorted({e.split("#")[0].split("/")[-1] for e in evidence})
+    if args.match:
+        for f in ledger["findings"]:
+            if f["id"] == args.match:
+                before = f["recurrence"]
+                f["recurrence"] += 1
+                # Capped evidence: bounded exemplars, chronology preserved
+                # (existing pointers first, new appended), never one per bump.
+                f["evidence"] = cap_evidence(f["evidence"] + evidence)
+                f["scenarios"] = sorted(set(f["scenarios"] + scenarios))
+                f["last_seen"] = date.today().isoformat()
+                f["last_seen_run"] = latest_run(evidence, f.get("last_seen_run"))
+                if args.note:
+                    f.setdefault("notes", []).append(args.note)
+                save(args.target, ledger)
+                # before->after so the Miner can report the run delta without
+                # a separate pre-mine snapshot (spec §2).
+                print(f"bumped {f['id']}: recurrence={before}->{f['recurrence']}, "
+                      f"scenarios={len(f['scenarios'])}")
+                return
+        print(f"error: no finding {args.match}", file=sys.stderr)
+        sys.exit(2)
+    if args.kind not in KINDS:
+        print(f"error: kind must be one of {KINDS}", file=sys.stderr)
+        sys.exit(2)
+    fid = f"F{max((int(f['id'][1:]) for f in ledger['findings']), default=0) + 1}"
+    today = date.today().isoformat()
+    finding = {"id": fid, "title": args.title, "kind": args.kind,
+               "first_seen": today, "last_seen": today, "recurrence": 1,
+               "evidence": cap_evidence(evidence), "scenarios": scenarios,
+               "status": "open", "last_seen_run": latest_run(evidence)}
+    if args.note:
+        finding["notes"] = [args.note]
+    ledger["findings"].append(finding)
+    save(args.target, ledger)
+    print(f"created {fid}: {args.title}")
+
+
+def cmd_promote(args, ledger):
+    """List findings that clear the promotion bar. Chronic = recurrence >=
+    min-recurrence; breadth = seen in >= min-scenarios distinct scenarios.
+    Listing only — status changes go through set-status after the human gate."""
+    cfg = load_config()
+    min_rec = (args.min_recurrence if args.min_recurrence is not None
+               else cfg["min_recurrence"])
+    min_scen = (args.min_scenarios if args.min_scenarios is not None
+                else cfg["min_scenarios"])
+    out = [f for f in ledger["findings"] if f["status"] == "open" and
+           (f["recurrence"] >= min_rec or
+            len(f["scenarios"]) >= min_scen)]
+    out.sort(key=lambda f: (-f["recurrence"], -len(f["scenarios"])))
+    print(json.dumps(with_priority(out), indent=2, ensure_ascii=False))
+
+
+def cmd_set_status(args, ledger):
+    if args.status not in STATUSES:
+        print(f"error: status must be one of {STATUSES}", file=sys.stderr)
+        sys.exit(2)
+    for f in ledger["findings"]:
+        if f["id"] == args.id:
+            f["status"] = args.status
+            save(args.target, ledger)
+            print(f"{f['id']} -> {args.status}")
+            return
+    print(f"error: no finding {args.id}", file=sys.stderr)
+    sys.exit(2)
+
+
+def all_run_ids(target):
+    """Every run id under events/, sorted chronologically (by run_key —
+    manual-<date> ingest runs interleave with dated driven runs)."""
+    events_dir = os.path.join(TANUKI_ROOT, target, "events")
+    if not os.path.isdir(events_dir):
+        return []
+    return sorted((d for d in os.listdir(events_dir)
+                   if os.path.isdir(os.path.join(events_dir, d))),
+                  key=run_key)
+
+
+def cmd_compact(args, ledger):
+    """Compaction of the dead tail (invariant 3). A finding that is `dismissed`,
+    or `accepted` and unseen for >= N runs (its fix verified by absence),
+    collapses to a one-line tombstone — id, kind, title, resolution, count —
+    kept so dedupe never lets it resurface as new, but stripped of per-run
+    evidence/scenarios/notes (those live in raw.jsonl). Idempotent: an existing
+    tombstone is skipped."""
+    cfg = load_config()
+    n = (args.unseen_runs if args.unseen_runs is not None
+         else cfg["compaction_unseen_runs"])
+    runs = all_run_ids(args.target)
+
+    def runs_since(last_run):
+        # Runs recorded after the finding was last seen. A missing last_seen_run
+        # is legacy data with no tracking — treat the whole history as elapsed.
+        # Chronological comparison via run_key: a driven run the day after a
+        # manual-<date> ingest must count as elapsed absence.
+        if not last_run:
+            return len(runs)
+        return sum(1 for r in runs if run_key(r) > run_key(last_run))
+
+    compacted = []
+    for i, f in enumerate(ledger["findings"]):
+        if f.get("tombstone"):
+            continue
+        status = f.get("status")
+        if status == "dismissed":
+            resolution = "dismissed"
+        elif status == "accepted" and runs_since(f.get("last_seen_run")) >= n:
+            resolution = "fixed"  # accepted + gone for N runs = fix verified
+        else:
+            continue
+        if status == "dismissed" and runs_since(f.get("last_seen_run")) < n:
+            continue  # freshly dismissed: keep detail until it's truly quiet
+        ledger["findings"][i] = {
+            "id": f["id"], "title": f["title"][:80], "kind": f["kind"],
+            "status": status, "recurrence": f.get("recurrence", 1),
+            "scenarios": [], "evidence": [],
+            "resolution": resolution, "tombstone": True,
+        }
+        compacted.append((f["id"], resolution))
+
+    save(args.target, ledger)
+    if compacted:
+        for fid, res in compacted:
+            print(f"tombstoned {fid} ({res})")
+        print(f"compacted {len(compacted)} finding(s) unseen for >= {n} run(s)")
+    else:
+        print(f"nothing to compact (threshold: unseen for >= {n} run(s))")
+
+
+def cmd_scenario_yield(args, ledger):
+    """Per-scenario yield, deterministically, for the adaptive scheduler
+    (specs/spec-tanuki-scenario-lifecycle): for each scenario, its driven runs
+    (from run manifests — the complete record) and, per run, the findings
+    attributable to it via ledger evidence pointers plus the run's event
+    count. 'Actionable' = findings touched (new or bumped) in that run.
+    Caveat: capped evidence keeps the oldest + most recent pointers, so very
+    old middle occurrences may under-count — recent runs (what the scheduler
+    reads, --runs N, default 5) are attributed accurately."""
+    events_dir = os.path.join(TANUKI_ROOT, args.target, "events")
+    # (run, scenario) -> finding ids, from evidence "run/scenario#seq".
+    touched = {}
+    for f in ledger["findings"]:
+        for ptr in f.get("evidence", []):
+            run = ptr.split("/", 1)[0]
+            scen = ptr.split("#")[0].split("/")[-1]
+            touched.setdefault((run, scen), set()).add(f["id"])
+    out = {}
+    runs = sorted(os.listdir(events_dir)) if os.path.isdir(events_dir) else []
+    for run in runs:
+        mpath = os.path.join(events_dir, run, "manifest.json")
+        if not os.path.isfile(mpath):
+            continue
+        try:
+            with open(mpath, encoding="utf-8") as fh:
+                manifest = json.load(fh)
+        except (json.JSONDecodeError, OSError):
+            continue
+        for r in manifest.get("results", []):
+            scen = r.get("scenario")
+            if not scen:
+                continue
+            fids = sorted(touched.get((run, scen), ()))
+            out.setdefault(scen, []).append({
+                "run": run, "events": r.get("events", 0),
+                "findings": fids, "actionable": len(fids)})
+    print(json.dumps({scen: hist[-args.runs:] for scen, hist in out.items()},
+                     indent=2))
+
+
+def cmd_status(args, ledger):
+    """Human-readable state of a target: what awaits a decision, what's being
+    watched, what happened last. The answer to 'where was I?'."""
+    tdir = os.path.join(TANUKI_ROOT, args.target)
+    runs = []
+    events_dir = os.path.join(tdir, "events")
+    if os.path.isdir(events_dir):
+        runs = sorted(os.listdir(events_dir))
+    briefs_dir = os.path.join(tdir, "briefs")
+    briefs = sorted(os.listdir(briefs_dir)) if os.path.isdir(briefs_dir) else []
+
+    by = {s: [f for f in ledger["findings"] if f["status"] == s]
+          for s in STATUSES}
+    print(f"tanuki status — {args.target}")
+    print(f"  runs: {len(runs)}" + (f" (latest: {runs[-1]})" if runs else ""))
+    print(f"  latest brief: {os.path.join(briefs_dir, briefs[-1])}"
+          if briefs else "  latest brief: none")
+    print(f"  findings: {len(ledger['findings'])} "
+          f"(open {len(by['open'])} / proposed {len(by['proposed'])} / "
+          f"accepted {len(by['accepted'])} / dismissed {len(by['dismissed'])})")
+
+    if by["proposed"]:
+        print("\n  AWAITING YOUR DECISION (proposed — accept or dismiss):")
+        for f in sorted(by["proposed"], key=lambda f: (-f["recurrence"],
+                                                       -len(f["scenarios"]))):
+            print(f"    {priority(f)} {f['id']} [{f['kind']}] "
+                  f"rec:{f['recurrence']} scen:{len(f['scenarios'])} — "
+                  f"{f['title'][:90]}")
+    # Tombstoned accepted findings are already verified-fixed — not awaiting.
+    awaiting = [f for f in by["accepted"] if not f.get("tombstone")]
+    if awaiting:
+        print("\n  ACCEPTED — awaiting fix verification (should stop recurring):")
+        for f in awaiting:
+            print(f"    {f['id']} rec:{f['recurrence']} — {f['title'][:90]}")
+    watching = sorted(by["open"], key=lambda f: (-f["recurrence"],
+                                                 -len(f["scenarios"])))
+    if watching:
+        print(f"\n  WATCHING (open, top {min(5, len(watching))} of "
+              f"{len(watching)}):")
+        for f in watching[:5]:
+            print(f"    {priority(f)} {f['id']} [{f['kind']}] "
+                  f"rec:{f['recurrence']} — {f['title'][:90]}")
+    print("\n  next: review the latest brief, decide proposed items "
+          "(set-status), re-run after fixes to verify accepted items stop "
+          "recurring")
+
+
+def cmd_stats(args, ledger):
+    by_status = {}
+    for f in ledger["findings"]:
+        by_status[f["status"]] = by_status.get(f["status"], 0) + 1
+    print(json.dumps({
+        "events": len(ledger["events"]),
+        "event_occurrences": sum(e["count"] for e in ledger["events"].values()),
+        "findings": len(ledger["findings"]),
+        "by_status": by_status,
+    }, indent=2))
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--target", required=True)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("init")
+    sp = sub.add_parser("ingest"); sp.add_argument("files", nargs="+")
+    sp = sub.add_parser("ingest-note"); sp.add_argument("--text", required=True)
+    sp = sub.add_parser("findings"); sp.add_argument("--status")
+    sp = sub.add_parser("upsert-finding")
+    sp.add_argument("--title"); sp.add_argument("--kind", default="friction")
+    sp.add_argument("--evidence", required=True)
+    sp.add_argument("--match"); sp.add_argument("--note")
+    sp = sub.add_parser("promote")
+    sp.add_argument("--min-recurrence", type=int, default=None)
+    sp.add_argument("--min-scenarios", type=int, default=None)
+    sp = sub.add_parser("set-status")
+    sp.add_argument("--id", required=True); sp.add_argument("--status", required=True)
+    sp = sub.add_parser("compact")
+    sp.add_argument("--unseen-runs", type=int, default=None)
+    sp = sub.add_parser("scenario-yield")
+    sp.add_argument("--runs", type=int, default=5)
+    sub.add_parser("stats")
+    sub.add_parser("status")
+    args = p.parse_args()
+
+    if args.cmd == "upsert-finding" and not args.match and not args.title:
+        print("error: --title required when creating (no --match)", file=sys.stderr)
+        return 2
+
+    ledger = load(args.target)
+    {"init": cmd_init, "ingest": cmd_ingest, "ingest-note": cmd_ingest_note,
+     "findings": cmd_findings, "upsert-finding": cmd_upsert,
+     "promote": cmd_promote, "set-status": cmd_set_status,
+     "compact": cmd_compact, "scenario-yield": cmd_scenario_yield,
+     "stats": cmd_stats,
+     "status": cmd_status}[args.cmd](args, ledger)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

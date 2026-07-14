@@ -1,0 +1,13 @@
+{
+  "name": "tanuki",
+  "owner": {
+    "name": "tim-nish"
+  },
+  "plugins": [
+    {
+      "name": "tanuki",
+      "source": "./",
+      "description": "Automated dogfooding for Claude Code plugins — /tanuki drives scenarios in disposable clones and distills them into a ranked proposal brief; /tanuki-loop runs the cycle unattended overnight."
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Fixture for tanuki-drive's --plugin-ref correctness fix: a local `git clone`
+# checks out the SOURCE repo's current branch, so dogfooding a specific plugin
+# commit/branch (e.g. an integration branch not checked out in the source)
+# requires an explicit ref. Asserts prepare_workspace(..., plugin_ref) checks
+# out that ref, and without it falls back to the source's current branch.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+drive="$here/tanuki-drive"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+
+# A plugin repo left checked out on `main`, with a divergent `integration`.
+git init -q "$tmp/src" && git -C "$tmp/src" config user.email t@e && git -C "$tmp/src" config user.name t
+git -C "$tmp/src" checkout -qb main
+echo main > "$tmp/src/f" && git -C "$tmp/src" add -A && git -C "$tmp/src" commit -qm base
+git -C "$tmp/src" checkout -qb integration
+echo integration > "$tmp/src/f" && git -C "$tmp/src" commit -qam feat
+git -C "$tmp/src" checkout -q main   # source's current branch is main
+
+# A throwaway host repo (prepare_workspace clones both).
+git init -q "$tmp/host" && git -C "$tmp/host" config user.email t@e && git -C "$tmp/host" config user.name t
+git -C "$tmp/host" checkout -qb main && echo h > "$tmp/host/h" && git -C "$tmp/host" add -A && git -C "$tmp/host" commit -qm h
+
+python3 - "$drive" "$tmp/src" "$tmp/host" "$tmp/ws" <<'PY' || fail "prepare_workspace ref handling"
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("td", sys.argv[1])
+td = importlib.util.module_from_spec(importlib.util.spec_from_loader("td", loader))
+loader.exec_module(td)
+drive, src, host, ws = sys.argv[1:5]
+
+pc, _ = td.prepare_workspace(ws + "/withref", src, host, [], "integration")
+assert open(pc + "/f").read().strip() == "integration", "plugin_ref not checked out"
+
+pc2, _ = td.prepare_workspace(ws + "/noref", src, host, [])
+assert open(pc2 + "/f").read().strip() == "main", "no-ref should follow source's current branch"
+PY
+pass "plugin_ref checks out the integration commit; no-ref follows the source branch"
+
+echo "all checks passed"

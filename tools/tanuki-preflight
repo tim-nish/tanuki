@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""tanuki-preflight: deterministic mechanical lint of a Claude Code plugin repo.
+
+Contract: docs/tanuki-spec.md §0. Mechanical/specification violations belong
+here, not in dogfooding findings (product-lab q_a/17 D3). Zero dependencies.
+
+Usage: tanuki-preflight <plugin-repo> [--json]
+Exit: 0 = all checks pass, 1 = failures, 2 = usage/IO error.
+"""
+
+import json
+import os
+import re
+import stat
+import sys
+
+CHECKS = []  # (check_id, ok, detail)
+
+
+def record(check_id, ok, detail):
+    CHECKS.append({"check": check_id, "ok": ok, "detail": detail})
+
+
+def parse_frontmatter(text):
+    """Return (dict, error). Minimal YAML: top-level `key: value` lines only."""
+    if not text.startswith("---"):
+        return None, "no frontmatter block"
+    end = text.find("\n---", 3)
+    if end == -1:
+        return None, "unterminated frontmatter"
+    fields = {}
+    for line in text[3:end].splitlines():
+        if not line.strip() or line.strip().startswith("#"):
+            continue
+        if line.startswith((" ", "\t")):
+            continue  # nested value — presence of parent key is what we check
+        m = re.match(r"^([A-Za-z0-9_-]+):\s*(.*)$", line)
+        if m:
+            fields[m.group(1)] = m.group(2).strip()
+    return fields, None
+
+
+def check_skills(repo):
+    skills_dir = os.path.join(repo, "skills")
+    if not os.path.isdir(skills_dir):
+        # A plugin may ship commands/ (slash commands) instead of skills/.
+        commands_dir = os.path.join(repo, "commands")
+        cmds = ([f for f in os.listdir(commands_dir) if f.endswith(".md")]
+                if os.path.isdir(commands_dir) else [])
+        record("skills-dir", bool(cmds),
+               f"no skills/; {len(cmds)} command file(s)" if cmds
+               else "no skills/ and no commands/*.md")
+        return
+    found = 0
+    for entry in sorted(os.listdir(skills_dir)):
+        path = os.path.join(skills_dir, entry)
+        if not os.path.isdir(path):
+            continue
+        found += 1
+        skill_md = os.path.join(path, "SKILL.md")
+        cid = f"skill:{entry}"
+        if not os.path.isfile(skill_md):
+            record(cid, False, "SKILL.md missing")
+            continue
+        with open(skill_md, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        fm, err = parse_frontmatter(text)
+        if err:
+            record(cid, False, f"SKILL.md frontmatter: {err}")
+            continue
+        missing = [k for k in ("name", "description") if not fm.get(k)]
+        if missing:
+            record(cid, False, f"frontmatter missing: {', '.join(missing)}")
+        else:
+            record(cid, True, "SKILL.md ok")
+    record("skills-count", found > 0, f"{found} skill dir(s)")
+
+
+LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
+
+
+def check_links(repo):
+    """Relative links in markdown resolve to existing files/dirs/anchors."""
+    md_files = []
+    for root, dirs, files in os.walk(repo):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d != "node_modules"]
+        md_files += [os.path.join(root, f) for f in files if f.endswith(".md")]
+    bad = []
+    for md in md_files:
+        with open(md, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        for target in LINK_RE.findall(text):
+            if re.match(r"^[a-z]+:", target) or target.startswith("#"):
+                continue  # absolute URL or in-page anchor
+            rel = target.split("#", 1)[0]
+            if not rel:
+                continue
+            resolved = os.path.normpath(os.path.join(os.path.dirname(md), rel))
+            if not os.path.exists(resolved):
+                bad.append(f"{os.path.relpath(md, repo)} -> {target}")
+    record("relative-links", not bad,
+           "all resolve" if not bad else "; ".join(bad[:10]))
+
+
+def check_scripts(repo):
+    scripts_dir = os.path.join(repo, "scripts")
+    if not os.path.isdir(scripts_dir):
+        record("scripts", True, "no scripts/ (nothing to check)")
+        return
+    bad = []
+    for f in sorted(os.listdir(scripts_dir)):
+        path = os.path.join(scripts_dir, f)
+        if not os.path.isfile(path) or not f.endswith(".sh"):
+            continue
+        if not os.stat(path).st_mode & stat.S_IXUSR:
+            bad.append(f"{f}: not executable")
+        with open(path, "rb") as fh:
+            if b"\r\n" in fh.read():
+                bad.append(f"{f}: CRLF line endings")
+    record("scripts", not bad, "ok" if not bad else "; ".join(bad))
+
+
+def check_config_examples(repo):
+    """Every config/*.example.* referenced from README exists, and vice versa."""
+    cfg = os.path.join(repo, "config")
+    if not os.path.isdir(cfg):
+        record("config-examples", True, "no config/ (nothing to check)")
+        return
+    examples = [f for f in os.listdir(cfg) if ".example." in f]
+    record("config-examples", bool(examples),
+           f"{len(examples)} example file(s)" if examples else "config/ has no *.example.* file")
+
+
+def main():
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    as_json = "--json" in sys.argv
+    if len(args) != 1:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    repo = os.path.abspath(args[0])
+    if not os.path.isdir(repo):
+        print(f"error: not a directory: {repo}", file=sys.stderr)
+        return 2
+
+    check_skills(repo)
+    check_links(repo)
+    check_scripts(repo)
+    check_config_examples(repo)
+
+    failures = [c for c in CHECKS if not c["ok"]]
+    if as_json:
+        print(json.dumps({"repo": repo, "checks": CHECKS,
+                          "pass": not failures}, indent=2))
+    else:
+        for c in CHECKS:
+            print(f"{'PASS' if c['ok'] else 'FAIL'}  {c['check']}: {c['detail']}")
+        print(f"\n{len(CHECKS) - len(failures)}/{len(CHECKS)} checks passed")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

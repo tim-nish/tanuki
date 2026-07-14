@@ -1,0 +1,456 @@
+#!/usr/bin/env python3
+"""tanuki-scheduler: deterministic scenario scheduling + target registry
+(contract: specs/spec-tanuki-scenario-lifecycle/SPEC.md). All selection and
+demotion arithmetic lives here; charter *generation* and ad-hoc framing are
+the orchestrating model's (frontier) judgment and never happen in this tool.
+
+Zero dependencies. State:
+  ~/.tanuki/registry.json                repo path -> target slug (init/resolve)
+  ~/.tanuki/<target>/scheduler.json      per-scenario state machine
+
+Per-scenario state machine:
+  unexplored --first drive--> active --demote_after consecutive
+                                ^        low-yield runs--> regression
+                                |                             |
+                                +--- actionable finding <-----+
+                                     (re-promotion)     driven every
+                                                        regression_every runs
+Scenarios are NEVER deleted — regression pool, not removal.
+
+Subcommands (JSON out):
+  --target T register --repo P     map a repo path to a target (Tanuki-owned;
+                                   never writes into the repo)
+  resolve --cwd P                  target for P or any parent, else null
+  sync --scenarios F               absorb the matrix: first sync marks every
+                                   scenario active (backward compat for
+                                   hand-written matrices); later syncs mark
+                                   NEW ids unexplored
+  plan --scenarios F [--max N] [--run R]
+                                   next run's scenario set, priority-ordered:
+                                   verify set (accepted findings awaiting
+                                   absence) -> exploration quota (unexplored)
+                                   -> active LRU -> due regression members;
+                                   the composition is persisted (selection
+                                   history with reasons)
+  record-run --run R               fold the run's yield into streaks and apply
+                                   the state machine (demotion needs
+                                   demote_after consecutive low runs; any
+                                   actionable finding re-promotes); persists
+                                   the per-scenario yield snapshot and every
+                                   state transition {run, from, to, reason}
+  history [--scenario ID] [--json] cross-run monitoring from persisted
+                                   artifacts: per-scenario executions (dates,
+                                   pins, yield, approx for pre-revision runs),
+                                   cumulative findings/recurrence, transition
+                                   log; repo-wide coverage + selection history
+  status                           machine-readable scheduler state
+
+Config (~/.tanuki/config.json, all optional): demote_after 2 ·
+regression_every 3 · exploration_quota 1 · low_yield_threshold 0 ·
+max_scenarios 6.
+"""
+
+import argparse
+import json
+import os
+import sys
+
+TANUKI_ROOT = os.environ.get("TANUKI_ROOT", os.path.expanduser("~/.tanuki"))
+CONFIG_DEFAULTS = {"demote_after": 2, "regression_every": 3,
+                   "exploration_quota": 1, "low_yield_threshold": 0,
+                   "max_scenarios": 6}
+STATES = ("unexplored", "active", "regression")
+
+
+def load_config():
+    cfg = dict(CONFIG_DEFAULTS)
+    path = os.path.join(TANUKI_ROOT, "config.json")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            cfg.update(json.load(f))
+    return cfg
+
+
+def read_json(path, default):
+    if not os.path.exists(path):
+        return default
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def write_json(path, obj):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2)
+    os.replace(tmp, path)
+
+
+def sched_path(target):
+    return os.path.join(TANUKI_ROOT, target, "scheduler.json")
+
+
+def registry_path():
+    return os.path.join(TANUKI_ROOT, "registry.json")
+
+
+def load_ledger(target):
+    return read_json(os.path.join(TANUKI_ROOT, target, "ledger.json"),
+                     {"events": {}, "findings": []})
+
+
+def matrix_ids(scenarios_file):
+    with open(os.path.expanduser(scenarios_file), encoding="utf-8") as f:
+        data = json.load(f)
+    ids = [s["id"] for s in data["scenarios"]]
+    for sid in ids:
+        if sid.startswith("adhoc-"):
+            die(f"matrix id '{sid}' uses the reserved adhoc- prefix")
+    return ids
+
+
+def run_yield(target, run):
+    """(scenario -> {actionable, findings}) for one run — same attribution as
+    tanuki-ledger scenario-yield: manifest for driven scenarios, ledger
+    evidence pointers for findings. Snapshotted into scheduler.json at
+    record-run time, while evidence is fresh (capping erodes it later)."""
+    manifest = read_json(os.path.join(TANUKI_ROOT, target, "events", run,
+                                      "manifest.json"), {})
+    driven = [r.get("scenario") for r in manifest.get("results", [])
+              if r.get("scenario")]
+    touched = {}
+    for f in load_ledger(target)["findings"]:
+        for ptr in f.get("evidence", []):
+            if ptr.split("/", 1)[0] == run:
+                scen = ptr.split("#")[0].split("/")[-1]
+                touched.setdefault(scen, set()).add(f["id"])
+    return {s: {"actionable": len(touched.get(s, ())),
+                "findings": sorted(touched.get(s, ()))} for s in driven}
+
+
+def out(obj):
+    print(json.dumps(obj, indent=2))
+
+
+def die(msg):
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(2)
+
+
+# --- subcommands -------------------------------------------------------------
+
+def cmd_register(args):
+    repo = os.path.realpath(os.path.expanduser(args.repo))
+    reg = read_json(registry_path(), {})
+    reg[repo] = args.target
+    write_json(registry_path(), reg)
+    out({"ok": True, "repo": repo, "target": args.target})
+
+
+def cmd_resolve(args):
+    reg = read_json(registry_path(), {})
+    path = os.path.realpath(os.path.expanduser(args.cwd))
+    while True:
+        if path in reg:
+            out({"target": reg[path], "repo": path})
+            return
+        parent = os.path.dirname(path)
+        if parent == path:
+            out({"target": None})
+            return
+        path = parent
+
+
+def cmd_sync(args):
+    """First sync: every matrix scenario -> active (a hand-written matrix
+    keeps today's behavior). Later syncs: new ids -> unexplored (generated
+    charters enter as exploration candidates). Ids never leave the state."""
+    first = not os.path.exists(sched_path(args.target))
+    sched = read_json(sched_path(args.target), {"scenarios": {}, "runs_recorded": []})
+    added = []
+    for sid in matrix_ids(args.scenarios):
+        if sid not in sched["scenarios"]:
+            sched["scenarios"][sid] = {
+                "state": "active" if first else "unexplored",
+                "low_streak": 0, "runs_driven": 0,
+                "last_planned": 0, "since_regression": 0,
+            }
+            added.append(sid)
+    write_json(sched_path(args.target), sched)
+    out({"first_sync": first, "added": added,
+         "total": len(sched["scenarios"])})
+
+
+def cmd_plan(args):
+    cfg = load_config()
+    cap = args.max or cfg["max_scenarios"]
+    sched = read_json(sched_path(args.target), None)
+    if sched is None:
+        die("no scheduler state; run `sync --scenarios <file>` first")
+    known = set(matrix_ids(args.scenarios))
+    scen = {k: v for k, v in sched["scenarios"].items() if k in known}
+    tick = len(sched["runs_recorded"]) + 1
+
+    # 1. Verify set: scenarios evidencing accepted (non-tombstone) findings —
+    #    replaying them verifies the fix by absence.
+    verify = set()
+    for f in load_ledger(args.target)["findings"]:
+        if f.get("status") == "accepted" and not f.get("tombstone"):
+            verify.update(s for s in f.get("scenarios", []) if s in scen)
+    # 2. Exploration quota — the anti-Goodhart guard.
+    unexplored = sorted(s for s, st in scen.items() if st["state"] == "unexplored")
+    explore = unexplored[:cfg["exploration_quota"]]
+    # 3. Active rotation, least-recently-planned first.
+    active = sorted((s for s, st in scen.items() if st["state"] == "active"),
+                    key=lambda s: scen[s]["last_planned"])
+    # 4. Regression pool members that are due.
+    due = sorted(s for s, st in scen.items() if st["state"] == "regression"
+                 and st["since_regression"] >= cfg["regression_every"])
+
+    plan, seen = [], set()
+    for group in (sorted(verify), explore, active, due):
+        for s in group:
+            if s not in seen and len(plan) < cap:
+                plan.append(s)
+                seen.add(s)
+    quota_met = (not unexplored) or any(s in seen for s in unexplored)
+    for s in plan:
+        scen[s]["last_planned"] = tick
+    record = {"run": args.run, "plan": plan, "quota_met": quota_met,
+              "verify": sorted(verify & seen),
+              "explore": [s for s in explore if s in seen],
+              "due_regression": [s for s in due if s in seen],
+              "unexplored_remaining": [s for s in unexplored if s not in seen]}
+    # Selection history with reasons — persisted, not just printed.
+    sched.setdefault("plans", []).append(record)
+    write_json(sched_path(args.target), sched)
+    out(record)
+
+
+def cmd_record_run(args):
+    cfg = load_config()
+    sched = read_json(sched_path(args.target), None)
+    if sched is None:
+        die("no scheduler state; run `sync` first")
+    if args.run in sched["runs_recorded"]:
+        out({"ok": True, "already_recorded": args.run})
+        return
+    yields = run_yield(args.target, args.run)
+    changes = {}
+
+    def transition(sid, st, to, reason):
+        # Persisted, per the History & coverage revision: the durable answer
+        # to "why and when did this scenario's priority change?"
+        st.setdefault("transitions", []).append(
+            {"run": args.run, "from": st["state"], "to": to, "reason": reason})
+        changes[sid] = f"{st['state']} -> {to} ({reason})"
+        st["state"] = to
+
+    for sid, st in sched["scenarios"].items():
+        if sid in yields:
+            st["runs_driven"] += 1
+            st["since_regression"] = 0
+            if yields[sid]["actionable"] > cfg["low_yield_threshold"]:
+                st["low_streak"] = 0
+                if st["state"] != "active":
+                    transition(sid, st, "active", "actionable finding")
+            else:
+                if st["state"] == "unexplored":
+                    transition(sid, st, "active", "first drive")
+                st["low_streak"] += 1
+                if st["state"] == "active" and st["low_streak"] >= cfg["demote_after"]:
+                    st["low_streak"] = 0
+                    transition(sid, st, "regression",
+                               f"{cfg['demote_after']} consecutive low-yield runs")
+        elif st["state"] == "regression":
+            st["since_regression"] += 1
+    sched["runs_recorded"].append(args.run)
+    # Durable per-execution yield snapshot (evidence capping erodes late
+    # recomputation — this is the exact record).
+    sched.setdefault("history", {})[args.run] = yields
+    write_json(sched_path(args.target), sched)
+    out({"ok": True, "run": args.run, "yield": yields, "transitions": changes})
+
+
+def all_manifests(target):
+    """[(run, manifest)] for every recorded run dir, chronological."""
+    events_dir = os.path.join(TANUKI_ROOT, target, "events")
+    outp = []
+    if os.path.isdir(events_dir):
+        for run in sorted(os.listdir(events_dir)):
+            m = read_json(os.path.join(events_dir, run, "manifest.json"), None)
+            if m is not None:
+                outp.append((run, m))
+    return outp
+
+
+def cmd_history(args):
+    """Cross-run scenario monitoring from persisted artifacts only
+    (History & coverage revision). Default: repo-wide coverage. --scenario:
+    the single-scenario deep view. Runs recorded before the yield-snapshot
+    revision are reconstructed from manifests + (capped) ledger evidence and
+    labeled approx. --json for the machine-readable form."""
+    sched = read_json(sched_path(args.target),
+                      {"scenarios": {}, "runs_recorded": [], "history": {},
+                       "plans": []})
+    ledger = load_ledger(args.target)
+    manifests = all_manifests(args.target)
+    snap = sched.get("history", {})
+
+    # Per (run, scenario): executions from manifests (the complete record).
+    executions = {}   # scenario -> [execution dict]
+    for run, m in manifests:
+        when = m.get("completed_at") or (run.split("-")[0][:8] or "?")
+        for r in m.get("results", []):
+            sid = r.get("scenario")
+            if not sid:
+                continue
+            if run in snap and sid in snap[run]:
+                y = snap[run][sid]
+                approx = False
+            else:  # pre-revision run: best-effort from capped evidence
+                y = {"actionable": 0, "findings": []}
+                for f in ledger["findings"]:
+                    for ptr in f.get("evidence", []):
+                        if ptr.split("/", 1)[0] == run and \
+                                ptr.split("#")[0].split("/")[-1] == sid:
+                            y["findings"].append(f["id"])
+                y["findings"] = sorted(set(y["findings"]))
+                y["actionable"] = len(y["findings"])
+                approx = True
+            pins = r.get("decision_points")
+            executions.setdefault(sid, []).append({
+                "run": run, "at": when, "events": r.get("events", 0),
+                "status": r.get("status"), "actionable": y["actionable"],
+                "findings": y["findings"],
+                "decision_points": pins if isinstance(pins, list) else [],
+                "approx": approx})
+
+    # Cumulative findings/recurrence per scenario, from the ledger.
+    cumulative = {}
+    for f in ledger["findings"]:
+        for sid in f.get("scenarios", []):
+            c = cumulative.setdefault(sid, {"findings": [], "recurrence": 0})
+            c["findings"].append({"id": f["id"], "kind": f.get("kind"),
+                                  "status": f.get("status"),
+                                  "recurrence": f.get("recurrence", 1)})
+            c["recurrence"] += f.get("recurrence", 1)
+
+    if args.scenario:
+        sid = args.scenario
+        st = sched["scenarios"].get(sid, {})
+        data = {"scenario": sid,
+                "state": st.get("state", "(not in scheduler)"),
+                "low_streak": st.get("low_streak", 0),
+                "runs_driven": len(executions.get(sid, [])),
+                "last_execution": (executions.get(sid) or [{}])[-1],
+                "executions": executions.get(sid, []),
+                "cumulative": cumulative.get(sid, {"findings": [],
+                                                   "recurrence": 0}),
+                "transitions": st.get("transitions", [])}
+        if args.json:
+            out(data)
+            return
+        print(f"scenario {sid} — {data['state']} · driven "
+              f"{data['runs_driven']}x · low streak {data['low_streak']} · "
+              f"cumulative recurrence {data['cumulative']['recurrence']}")
+        for e in data["executions"]:
+            pins = "; ".join(f"{p.get('point')}={p.get('choice')}"
+                             if isinstance(p, dict) else str(p)
+                             for p in e["decision_points"]) or "-"
+            print(f"  {e['run']:<28} {e['at']:<20} {e['status'][:16]:<16} "
+                  f"events {e['events']:>3}  actionable {e['actionable']}"
+                  f"{' ~' if e['approx'] else ''}  pins: {pins}"
+                  + (f"  findings: {', '.join(e['findings'])}" if e["findings"] else ""))
+        for t in data["transitions"]:
+            print(f"  [{t['run']}] {t['from']} -> {t['to']}: {t['reason']}")
+        for f in data["cumulative"]["findings"]:
+            print(f"  finding {f['id']} [{f['kind']}] {f['status']} "
+                  f"rec:{f['recurrence']}")
+        return
+
+    # Repo-wide coverage.
+    recorded = sched.get("runs_recorded", [])
+    rows, cover = [], {"unexplored": [], "long_unrun": [], "productive": []}
+    for sid, st in sorted(sched["scenarios"].items()):
+        ex = executions.get(sid, [])
+        last = ex[-1] if ex else None
+        recent_actionable = sum(e["actionable"] for e in ex[-3:])
+        rows.append({"scenario": sid, "state": st["state"],
+                     "driven": len(ex),
+                     "last_run": last["run"] if last else None,
+                     "last_at": last["at"] if last else None,
+                     "low_streak": st.get("low_streak", 0),
+                     "recent_actionable": recent_actionable,
+                     "cumulative_recurrence":
+                         cumulative.get(sid, {}).get("recurrence", 0),
+                     "transitions": len(st.get("transitions", []))})
+        if st["state"] == "unexplored":
+            cover["unexplored"].append(sid)
+        if ex and recorded and last["run"] not in recorded[-3:] \
+                and len(recorded) >= 3:
+            cover["long_unrun"].append(sid)
+        if recent_actionable:
+            cover["productive"].append(sid)
+    data = {"scenarios": rows, "coverage": cover,
+            "selection_history": sched.get("plans", [])[-args.plans:]}
+    if args.json:
+        out(data)
+        return
+    print(f"tanuki history — {args.target} · {len(rows)} scenarios · "
+          f"{len(recorded)} runs recorded")
+    for r in rows:
+        print(f"  {r['scenario']:<24} {r['state']:<11} driven {r['driven']:>2}"
+              f"  last {r['last_run'] or '-':<28} streak {r['low_streak']}"
+              f"  recent-actionable {r['recent_actionable']}"
+              f"  cum-rec {r['cumulative_recurrence']}")
+    if cover["unexplored"]:
+        print(f"  unexplored: {', '.join(cover['unexplored'])}")
+    if cover["long_unrun"]:
+        print(f"  long-unrun: {', '.join(cover['long_unrun'])}")
+    if cover["productive"]:
+        print(f"  recently productive: {', '.join(cover['productive'])}")
+    for p in data["selection_history"]:
+        print(f"  plan [{p.get('run') or '?'}] -> {', '.join(p['plan'])} "
+              f"(verify {len(p['verify'])}, explore {len(p['explore'])}, "
+              f"quota_met {p['quota_met']})")
+
+
+def cmd_status(args):
+    sched = read_json(sched_path(args.target), {"scenarios": {}, "runs_recorded": []})
+    by_state = {}
+    for sid, st in sched["scenarios"].items():
+        by_state.setdefault(st["state"], []).append(sid)
+    out({"runs_recorded": len(sched["runs_recorded"]),
+         "by_state": {k: sorted(v) for k, v in sorted(by_state.items())},
+         "scenarios": sched["scenarios"]})
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--target", default=None)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sp = sub.add_parser("register")
+    sp.add_argument("--repo", required=True)
+    sp = sub.add_parser("resolve"); sp.add_argument("--cwd", required=True)
+    sp = sub.add_parser("sync"); sp.add_argument("--scenarios", required=True)
+    sp = sub.add_parser("plan")
+    sp.add_argument("--scenarios", required=True)
+    sp.add_argument("--max", type=int, default=None)
+    sp.add_argument("--run", default=None)
+    sp = sub.add_parser("record-run"); sp.add_argument("--run", required=True)
+    sp = sub.add_parser("history")
+    sp.add_argument("--scenario", default=None)
+    sp.add_argument("--plans", type=int, default=10)
+    sp.add_argument("--json", action="store_true")
+    sub.add_parser("status")
+    args = p.parse_args()
+    if args.cmd != "resolve" and not args.target:
+        die("--target is required for this subcommand")
+    {"register": cmd_register, "resolve": cmd_resolve, "sync": cmd_sync,
+     "plan": cmd_plan, "record-run": cmd_record_run, "history": cmd_history,
+     "status": cmd_status}[args.cmd](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

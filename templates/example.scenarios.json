@@ -1,0 +1,36 @@
+{
+  "_comment": "Copy to ~/.tanuki/scenarios/<target>.scenarios.json and edit. `target` is the slug used by /tanuki <target>; `plugin` is the repo under test (also where /tanuki-loop's integration branch lives). Set `host` ONLY if the plugin operates on a repository's content — a self-contained plugin omits it and every scenario runs in a fabricated empty, isolated workspace. Prefer breadth over repetition: two charters that run the same command down different internal branches (decision_points) are breadth, not repetition. /tanuki init generates this file for you.",
+  "target": "example-plugin",
+  "plugin": "~/work/example-plugin",
+  "loop": {
+    "_comment": "Optional — settings for /tanuki-loop, stored once. test_cmd is the deterministic regression gate run every iteration (exit 0 = pass); exclude checks that already fail on the base branch. Without this block, the first loop run derives a candidate test_cmd and offers to save it.",
+    "test_cmd": "./scripts/run-tests.sh",
+    "iterations": 5,
+    "wall_time_s": 21600,
+    "token_budget": 2000000
+  },
+  "scenarios": [
+    {
+      "id": "first-run",
+      "charter": "First-time user follows the README quickstart and judges whether the plugin's primary command is understandable end to end.",
+      "prompt": "Run the plugin's main command as a brand-new user following its README. Then, as the user, check: did you understand what it produced, and could you tell what to do next?",
+      "max_turns": 40
+    },
+    {
+      "id": "pinned-branch",
+      "charter": "Same command as first-run, but pinned to a specific internal branch — an intra-command decision point that walks a different internal path to surface branch-specific friction.",
+      "prompt": "Run the plugin's main command as a reasonable user would, except where a decision is pinned below; note how each pinned choice felt.",
+      "decision_points": [
+        {"point": "the mode-selection question the command asks", "choice": "the non-default mode"}
+      ],
+      "max_turns": 40
+    },
+    {
+      "id": "error-path",
+      "charter": "Error-path exploration: the user invokes the plugin in a workspace missing its expected configuration — how clear is the failure and the recovery guidance?",
+      "prompt": "Use the plugin's main command in this repository, which is missing the configuration the plugin expects. Follow the plugin's instructions as a typical user and note whether the failure message tells you how to recover.",
+      "host_setup": ["rm -f the-config-file.yaml"],
+      "max_turns": 30
+    }
+  ]
+}
