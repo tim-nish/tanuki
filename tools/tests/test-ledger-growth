@@ -72,7 +72,14 @@ echo "$out" | grep -q "nothing to compact" || fail "compacted with no elapsed ru
 pass "compaction spares everything before N runs of absence elapse"
 
 # Three runs land after r051/r001 (but not after r054) -> F1,F2 stale; F3 fresh.
-mkdir -p "$root/t/events/r052" "$root/t/events/r053" "$root/t/events/r054"
+# F2 is accepted with scenario scenB: verify-by-absence now requires scenB to
+# be actually DRIVEN in those runs (manifest results) without recurring — a
+# replayed-and-gone fix, not mere elapsed time. F1 is dismissed (deadness is
+# not scenario-conditional; elapsed runs suffice).
+for r in r052 r053 r054; do
+  mkdir -p "$root/t/events/$r"
+  echo '{"results":[{"scenario":"scenB","events":2}]}' > "$root/t/events/$r/manifest.json"
+done
 out="$("${L[@]}" compact)"
 echo "$out" | grep -q "compacted 2 finding" || fail "expected 2 tombstones: $out"
 verdict="$("${L[@]}" findings | python3 -c '
@@ -120,5 +127,32 @@ import json,sys
 print(next(x for x in json.load(sys.stdin) if x["id"]=="F2")["last_seen_run"])')"
 [ "$last" = "manual-20260717" ] || fail "latest_run ignored a newer manual run: [$last]"
 pass "a later manual sighting updates last_seen_run past earlier driven runs"
+
+# --- Driven-absence: elapsed runs that never replay the scenario do NOT verify -
+# The false-"fixed" hazard (spec: Verify / cap interaction): an accepted finding
+# whose scenario is crowded out of the cap / removed from the matrix must not
+# tombstone just because time passed — absence must be driven-and-absent.
+D=("$here/tanuki-ledger" --target d)
+"${D[@]}" init >/dev/null
+"${D[@]}" upsert-finding --title "Accepted, never replayed" --kind gap \
+  --evidence "d001/scenZ#1" >/dev/null
+"${D[@]}" set-status --id F1 --status accepted >/dev/null
+# Three later runs drive a DIFFERENT scenario (scenZ never gets a replay chance).
+for r in d002 d003 d004; do
+  mkdir -p "$root/d/events/$r"
+  echo '{"results":[{"scenario":"scenOTHER","events":1}]}' > "$root/d/events/$r/manifest.json"
+done
+out="$("${D[@]}" compact --unseen-runs 3)"
+echo "$out" | grep -q "nothing to compact" \
+  || fail "accepted finding tombstoned as fixed without its scenario ever being replayed: $out"
+# Now scenZ IS driven three times without recurring -> genuinely verified.
+for r in d005 d006 d007; do
+  mkdir -p "$root/d/events/$r"
+  echo '{"results":[{"scenario":"scenZ","events":1}]}' > "$root/d/events/$r/manifest.json"
+done
+out="$("${D[@]}" compact --unseen-runs 3)"
+echo "$out" | grep -q "tombstoned F1 (fixed)" \
+  || fail "accepted finding not verified after 3 driven-and-absent replays: $out"
+pass "verify-by-absence requires driven-and-absent replays, not mere elapsed runs"
 
 echo "all checks passed"

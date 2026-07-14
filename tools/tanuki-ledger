@@ -323,9 +323,32 @@ def all_run_ids(target):
                   key=run_key)
 
 
+def driven_scenarios_by_run(target):
+    """{run: set(scenario ids actually driven that run)} from run manifests —
+    the record of which scenarios had the chance to reproduce a finding.
+    Verify-by-absence (compaction) counts a run only if a finding's scenario
+    was driven in it, so absence means 'replayed and gone', not merely
+    'time elapsed' (spec-tanuki-scenario-lifecycle, Verify / cap interaction)."""
+    events_dir = os.path.join(TANUKI_ROOT, target, "events")
+    out = {}
+    if not os.path.isdir(events_dir):
+        return out
+    for run in os.listdir(events_dir):
+        mpath = os.path.join(events_dir, run, "manifest.json")
+        try:
+            with open(mpath, encoding="utf-8") as fh:
+                manifest = json.load(fh)
+        except (json.JSONDecodeError, OSError):
+            continue
+        out[run] = {r.get("scenario") for r in manifest.get("results", [])
+                    if r.get("scenario")}
+    return out
+
+
 def cmd_compact(args, ledger):
     """Compaction of the dead tail (invariant 3). A finding that is `dismissed`,
-    or `accepted` and unseen for >= N runs (its fix verified by absence),
+    or `accepted` and unseen for >= N *driven-and-absent* runs (its fix verified
+    by replay — see verified_absent_runs, not mere elapsed time),
     collapses to a one-line tombstone — id, kind, title, resolution, count —
     kept so dedupe never lets it resurface as new, but stripped of per-run
     evidence/scenarios/notes (those live in raw.jsonl). Idempotent: an existing
@@ -334,6 +357,7 @@ def cmd_compact(args, ledger):
     n = (args.unseen_runs if args.unseen_runs is not None
          else cfg["compaction_unseen_runs"])
     runs = all_run_ids(args.target)
+    driven = driven_scenarios_by_run(args.target)
 
     def runs_since(last_run):
         # Runs recorded after the finding was last seen. A missing last_seen_run
@@ -344,6 +368,27 @@ def cmd_compact(args, ledger):
             return len(runs)
         return sum(1 for r in runs if run_key(r) > run_key(last_run))
 
+    def verified_absent_runs(f):
+        # Verify-by-absence for an ACCEPTED finding: a run counts only if one of
+        # the finding's scenarios was actually DRIVEN in it (and the finding did
+        # not recur — else last_seen_run would advance past it). "Unseen for N
+        # runs" thus means "replayed N times and gone", never "N runs elapsed"
+        # (spec-tanuki-scenario-lifecycle, Verify / cap interaction) — so a
+        # verify replay the cap deferred, or a scenario dropped from the matrix,
+        # can no longer manufacture a false "fixed". A finding with no
+        # *replayable* scenario — none, or only the reserved `ingest` manual
+        # pseudo-scenario (never driven) — has no replay signal: fall back to
+        # elapsed runs (legacy; manual-reported findings still verify by time).
+        # A real scenario merely absent from recent manifests keeps `scen`
+        # non-empty, so it does NOT fall back — it just accrues no absence.
+        scen = set(f.get("scenarios", [])) - {"ingest"}
+        if not scen:
+            return runs_since(f.get("last_seen_run"))
+        last = f.get("last_seen_run")
+        return sum(1 for r in runs
+                   if (not last or run_key(r) > run_key(last))
+                   and (scen & driven.get(r, set())))
+
     compacted = []
     for i, f in enumerate(ledger["findings"]):
         if f.get("tombstone"):
@@ -351,8 +396,8 @@ def cmd_compact(args, ledger):
         status = f.get("status")
         if status == "dismissed":
             resolution = "dismissed"
-        elif status == "accepted" and runs_since(f.get("last_seen_run")) >= n:
-            resolution = "fixed"  # accepted + gone for N runs = fix verified
+        elif status == "accepted" and verified_absent_runs(f) >= n:
+            resolution = "fixed"  # accepted + replayed-and-gone = fix verified
         else:
             continue
         if status == "dismissed" and runs_since(f.get("last_seen_run")) < n:
