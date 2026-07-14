@@ -250,7 +250,19 @@ scenario whose status is not `ok`, and any `plugin_clone_dirty: true`
 
 1. `tanuki-ledger --target <target> promote` lists findings past the bar
    (chronic ≥3 recurrences, or breadth ≥2 scenarios).
-2. Write the brief to `~/.tanuki/<target>/briefs/<run-id>.md`:
+2. **Policy advisory (opt-in — specs/spec-policy-advisory).** Run
+   `tanuki-ledger --target <target> policy-surface`. `{"configured": false}`
+   or `"available": false` → skip this step entirely. Otherwise judge each
+   proposal against the emitted numbered lines — frontier judgment, yours,
+   never delegated to a cheaper model and never reduced to code matching:
+   where a proposal's problem or proposed fix tensions with a policy line,
+   prepare one advisory line
+   `policy: tension — <one clause> vs "<quote>" (<file>:<line>@<commit>)`.
+   No tension → no line. The flags are advisory only: ranking is unaffected,
+   and nothing from the policy surface may enter the ledger, events, or
+   scheduler state. This step exists only here and at the gate (step 4) —
+   never at ingest, drive, or extraction.
+3. Write the brief to `~/.tanuki/<target>/briefs/<run-id>.md`:
    - **Delta this run** first: bumped vs new findings (from step 2.4).
    - **≤`brief_max_proposals` ranked proposals** (default 10; rank by
      recurrence, then breadth, then severity). Each item in this order:
@@ -258,7 +270,8 @@ scenario whose status is not `ok`, and any `plugin_clone_dirty: true`
      concrete spec-change or implementation sketch, issue-shaped, pasteable
      into `gh issue create` but **never auto-filed**) → **Evidence** (one
      compact line of pointers + recurrence, last — it exists for the rare
-     dispute, not for reading).
+     dispute, not for reading). A step-2 `policy: tension` line, when one
+     exists for the item, goes directly under its Evidence line.
    - **Watching**: one line per open finding below the bar, sorted by
      priority and prefixed `P1`/`P2`/`P3` (chronic-or-cross-scenario /
      recurrence-2-or-gap / rest — mirror `tanuki-ledger status`).
@@ -267,13 +280,19 @@ scenario whose status is not `ok`, and any `plugin_clone_dirty: true`
    - **Lesson candidates (for the den)**: transferable conclusions, proposed
      for your knowledge hub — a human moves them; this command never writes
      outside `~/.tanuki/`.
-3. Mark the promoted findings `set-status --id … --status proposed`.
+   - **consulted** (only when the brief carries any `policy: tension` line):
+     one closing line naming which allowlisted policy files/lines were read
+     and which applied — the audit trail for the advisory pass.
+4. Mark the promoted findings `set-status --id … --status proposed`.
 
 ## 4. Decide (the human gate — part of the run, not homework)
 
 Do not end at "here is the report." Present the brief's proposals in-session
-(Problem → Proposal, evidence collapsed to a pointer line), then walk them
-top-down with AskUserQuestion, up to 4 per round, one disposition each:
+(Problem → Proposal, evidence collapsed to a pointer line; include the item's
+`policy: tension` line as context when step 3.2 produced one — the flag never
+pre-selects a disposition, and a policy-motivated dismissal is recorded like
+any other), then walk them top-down with AskUserQuestion, up to 4 per round,
+one disposition each:
 - **accept** → `set-status --id … --status accepted`; then offer — as a
   separate, explicit confirmation — to run the prepared `gh issue create` in
   the target repo. Accepted findings keep their recurrence tracking: the next

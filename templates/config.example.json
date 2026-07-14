@@ -13,5 +13,6 @@
   "regression_every": 3,
   "exploration_quota": 1,
   "low_yield_threshold": 0,
-  "brief_max_proposals": 10
+  "brief_max_proposals": 10,
+  "_policy_source": "optional, omit to disable (default). Example: \"policy_source\": {\"path\": \"~/path/to/policy-repo\", \"files\": [\"GLOSSARY.md\", \"LESSONS.md\"]} — up to 4 repo-relative .md files, read read-only and quoted as advisory context at the brief/decision pass only (specs/spec-policy-advisory)."
 }
