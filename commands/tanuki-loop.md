@@ -57,6 +57,16 @@ live in the scenarios file's `"loop"` block, stored once, never retyped:
    operator's normal working tree; if the worktree cannot be created it stops
    (no shared-tree fallback). It prints the worktree path + integration branch;
    all iteration work happens in that worktree.
+   **Freshness (never dogfood stale code).** `init` fetches the base branch's
+   remote and **fails closed** when the local base is behind its upstream —
+   otherwise every iteration would base on stale plugin code and surface
+   already-fixed findings at the morning gate. Fast-forward the base (or pass
+   `--base origin/<branch>`) and re-run; `--allow-stale-base` is the explicit
+   override for a deliberately un-pushed local branch. The base is **never
+   silently moved** to the upstream tip — the loop always dogfoods the ref the
+   operator named, and `state.json`/the audit record the base tip and any
+   behind-count. (A missing upstream or an offline fetch is tolerated with a
+   note, not a stop.)
 3. Run `${CLAUDE_PLUGIN_ROOT}/tools/tanuki-preflight <plugin-worktree>`; on failure stop
    and report (lint is not the loop's job). `tanuki-ledger --target <target>
    init` (idempotent).

@@ -177,6 +177,45 @@ grep -q "last cycle (iter 2): quiet — no new findings · no patch · quota met
   || fail "dashboard missing convergence explanation"
 pass "dashboard: health verdict, run deltas, scheduler decisions, convergence explanation"
 
+# --- staleness guard (issue #2): never dogfood a base behind its upstream ------
+# A loop repo whose local main tracks an origin that has since moved ahead.
+origin="$tmp/origin"; git init -q --bare "$origin"
+git -C "$origin" symbolic-ref HEAD refs/heads/main
+repo2="$tmp/repo2"
+git init -q "$repo2" && git -C "$repo2" config user.email t@e && git -C "$repo2" config user.name t
+git -C "$repo2" checkout -qb main && echo a > "$repo2/f" && git -C "$repo2" add -A \
+  && git -C "$repo2" commit -qm c0
+git -C "$repo2" remote add origin "$origin" && git -C "$repo2" push -qu origin main
+# Advance origin/main via a second clone, so repo2's local main falls behind.
+other="$tmp/other"; git clone -q "$origin" "$other"
+git -C "$other" config user.email t@e && git -C "$other" config user.name t
+git -C "$other" checkout -q main
+echo b >> "$other/f" && git -C "$other" commit -qam c1 && git -C "$other" push -q origin main
+
+Lb=("$loop" --target tb)
+# init fetches, sees local main 1 behind origin/main, and FAILS CLOSED.
+rc=0; "${Lb[@]}" init --loop-repo "$repo2" --cap 2 >/tmp/stale.json 2>&1 || rc=$?
+[ "$rc" = "2" ] && grep -q "behind" /tmp/stale.json \
+  || fail "init must fail closed when the local base is behind its upstream: $(cat /tmp/stale.json)"
+[ ! -e "$TANUKI_ROOT/tb/loop/current" ] || fail "fail-closed init must not create run state"
+pass "staleness guard: init fails closed when the local base is behind its upstream"
+
+# --allow-stale-base is the explicit override; it proceeds and records the gap,
+# and the base is the LOCAL tip (never silently moved to the upstream tip).
+outb="$("${Lb[@]}" init --loop-repo "$repo2" --cap 2 --allow-stale-base)"
+[ "$(echo "$outb" | jget '["base_behind"]')" = "1" ] \
+  || fail "--allow-stale-base should proceed and record base_behind=1: $outb"
+[ "$(echo "$outb" | jget '["base_sha"]')" = "$(git -C "$repo2" rev-parse main)" ] \
+  || fail "override must dogfood the LOCAL base tip, not the upstream tip"
+pass "staleness guard: --allow-stale-base overrides, records the gap, keeps the local tip"
+
+# Once fast-forwarded, the base is current and init succeeds cleanly.
+git -C "$repo2" merge -q --ff-only origin/main
+out2b="$("${Lb[@]}" init --loop-repo "$repo2" --cap 2)"
+[ "$(echo "$out2b" | jget '["base_behind"]')" = "0" ] \
+  || fail "an up-to-date base must init with base_behind=0: $out2b"
+pass "staleness guard: a fast-forwarded (current) base inits cleanly"
+
 "${L[@]}" defer --finding F5 --reason "needs operator judgment" >/dev/null
 "${L[@]}" finish --reason cap >/dev/null
 "${L[@]}" dashboard > /tmp/dash3.txt

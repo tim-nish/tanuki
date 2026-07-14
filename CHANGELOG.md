@@ -11,6 +11,13 @@ All notable changes to Tanuki are documented here. The format follows
   request (GitHub Actions).
 - `CHANGELOG.md` and a tests/license badge row in the README.
 
+### Fixed
+- `tanuki-loop init` no longer dogfoods stale code: it fetches the base
+  branch's remote and **fails closed** when the local base is behind its
+  upstream (`--allow-stale-base` overrides; the base is never silently moved to
+  the upstream tip). The base tip and any behind-count are recorded in
+  `state.json` and the audit. (#2)
+
 ## [0.1.0] — 2026-07-14
 
 First public release — Tanuki packaged as a Claude Code plugin.

@@ -64,6 +64,18 @@ fully reversible runs unattended.
   item is deferred, never asked.
 - **Fixed iteration cap, set before the run.** A safety ceiling, not the
   success condition (convergence is — see below).
+- **Never dogfood stale code — base freshness is guarded at `init`.** The
+  integration branch is cut from the local base tip, so a local base lagging
+  its remote makes every iteration dogfood outdated plugin code and surface
+  already-fixed findings at the morning gate (issue #2: a real run wasted
+  triage effort confirming remote-fixed findings were non-issues). `init`
+  therefore fetches the base's remote and **fails closed** when the local base
+  is behind its upstream; the operator fast-forwards, names an explicit
+  `--base`, or passes `--allow-stale-base` to dogfood the local tip
+  deliberately. The base is **never silently retargeted** to the upstream tip —
+  what runs is always the ref the operator named, and the base tip + any
+  behind-count are recorded in `state.json` and the audit. A missing upstream
+  or an offline fetch degrades to a recorded note, not a stop.
 
 ## Issue-free by construction
 
@@ -88,7 +100,8 @@ actually landed.
 Every scriptable safety check, invariant, and rollback lives in the
 `tanuki-loop` executable so the model is left responsible **only** for
 judgment (classify, implement) and running the target's tests. The tool owns:
-worktree/branch/base-SHA setup (`init`), the per-iteration start gate —
+worktree/branch/base-SHA setup (`init` — which also **guards base
+freshness**, below), the per-iteration start gate —
 cap / wall-time / external-modification breakers + start-SHA capture + a
 ledger snapshot (`iter-start`), the four-part integration invariant + end-SHA
 capture (`iter-verify`), rollback (`rollback` = `reset --hard` + `clean -fd` +
