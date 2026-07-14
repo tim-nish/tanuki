@@ -14,10 +14,14 @@ A `current` pointer names the active run so subcommands need only --target.
 Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
   init --loop-repo P [--scenarios F] [--cap N] [--base B] [--worktree W]
        [--phase 1|2|3] [--wall-time S] [--token-budget N] [--policy F]
-       [--attempt-cap K] [--test-cmd "<shell cmd>"]
+       [--attempt-cap K] [--test-cmd "<shell cmd>"] [--allow-stale-base]
        --scenarios reads the per-target "loop" block from the scenarios file
        ({"test_cmd", "iterations", "wall_time_s", "token_budget",
         "attempt_cap"}) so a run needs no repo-specific flags; CLI overrides.
+       Fetches <base>'s remote and FAILS CLOSED if the local base is behind
+       its upstream (the loop must never dogfood stale code); --allow-stale-base
+       overrides to dogfood the local tip anyway. The base is never silently
+       moved to the upstream tip.
   iter-start                     cap / wall-time / external-modification breakers;
                                  records the iteration start SHA + ledger snapshot
   iter-verify [--no-patch]       the four-part integration invariant; records end SHA
@@ -189,6 +193,38 @@ def cmd_init(args):
     rc, base_sha = git(repo, "rev-parse", base)
     if rc != 0:
         die(f"cannot resolve base '{base}'")
+    # Staleness guard (issue #2): never silently dogfood code older than the
+    # remote. Best-effort fetch, then FAIL CLOSED if <base> is behind its
+    # upstream — every iteration would otherwise base on stale plugin code and
+    # surface already-fixed findings at the morning gate. --allow-stale-base is
+    # the explicit override (e.g. deliberately testing an un-pushed local
+    # branch). We never silently move the base to the upstream tip; the
+    # operator fast-forwards or overrides deliberately, so what is dogfooded is
+    # always the ref they named.
+    base_note, n_behind = None, 0
+    rc, upstream = git(repo, "rev-parse", "--abbrev-ref",
+                       "--symbolic-full-name", f"{base}@{{upstream}}")
+    upstream = upstream if rc == 0 and upstream else None
+    if upstream:
+        rc_r, remote = git(repo, "config", "--get", f"branch.{base}.remote")
+        fetched = rc_r == 0 and bool(remote) and git(repo, "fetch", remote)[0] == 0
+        rc_b, behind = git(repo, "rev-list", "--count", f"{base}..{upstream}")
+        n_behind = int(behind) if rc_b == 0 and behind.isdigit() else 0
+        if not fetched:
+            base_note = (f"fetch failed (offline?) — staleness checked against "
+                         f"last-known {upstream}")
+        if n_behind > 0:
+            if not args.allow_stale_base:
+                die(f"local base '{base}' is {n_behind} commit(s) behind "
+                    f"'{upstream}'; the loop would dogfood stale code. "
+                    f"Fast-forward it (git -C {repo} merge --ff-only "
+                    f"{upstream}), pass --base {upstream}, or re-run with "
+                    "--allow-stale-base to dogfood the local tip anyway.")
+            base_note = (f"{n_behind} commit(s) behind {upstream} — proceeding "
+                         "under --allow-stale-base"
+                         + (f"; {base_note}" if base_note else ""))
+    else:
+        base_note = f"base '{base}' has no upstream — staleness not checked"
     ts = time.strftime("%Y%m%d-%H%M%S")
     # Same-second re-init must not collide on the branch/run/worktree names.
     n, suffix = 2, ""
@@ -225,15 +261,24 @@ def cmd_init(args):
         "token_budget": tokens, "test_cmd": test_cmd,
         "iterations": [], "attempts": {}, "frozen": [], "deferred": [],
         "quiet_streak": 0, "head_expected": base_sha, "materialized": {},
+        # Base provenance: the loop always dogfoods the LOCAL tip of <base>;
+        # base_upstream/base_behind record what it was measured against so a
+        # reader can see exactly what was dogfooded (issue #2).
+        "base_tip": "local", "base_upstream": upstream,
+        "base_behind": n_behind,
     }
     save_state(state)
     with open(os.path.join(TANUKI_ROOT, args.target, "loop", "current"),
               "w", encoding="utf-8") as f:
         f.write(run)
     audit(state, f"init: integration {integration} @ {base_sha[:12]} "
-                 f"in worktree {worktree}; cap={cap} phase={args.phase}")
+                 f"(base {base} [local tip]"
+                 + (f", {n_behind} behind {upstream}" if n_behind else "")
+                 + f") in worktree {worktree}; cap={cap} phase={args.phase}"
+                 + (f" — {base_note}" if base_note else ""))
     out({"run": run, "integration_branch": integration, "worktree": worktree,
-         "base_sha": base_sha})
+         "base_sha": base_sha, "base_upstream": upstream,
+         "base_behind": n_behind})
 
 
 def _worktree_head(state):
@@ -803,6 +848,7 @@ def main():
     sp.add_argument("--policy", default=None)
     sp.add_argument("--attempt-cap", type=int, default=None)
     sp.add_argument("--test-cmd", default=None)
+    sp.add_argument("--allow-stale-base", action="store_true")
 
     sub.add_parser("iter-start")
     sp = sub.add_parser("iter-verify"); sp.add_argument("--no-patch", action="store_true")
