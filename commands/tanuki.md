@@ -35,12 +35,18 @@ Argument handling ($ARGUMENTS):
 - `<target> --status`: run `tanuki-ledger --target <target> status` and show
   it. No driving.
 - `<target> --history [scenario]`: cross-run scenario monitoring — run
-  `tanuki-scheduler --target <target> history [--scenario <id>]` and show it.
-  Repo-wide: per-scenario state/executions/streaks/recurrence, unexplored,
-  long-unrun, recently productive, and the selection history with reasons;
-  with a scenario id: every execution (date, decision-point pins, yield,
-  findings) plus its transition log. Built from persisted artifacts only
-  (manifests, ledger, scheduler state) — never model memory. No driving.
+  `tanuki-scheduler --target <target> history --scenarios <matrix-file>
+  [--scenario <id>]` and show it. Repo-wide: per-scenario
+  state/executions/streaks/recurrence, unexplored, long-unrun, recently
+  productive, the selection history with reasons — plus, when the matrix
+  declares `axes`/`covers`, the **exploration coverage** block (per axis
+  value: explored / authored-never-run / uncovered), the **exploration
+  debt** summary, and ≤3 advisory next-charter recommendations (never
+  auto-applied — new charters enter only through the plan-gated generation
+  pass). With a scenario id: every execution (date, decision-point pins,
+  yield, findings) plus its transition log. Built from persisted artifacts
+  only (manifests, ledger, scheduler state, the matrix) — never model
+  memory. No driving.
 - `<target> --mine-only <run-id>`: skip driving; mine + consolidate an
   existing run's events (use after a crashed or interrupted session).
 - `<target> --ingest "<feedback>"`: record human feedback in natural
@@ -65,9 +71,15 @@ Run from inside the plugin repo (contract:
    decision points, AND the ledger's finding history when one exists (past
    friction seeds probes the docs would never suggest). Propose 4–6 charters
    (including at least one pinned decision-point branch and one error-path),
-   present them at a plan gate, apply the user's edits, then write
+   **and declare the exploration space with them**: a top-level `axes` block
+   ({axis: {values, note?}}) plus per-scenario `covers` tags ({axis:
+   [values]}) — declaring the branching space is part of the same frontier
+   judgment, and coverage/debt reporting is uncomputable without it. Tools
+   never invent or extend axes; they compute over what this gate ratifies.
+   Present everything at one plan gate, apply the user's edits, then write
    `~/.tanuki/scenarios/<slug>.scenarios.json` and run
-   `tanuki-scheduler --target <slug> sync --scenarios <file>`.
+   `tanuki-scheduler --target <slug> sync --scenarios <file>`. On any
+   regeneration pass, update `axes`/`covers` the same way.
 5. Offer the `"loop"` block (derive a `test_cmd` per /tanuki-loop's rule).
 
 Manual alternative (still supported): copy an existing scenarios file (or the

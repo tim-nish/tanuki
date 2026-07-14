@@ -183,6 +183,57 @@ best-effort from manifests + (capped) ledger evidence and labels them
 `approx`. Everything after this revision is exact. The selection model
 itself is unchanged — this section only *records* what it already does.
 
+## Exploration axes, coverage & debt (REVISED 2026-07-14 #2 — explainability)
+
+History must answer *"what have I never exercised?"*, not only *"what did I
+execute?"*. Coverage is the intersection of a **declared exploration space**
+and the **execution record**. The execution record is already persisted (the
+History & coverage revision); the space is not — it exists only in charter
+prose, so "unexplored" is uncomputable. Two additive schema elements close
+this, both in the scenarios file (Tanuki-owned, never the target repo):
+
+1. **`axes`** (top-level, optional): the declared exploration space —
+   `{"<axis>": {"values": ["…"], "note"?: "…"}}`, e.g. `framework:
+   [F1,F2,F3,F4]`, `article_intent: [devlog, survey, tutorial, postmortem,
+   eval]`, `host_state: [configured, unconfigured, multi-root]`,
+   `error_path: [none, missing-config, empty-output]`, plus decision-point
+   branch spaces and cross-command flows as axes like any other.
+2. **`covers`** (per scenario, optional): structured coverage claims —
+   `{"<axis>": ["<value>", …]}`. Canonical where loose prose keys (e.g. an
+   `intent` field) are not: tools read only `covers`.
+
+**Authorship is frontier judgment, gated:** the generation pass (init /
+regeneration) declares and maintains `axes` and tags `covers`, presented at
+the same plan gate as the charters — declaring the branching space IS the
+charter row of the model-tier table. Tools never invent, rename, or extend
+axes; they only compute over what generation ratified.
+
+**Coverage semantics (deterministic, per axis value):**
+- **explored** — ≥1 *executed* scenario covers the value;
+- **authored** — covered only by scenarios never executed (charter exists,
+  never run) — partially explored;
+- **uncovered** — no scenario covers it: the true blind spot.
+Axis rollup: fully / partially / never explored. Computed by
+`tanuki-scheduler history --scenarios <file>` from `axes`/`covers` plus the
+persisted execution record; rendered as a compact per-axis block and included
+in `--json`.
+
+**Exploration debt (auto-generated, end of history output):** axis values
+uncovered (needs a new charter) · values authored-but-never-run (run the
+existing scenario) · stale scenarios (long-unrun, already computed) ·
+declared decision-point branches with no executed pin. Followed by at most
+**3 recommendations**, ranked by a deterministic greedy rule — first the
+existing never-run scenarios covering the most distinct debt values ("run
+X"), then uncovered-value combinations ("author a charter covering
+framework=F1 + intent=tutorial") for what no scenario covers. Recommendations
+are **advisory only**: history never modifies the matrix — new charters enter
+only through the plan-gated generation pass (proposals-only, inherited).
+
+**Degradation:** a matrix with no `axes` skips coverage/debt with a one-line
+pointer ("no axes declared — run a generation pass to declare the exploration
+space"); existing targets are unaffected until their next generation pass
+adds the block.
+
 ## Compatibility and migration
 
 - **Existing targets keep working untouched.** A hand-written matrix with no

@@ -38,11 +38,18 @@ Subcommands (JSON out):
                                    actionable finding re-promotes); persists
                                    the per-scenario yield snapshot and every
                                    state transition {run, from, to, reason}
-  history [--scenario ID] [--json] cross-run monitoring from persisted
+  history [--scenario ID] [--scenarios F] [--json]
+                                   cross-run monitoring from persisted
                                    artifacts: per-scenario executions (dates,
                                    pins, yield, approx for pre-revision runs),
                                    cumulative findings/recurrence, transition
-                                   log; repo-wide coverage + selection history
+                                   log; repo-wide coverage + selection history.
+                                   With --scenarios (a matrix declaring axes/
+                                   covers): per-axis exploration coverage
+                                   (explored / authored / uncovered), the
+                                   exploration-debt summary, and <=3 advisory
+                                   next-charter recommendations — never
+                                   modifies the matrix
   status                           machine-readable scheduler state
 
 Config (~/.tanuki/config.json, all optional): demote_after 2 ·
@@ -369,6 +376,62 @@ def cmd_history(args):
                   f"rec:{f['recurrence']}")
         return
 
+    # Axis coverage + exploration debt (Exploration axes revision): declared
+    # space (axes/covers in the scenarios file) x execution record. Advisory
+    # only — never modifies the matrix.
+    axes_cov, debt, recs = None, None, []
+    if args.scenarios:
+        with open(os.path.expanduser(args.scenarios), encoding="utf-8") as fh:
+            matrix = json.load(fh)
+        axes = matrix.get("axes") or {}
+        if axes:
+            executed_ids = {s for s, ex in executions.items() if ex}
+            claims = {s["id"]: s.get("covers", {})
+                      for s in matrix.get("scenarios", [])}
+            axes_cov = {}
+            for axis, spec in axes.items():
+                axes_cov[axis] = {}
+                for val in spec.get("values", []):
+                    covering = sorted(sid for sid, cv in claims.items()
+                                      if val in cv.get(axis, []))
+                    run_by = [s for s in covering if s in executed_ids]
+                    status = ("explored" if run_by else
+                              "authored" if covering else "uncovered")
+                    axes_cov[axis][val] = {"status": status,
+                                           "scenarios": covering}
+            debt = {
+                "uncovered": {a: [v for v, d in vs.items()
+                                  if d["status"] == "uncovered"]
+                              for a, vs in axes_cov.items()},
+                "authored_never_run": {a: [v for v, d in vs.items()
+                                           if d["status"] == "authored"]
+                                       for a, vs in axes_cov.items()},
+            }
+            debt = {k: {a: vs for a, vs in v.items() if vs}
+                    for k, v in debt.items()}
+            # Recommendations (deterministic greedy, <=3, advisory only):
+            # 1) never-run scenarios ranked by distinct authored-debt values.
+            authored_vals = {(a, v) for a, vs in
+                             debt.get("authored_never_run", {}).items()
+                             for v in vs}
+            gains = []
+            for sid, cv in claims.items():
+                if sid in executed_ids:
+                    continue
+                got = sorted(f"{a}={v}" for a, vals in cv.items()
+                             for v in vals if (a, v) in authored_vals)
+                if got:
+                    gains.append((len(got), sid, got))
+            for _, sid, got in sorted(gains, key=lambda g: (-g[0], g[1]))[:2]:
+                recs.append(f"run existing scenario '{sid}' "
+                            f"(covers: {', '.join(got)})")
+            # 2) author charters for values nothing covers, grouped per axis.
+            for a, vs in sorted(debt.get("uncovered", {}).items()):
+                if len(recs) >= 3:
+                    break
+                recs.append(f"author a charter covering {a}: {', '.join(vs)}")
+            recs = recs[:3]
+
     # Repo-wide coverage.
     recorded = sched.get("runs_recorded", [])
     rows, cover = [], {"unexplored": [], "long_unrun": [], "productive": []}
@@ -393,6 +456,10 @@ def cmd_history(args):
         if recent_actionable:
             cover["productive"].append(sid)
     data = {"scenarios": rows, "coverage": cover,
+            "axes_coverage": axes_cov,
+            "debt": ({**(debt or {}), "stale_scenarios": cover["long_unrun"]}
+                     if debt is not None else None),
+            "recommendations": recs,
             "selection_history": sched.get("plans", [])[-args.plans:]}
     if args.json:
         out(data)
@@ -414,6 +481,34 @@ def cmd_history(args):
         print(f"  plan [{p.get('run') or '?'}] -> {', '.join(p['plan'])} "
               f"(verify {len(p['verify'])}, explore {len(p['explore'])}, "
               f"quota_met {p['quota_met']})")
+
+    if axes_cov is None:
+        if args.scenarios:
+            print("  (no axes declared — run a generation pass to declare "
+                  "the exploration space)")
+        return
+    marks = {"explored": "+", "authored": "~", "uncovered": "!"}
+    print("\n  exploration coverage (+ explored · ~ authored, never run · "
+          "! uncovered):")
+    for axis, vals in axes_cov.items():
+        statuses = {d["status"] for d in vals.values()}
+        roll = ("fully explored" if statuses == {"explored"} else
+                "never explored" if "explored" not in statuses else
+                "partially explored")
+        cells = "  ".join(f"{marks[d['status']]}{v}" for v, d in vals.items())
+        print(f"    {axis:<16} [{roll}]  {cells}")
+    print("\n  exploration debt:")
+    dbt = data["debt"]
+    for axis, vs in dbt.get("uncovered", {}).items():
+        print(f"    no charter covers   {axis}: {', '.join(vs)}")
+    for axis, vs in dbt.get("authored_never_run", {}).items():
+        print(f"    authored, never run {axis}: {', '.join(vs)}")
+    if dbt.get("stale_scenarios"):
+        print(f"    stale (long-unrun): {', '.join(dbt['stale_scenarios'])}")
+    if not any(dbt.values()):
+        print("    none — the declared space is fully exercised")
+    for i, r in enumerate(recs, 1):
+        print(f"  next: {i}. {r}")
 
 
 def cmd_status(args):
@@ -441,6 +536,8 @@ def main():
     sp = sub.add_parser("record-run"); sp.add_argument("--run", required=True)
     sp = sub.add_parser("history")
     sp.add_argument("--scenario", default=None)
+    sp.add_argument("--scenarios", default=None,
+                    help="scenarios file; enables axis coverage + debt")
     sp.add_argument("--plans", type=int, default=10)
     sp.add_argument("--json", action="store_true")
     sub.add_parser("status")
