@@ -293,18 +293,37 @@ outward-facing record is written until the merge is a fact:
    integration HEAD; abort the gate on failure.
 2. **Merge `integration → main`.** Behind the approval, perform the merge.
 3. **Verify reachability from `main`** (`git merge-base --is-ancestor
-   <integration HEAD> main`). Only past this does anything outward-facing run.
-4. **Materialize** the converged work as GitHub issues — **one issue per
+   <integration HEAD> main`).
+4. **Push `main` to its remote** (`tanuki-loop gate-push`) — the first
+   outward-facing step, before any issue is materialized. A merge that stays
+   local is not done: the commit links step 5 stamps onto issues reference a
+   commit that does not exist on the remote (they 404), and a local-only `main`
+   diverges the remote for any concurrent workflow's `git pull --ff-only`
+   (observed 2026-07-14, run `loop-20260714-154413`: a local-only gate merge
+   forced a manual reconcile after story PRs landed on the remote). A diverged
+   remote is reconciled **explicitly** — `gate-push` fetches and, if the remote
+   moved, refuses rather than force-pushing; the operator merges the remote in,
+   re-runs the final tests, and re-runs `gate-push`. Only past a successful
+   push does anything else outward-facing run.
+5. **Materialize** the converged work as GitHub issues — **one issue per
    resolved problem** (collapsing the intermediate findings), describing **what
    landed**, each stamped with a stable `tanuki-loop-run: <run-id>` marker.
-5. **Link** each issue to the merge commit, **close it as completed**, and
-   reconcile the board to Done.
+6. **Link** each issue to the (now pushed) merge commit, **close it as
+   completed**, and reconcile the board to Done.
 
 **Idempotent retry:** before creating an issue, search for its `<run-id>`
 marker (plus a per-problem key); an existing one is reused, never duplicated.
-If the gate dies after the merge, re-running resumes at step 4 and creates only
+If the gate dies after the push, re-running resumes at step 5 and creates only
 the missing issues. The GitHub history is a clean record of resolved problems,
 not a transcript of the overnight search.
+
+**Branch cleanup has an owner.** Gate step 6 removes the worktree; the deferred
+"delete the integration branch once the merge is confirmed" is then executed by
+`tanuki-loop finish` (with the next `init` for the target as backstop): it
+deletes integration branches whose tip is reachable from the base branch and
+reports any it kept — an **unmerged** tip is never deleted. This closes a leak
+where merged `tanuki-loop/<target>/<ts>` branches accumulated until an unrelated
+tool happened to collect them.
 
 ## Phases (supervision + cap, not separate code paths)
 
@@ -334,6 +353,10 @@ and removing supervision is the only change between phases. The morning
 - A finding may be re-fixed up to its attempt cap (default 4), then it is
   **frozen** — never a whole-loop stop.
 - `integration → main` runs only after explicit approval, merge-first and
-  idempotent; deferred judgment waits for the morning, never auto-decided.
+  idempotent; the base is **pushed to its remote before any issue is
+  materialized** (`gate-push`, never force over a diverged remote); deferred
+  judgment waits for the morning, never auto-decided.
+- Merged integration branches are cleaned up by `finish` (backstop: the next
+  `init`); an unmerged tip is never deleted.
 - Stop on convergence or cap, whichever first; stop immediately on any
   immediate-stop breaker.

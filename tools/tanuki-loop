@@ -38,12 +38,17 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
   defer --finding F --reason "…" append to the morning queue
   log --audit "…"                append to the audit artifact
   gate-check                     integration HEAD reachable from base after the merge
+  gate-push                      push the base branch to its remote (after gate-check,
+                                 before materializing issues); refuses a diverged
+                                 remote rather than force-pushing
   issue-get --key K              print the issue already materialized for a problem key
   issue-put --key K --issue N    record a materialized issue (idempotency)
   policy --finding F --decision "…"   record an iteration-1 judgment answer as
                                  run policy (applied unasked from iteration 2)
   finish --reason R              mark the run terminal (converged | cap |
-                                 gate-ratified | aborted) — machine-readable
+                                 gate-ratified | aborted) — machine-readable;
+                                 also deletes merged integration branches for
+                                 the target (unmerged tips kept) — issue #6
   status                         JSON summary for the morning gate
   dashboard [--follow SECS]      operational status, one screen: health verdict,
                                  latest drive with each anomaly classified against
@@ -176,6 +181,33 @@ def plan_record(state, iter_n):
     return next((p for p in reversed(plans) if p.get("run") == rid), None)
 
 
+def cleanup_merged_integration_branches(repo, base, target):
+    """Delete this target's integration branches whose tip is reachable from
+    <base> (i.e. merged); keep unmerged tips, and skip any branch still checked
+    out in a worktree. This is the owner of gate step 6's deferred "later branch
+    cleanup" (issue #6) — nothing else ever deleted them, so merged
+    `tanuki-loop/<target>/<ts>` branches used to accumulate until an unrelated
+    tool collected them. Returns {"deleted", "kept", "skipped"}."""
+    prefix = f"tanuki-loop/{target}/"
+    rc, refs = git(repo, "for-each-ref", "--format=%(refname:short)",
+                   f"refs/heads/{prefix}*")
+    branches = [b for b in refs.splitlines()
+                if b.startswith(prefix)] if rc == 0 else []
+    rc_w, wt = git(repo, "worktree", "list", "--porcelain")
+    checked_out = {ln[len("branch "):].replace("refs/heads/", "")
+                   for ln in wt.splitlines() if ln.startswith("branch ")}
+    deleted, kept, skipped = [], [], []
+    for b in branches:
+        if b in checked_out:
+            skipped.append(b)                       # can't delete a live branch
+        elif git(repo, "merge-base", "--is-ancestor", b, base)[0] == 0:
+            (deleted if git(repo, "branch", "-D", b)[0] == 0
+             else skipped).append(b)
+        else:
+            kept.append(b)                          # unmerged tip — never delete
+    return {"deleted": deleted, "kept": kept, "skipped": skipped}
+
+
 # --- subcommands -------------------------------------------------------------
 
 def cmd_init(args):
@@ -240,6 +272,11 @@ def cmd_init(args):
                          + (f"; {base_note}" if base_note else ""))
     else:
         base_note = f"base '{base}' has no upstream — staleness not checked"
+    # Sweep merged integration branches from prior runs (issue #6) BEFORE
+    # cutting this run's branch — the fresh branch starts at the base tip, so
+    # doing this after would make it a deletion candidate. The next init for a
+    # target is the backstop owner if a run ended without reaching `finish`.
+    cleaned = cleanup_merged_integration_branches(repo, base, args.target)
     ts = time.strftime("%Y%m%d-%H%M%S")
     # Same-second re-init must not collide on the branch/run/worktree names.
     n, suffix = 2, ""
@@ -293,7 +330,7 @@ def cmd_init(args):
                  + (f" — {base_note}" if base_note else ""))
     out({"run": run, "integration_branch": integration, "worktree": worktree,
          "base_sha": base_sha, "base_upstream": upstream,
-         "base_behind": n_behind})
+         "base_behind": n_behind, "branch_cleanup": cleaned})
 
 
 def _worktree_head(state):
@@ -495,6 +532,48 @@ def cmd_gate_check(args):
     out({"reachable": True, "integration_head": integ_head})
 
 
+def cmd_gate_push(args):
+    """Push the base branch to its remote — the morning gate's FIRST
+    outward-facing step, run after the merge + gate-check and BEFORE issues are
+    materialized (issue #5). Until the merge commit exists on the remote, the
+    issue links the gate stamps onto materialized issues 404 and "close as
+    completed" cites evidence nobody can see; leaving main local-only also
+    diverges the remote for the next workflow's `git pull --ff-only`. A diverged
+    remote is handled explicitly — refuse and ask the operator to reconcile,
+    never force-push."""
+    state = load_state(args.target, args.run)
+    repo, base = state["loop_repo"], state["base"]
+    rc, upstream = git(repo, "rev-parse", "--abbrev-ref",
+                       "--symbolic-full-name", f"{base}@{{upstream}}")
+    if rc != 0 or not upstream:
+        die(f"base '{base}' has no upstream to push to — set one "
+            f"(git -C {repo} push -u origin {base}) then re-run gate-push")
+    rc_r, remote = git(repo, "config", "--get", f"branch.{base}.remote")
+    if rc_r != 0 or not remote:
+        die(f"no remote configured for base '{base}'")
+    git(repo, "fetch", remote)  # refresh the tracking ref before deciding
+    ahead = git(repo, "rev-list", "--count", f"{base}..{upstream}")[1]
+    n_ahead = int(ahead) if ahead.isdigit() else 0
+    if n_ahead > 0:  # remote diverged — a plain push would not fast-forward
+        audit(state, f"gate-push BLOCKED: '{upstream}' is {n_ahead} commit(s) "
+                     f"ahead of local '{base}' (diverged)")
+        out({"pushed": False, "diverged": True, "upstream": upstream,
+             "upstream_ahead": n_ahead,
+             "hint": f"reconcile without force (git -C {repo} merge --no-edit "
+                     f"{upstream}), re-run the final tests, then re-run "
+                     "gate-push"})
+        sys.exit(3)
+    rc_p, err = git(repo, "push", remote, base)
+    if rc_p != 0:
+        die(f"push of '{base}' to '{remote}' failed (not forced): {err}")
+    head = git(repo, "rev-parse", base)[1]
+    state["pushed"] = {"remote": remote, "ref": upstream, "sha": head,
+                       "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    save_state(state)
+    audit(state, f"gate-push: pushed '{base}' -> {remote} @ {head[:12]}")
+    out({"pushed": True, "remote": remote, "ref": upstream, "base_sha": head})
+
+
 def cmd_issue_get(args):
     state = load_state(args.target, args.run)
     print(state["materialized"].get(args.key, ""))
@@ -537,7 +616,18 @@ def cmd_finish(args):
                          "at": time.strftime("%Y-%m-%d %H:%M:%S")}
     save_state(state)
     audit(state, f"run finished: {args.reason}")
-    out({"ok": True, "reason": args.reason})
+    # Own the deferred "later branch cleanup" (issue #6): delete merged
+    # integration branches for this target, keep unmerged tips. Safe for every
+    # terminal reason — a non-gate-ratified run's branch is not reachable from
+    # base, so it is kept, not deleted.
+    cleaned = cleanup_merged_integration_branches(
+        state["loop_repo"], state["base"], state["target"])
+    if any(cleaned.values()):
+        audit(state, "branch cleanup — deleted: "
+                     f"{cleaned['deleted'] or 'none'}; kept (unmerged): "
+                     f"{cleaned['kept'] or 'none'}; skipped (worktree): "
+                     f"{cleaned['skipped'] or 'none'}")
+    out({"ok": True, "reason": args.reason, "branch_cleanup": cleaned})
 
 
 def _fmt_ids(ids, cap=6):
@@ -879,6 +969,7 @@ def main():
     sp.add_argument("--finding", required=True); sp.add_argument("--reason", required=True)
     sp = sub.add_parser("log"); sp.add_argument("--audit", required=True)
     sub.add_parser("gate-check")
+    sub.add_parser("gate-push")
     sp = sub.add_parser("issue-get"); sp.add_argument("--key", required=True)
     sp = sub.add_parser("issue-put")
     sp.add_argument("--key", required=True); sp.add_argument("--issue", required=True)
@@ -893,7 +984,8 @@ def main():
     {"init": cmd_init, "iter-start": cmd_iter_start, "iter-verify": cmd_iter_verify,
      "rollback": cmd_rollback, "test": cmd_test, "attempt": cmd_attempt,
      "record-cycle": cmd_record_cycle, "defer": cmd_defer, "log": cmd_log,
-     "gate-check": cmd_gate_check, "issue-get": cmd_issue_get,
+     "gate-check": cmd_gate_check, "gate-push": cmd_gate_push,
+     "issue-get": cmd_issue_get,
      "issue-put": cmd_issue_put, "policy": cmd_policy, "finish": cmd_finish,
      "dashboard": cmd_dashboard, "status": cmd_status}[args.cmd](args)
 
