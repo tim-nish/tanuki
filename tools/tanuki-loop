@@ -811,7 +811,10 @@ def cmd_rollback(args):
     save_state(state)
     audit(state, f"iter {it['n']}: rolled back to {start[:12]}; "
                  f"removed untracked: {removed_paths or 'none'}")
-    out({"ok": True, "reset_to": start, "removed": removed_paths})
+    # 'removed_untracked' names ONLY the git clean -fd paths; the reset --hard
+    # also silently discards tracked/staged changes back to the start SHA, which
+    # this list does not enumerate (F69).
+    out({"ok": True, "reset_to": start, "removed_untracked": removed_paths})
 
 
 def cmd_recover(args):
@@ -1538,8 +1541,10 @@ def main():
     sub.add_parser(
         "rollback",
         help="reset the loop worktree --hard to the iteration start SHA + git "
-             "clean -fd (removed paths logged); the rolled-back iteration still "
-             "counts toward the --cap ceiling (F27)")
+             "clean -fd; reports the cleaned untracked paths as "
+             "'removed_untracked' (reset --hard also discards tracked/staged "
+             "changes, which that list does not enumerate); the rolled-back "
+             "iteration still counts toward the --cap ceiling (F27, F69)")
     sp = sub.add_parser(
         "recover",
         help="attended recovery from the external-modification breaker "
