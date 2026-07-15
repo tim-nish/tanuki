@@ -77,7 +77,7 @@ exists — Tanuki runs with zero configuration.
 | `est_cost_per_scenario_usd` | `1.5` | drive `--estimate` | fallback when no run history exists |
 | `min_recurrence` | `3` | ledger promote | chronic threshold |
 | `min_scenarios` | `2` | ledger promote | breadth threshold |
-| `compaction_unseen_runs` | `3` | ledger compact | runs of absence before a dismissed / verified-fixed finding tombstones |
+| `compaction_unseen_runs` | `3` | ledger compact | driven-and-absent runs (runs that replayed the finding's scenario without it recurring — spec-tanuki-scenario-lifecycle) before a dismissed / verified-fixed finding tombstones |
 | `demote_after` | `2` | scheduler | consecutive low-yield runs before a scenario demotes to the regression pool (hysteresis) |
 | `regression_every` | `3` | scheduler | undriven runs before a regression-pool scenario is due again (never deleted) |
 | `exploration_quota` | `1` | scheduler | unexplored scenarios each plan must include while any exist |
@@ -179,9 +179,13 @@ exact-dupe collapse by fingerprint), `findings` (list, with recurrence counts
 and event pointers), `upsert-finding` (create or bump: `--match <id>` bumps
 recurrence and appends evidence; no match creates a new finding with a fresh
 id), `promote --min-recurrence N` (list chronic/high-confidence candidates),
-`set-status`, `stats`, and `status` (the human-readable "where was I?" view:
+`set-status`, `stats`, `status` (the human-readable "where was I?" view:
 runs, latest brief, findings awaiting decision with P1–P3 priorities,
-accepted-awaiting-verification, top watching items).
+accepted-awaiting-verification, top watching items), `ingest-note` (verbatim
+human-feedback event — see "Human feedback ingest"), `compact` (tombstone the
+dead tail per the growth policy), `scenario-yield` (per-scenario actionable
+yield over recent runs), and `policy-surface` (the pinned policy read —
+spec-policy-advisory).
 
 **Finding lifecycle** (the decision states are first-class — Tanuki is
 decision support, not reporting): `open` (below the promotion bar) →
@@ -243,10 +247,12 @@ evidence. Indefinite growth is acceptable *only* under three invariants:
    remain the complete archive; the ledger stores enough to *find* evidence,
    not to *be* it.
 3. **Compaction of the dead tail:** records tied only to `dismissed` or
-   verified-fixed findings and unseen for N runs compact to one-line
-   tombstones (id, resolution, count) — kept for dedupe so nothing
-   resurfaces as new, but stripped of per-run detail. Regression analysis
-   over compacted history goes to `raw.jsonl`.
+   verified-fixed findings and absent for N **driven-and-absent** runs (runs
+   that actually replayed the finding's scenario without it recurring —
+   spec-tanuki-scenario-lifecycle's verify semantics; mere elapsed runs don't
+   count) compact to one-line tombstones (id, resolution, count) — kept for
+   dedupe so nothing resurfaces as new, but stripped of per-run detail.
+   Regression analysis over compacted history goes to `raw.jsonl`.
 
 After dedupe, the Miner reports the **run delta** to the user: which findings
 were bumped (id, recurrence before→after) and which are new — the human never
@@ -254,8 +260,9 @@ has to remember prior runs to know what "already known" means.
 
 ### 3. Consolidator — `tools/tanuki-ledger promote` + one frontier-model pass + the decision pass
 
-Reads promotion candidates (chronic ≥3, or high-confidence: severe + ≥2
-scenarios) and writes the run's **brief**:
+Reads promotion candidates (chronic: recurrence ≥3, or breadth: seen in ≥2
+scenarios — the two thresholds `promote` implements; there is no severity
+input) and writes the run's **brief**:
 `~/.tanuki/<target>/briefs/<run>.md` — capped at `brief_max_proposals` ranked
 items. **Item order within each proposal: Problem → Proposal → Evidence** —
 the problem statement and the concrete fix are what the reader decides on;
@@ -298,19 +305,25 @@ proposals → labeled issues.) Fix verification needs no back-channel either:
 an accepted finding is verified by its *absence* in later runs, regardless of
 who implemented the fix or how.
 
-## Command — `/tanuki [target] [scenarios… | --brief | --status | --mine-only <run> | --ingest "<feedback>"]`
+## Command — `/tanuki [target] [scenarios… | init | --brief | --status | --history | --mine-only <run> | --ingest "<feedback>" | "<ad-hoc free text>"]`
+
+(`commands/tanuki.md` is authoritative for the full argument grammar —
+including `init` onboarding, `--history`, and ad-hoc free-text scenarios from
+spec-tanuki-scenario-lifecycle; this section states the pipeline contract.)
 
 `commands/tanuki.md` orchestrates: resolve target config
 (`~/.tanuki/scenarios/<target>.scenarios.json`) → preflight (stop on failure) →
 plan gate → drive (subset of scenarios if named) → mine → consolidate →
 decision pass. UX rules, from dogfooding Tanuki itself:
 
-- **No-argument invocation is a picker, not an error**: `/tanuki` lists the
-  available targets (every `~/.tanuki/scenarios/*.scenarios.json`) with each
-  target's one-line `status` summary, and asks which to run
-  (AskUserQuestion — selection beats typing names without completion).
-  Adding a target = copying an existing scenarios file; no config edit is
-  needed to switch targets.
+- **No-argument invocation resolves, then falls back to a picker — never an
+  error** (resolution order per commands/tanuki.md and
+  spec-tanuki-scenario-lifecycle): explicit argument → registry match for the
+  cwd (`~/.tanuki/registry.json`) → single configured target → **picker**
+  listing every `~/.tanuki/scenarios/*.scenarios.json` target with its
+  one-line `status` summary (AskUserQuestion — selection beats typing names
+  without completion). Adding a target = copying an existing scenarios file;
+  no config edit is needed to switch targets.
 - **The plan gate confirms execution before anything runs** (attended
   `/tanuki` only): scenario list, models, expected duration (from run history)
   and turn caps, and *how* it will execute (headless `claude` processes via

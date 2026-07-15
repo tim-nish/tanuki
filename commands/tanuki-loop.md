@@ -59,8 +59,11 @@ live in the scenarios file's `"loop"` block, stored once, never retyped:
    same measurement `init` fails closed on), that **`test_cmd` passes on the
    base tip** (in a throwaway detached worktree, removed afterward — a
    baseline failure would trip the test breaker on inherited state, not a
-   regression), and **policy coverage** (which actionable findings have no
-   policy answer and would defer — informational, never fatal). Not-ready
+   regression), **policy coverage** (which actionable findings have no
+   policy answer and would defer — informational, never fatal), and **host
+   cloneable** (hosted targets: the live host path exists and a throwaway
+   clone succeeds, per spec-host-snapshot; hostless targets pass with a
+   note). Not-ready
    follows the breaker convention (`{"breaker": …}` + exit 3, nothing
    persisted); fix the named checks before `init`. Phase 1 runs may skip
    this step.
@@ -245,7 +248,9 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
 of **operational status, not internal state** — within seconds the operator
 can answer: is the loop healthy, did anything unexpected happen, what did
 this run change, is the scheduler behaving as intended, and what decision
-comes next. Sections, in order:
+comes next. Sections, in order — **always rendered** (a section whose
+substrate is missing degrades to an explicit one-line reason, never a silent
+omission; spec-tanuki-loop "Fixed skeleton"):
 - **health** — one OK / ATTENTION / DONE verdict with the reason (breaker,
   unmatched anomaly, cap-without-convergence, pending gate decisions).
 - **latest drive** — live progress plus per-scenario results, every

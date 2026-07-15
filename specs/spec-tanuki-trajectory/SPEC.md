@@ -1,0 +1,188 @@
+# Spec: Tanuki trajectory — typed path events, coverage diff, and the trajectory view
+
+Status: PROPOSED 2026-07-15, awaiting operator ratification. The *concept* is
+already ratified operator policy (2026-07-15 rulings on the operator's policy
+surface); this spec is its executable design. Extends `docs/tanuki-spec.md`
+(the Event vocabulary — mechanical enrichment only) and
+`specs/spec-tanuki-scenario-lifecycle/SPEC.md` (consumes its `axes`/`covers`
+declarations and lands on its `history` surface). It amends no existing
+contract: the pipeline nouns (Event → Finding → Proposal) and the one-way
+flow are unchanged.
+
+Problem: per-run choice data is captured (Events record what happened; the
+raw stream is persisted per scenario), but nothing renders the simulated
+user's **actual path** — Q1→selected A, Q2→selected B, error→recovery→outcome.
+`tanuki-scheduler history` shows decision-point pins, yield, and findings,
+never the step-by-step trajectory. Worse, the decision points a run *actually
+hit* are never compared with the ones the matrix *declares* (`axes`/`covers`),
+so undeclared decision points — the true exploration blind spots — surface
+only when a human reads raw logs.
+
+## 0. Concept constraints (ratified — the design must not drift from these)
+
+- **Trajectory is a view, never a fourth pipeline noun.** It is a
+  deterministic rendering over the persisted per-scenario event/raw stream.
+  It is never stored whole (not in the ledger, not as a new artifact class),
+  never judged, and never becomes a reward/search structure — adaptive
+  scheduling by value-backup over trajectories (MCTS and kin) is rejected
+  policy: exploitation starves coverage, and consumable/deduped reward breaks
+  the stationarity such search assumes.
+- **Capture never judges.** The capture-side guarantee is *mechanical* Event
+  enrichment: typed markers lifted verbatim from the raw stream by string
+  match. Any judgment (is this friction? should this become a charter?)
+  stays downstream at extraction / the human gate.
+- **The ledger growth policy holds.** No stage loads the ledger whole; the
+  renderer reads per-run event files and prints — it adds nothing to
+  `ledger.json`.
+- **Coverage-diff output is advisory and plan-gated.** Undeclared decision
+  points surface as *charter seeds*; a seed becomes a charter only through
+  the plan gate. Never auto-charter, never an automatic spec/matrix edit.
+
+## 1. Capture guarantee — typed trajectory events (prerequisite)
+
+The existing Event `type` vocabulary (`docs/tanuki-spec.md`) is
+`{tool_error, permission_block, retry, user_choice, skill_start, skill_end,
+result, budget, note}`. This spec adds **two** members and gives one existing
+member structured fields — no new choice type is introduced; `user_choice`
+already names the concept and is reused:
+
+| type          | status   | meaning                                             | structured fields |
+|---------------|----------|-----------------------------------------------------|-------------------|
+| `user_choice` | existing | the simulated user selected an option at a decision point | gains `point` (decision-point name), `selected`, `alternatives?` (list) — optional, marker-lifted; a `user_choice` without them is a legacy event |
+| `recovery`    | **new**  | a successful continuation bound to a prior error    | `of_seq` (the `seq` of the `tool_error` it recovers) |
+| `outcome`     | **new**  | the terminal disposition of the scenario            | `disposition` (`success` \| `gave_up` \| `partial`), free-text `detail` |
+
+Mechanics (all inside `tanuki-drive`'s existing normalize pass — no new tool,
+no LLM in the loop):
+
+1. **Marker grammar.** The drive-injected simulated-user preamble (drive's
+   own boilerplate, never per-scenario prose) instructs the driver to emit
+   one line per decision:
+   `TANUKI-CHOICE point=<name> selected=<value> [alternatives=<v1|v2|…>]`
+   and one terminal line:
+   `TANUKI-OUTCOME disposition=<success|gave_up|partial> <free text>`.
+2. **Mechanical lift.** Normalize scans `<scenario>.raw.jsonl` for the marker
+   grammar and lifts each match verbatim into a typed Event
+   (`{run, scenario, seq, type, detail, …structured fields}`) in
+   `<scenario>.events.jsonl`. String match only; malformed markers are
+   ignored with a count in the manifest (`trajectory_markers_dropped`).
+3. **Recovery binding.** Normalize emits a `recovery` event when a
+   `tool_error` is followed (same scenario) by a successful step that the
+   raw stream ties to the same operation — the deterministic rule: the next
+   marker or tool success whose detail names the same command/subcommand.
+   No inference beyond that rule; unmatched errors simply have no recovery
+   event.
+4. **Guarantee.** Every completed scenario run yields ≥1 `outcome` event
+   (normalize synthesizes `disposition=partial` from the driver `result`
+   event when the driver emitted no marker — flagged `synthesized: true`).
+   Existing runs predate the grammar; nothing is backfilled.
+
+The existing exact-dupe collapse, capped-exemplar evidence, and one-way flow
+apply to the new types unchanged — they are Events like any other.
+
+## 2. Coverage diff — observed vs declared (build first)
+
+The payoff piece, and deterministic set arithmetic end to end:
+
+- **Observed decision points** = the distinct `user_choice.point` values in the
+  execution record's event files, per scenario and per target.
+- **Declared decision points** = the matrix's `axes` keys plus every axis
+  claimed in any scenario's `covers`.
+
+`tanuki-scheduler history --scenarios <file>` gains a **coverage-diff block**
+(rendered after the existing coverage/debt section):
+
+```
+coverage diff (observed vs declared):
+  undeclared decision points (observed in trajectories, absent from axes):
+    <point> — seen in <k> scenario(s) (<ids>), <n> run(s); values seen: <v1, v2…>
+      -> charter seed (plan-gated)
+  declared but never observed: <axis>=<value>, …   (lifecycle states: authored | uncovered — pointer)
+```
+
+- Each **undeclared** point is printed as a charter seed with its evidence
+  pointers (`run/scenario#seq`). The seed's only exit is the plan gate: the
+  generation pass may present it for ratification into `axes`/`covers` or a
+  new charter. The tool never writes the matrix.
+- The **declared-but-never-observed** side defers to the lifecycle spec's
+  existing per-value coverage states — it is the union of `authored`
+  (covered by a never-executed scenario) and `uncovered` (no scenario covers
+  it) — rendered as one pointer line, no duplication.
+- Degradation: no `axes` declared → the block prints the observed-point list
+  only, with the lifecycle spec's existing "no axes declared" pointer; no
+  typed events yet → one line: `no trajectory events recorded — coverage
+  diff needs runs made after the marker grammar landed`.
+
+## 3. Trajectory view — `tanuki-scheduler history --scenario <id> --trajectory`
+
+The Q-by-Q rendering (second build step). `--trajectory` is a boolean mode
+flag composing with `history`'s existing `--scenario <id>` selector (no
+second scenario-valued flag is introduced):
+
+```
+tanuki-scheduler --target <t> history --scenario <id> --trajectory [--run <run>]
+```
+
+- Renders each run of the scenario (newest first; `--run` filters to one) as
+  a seq-ordered path, one compact line per step:
+  ```
+  <run>  (<date>, <events> events)
+    #3 user_choice doctor-entry: selected=--help        (alt: README|source)
+    #5 error    Bash exit 2 — missing --loop-repo
+    #6 recovery of #5 — re-ran with --loop-repo
+    #9 outcome  success — ready report understood
+  ```
+- Reads only the per-run `events.jsonl` files (plus `raw.jsonl` seq pointers
+  for evidence); prints and exits. It writes nothing, judges nothing, scores
+  nothing, and loads no ledger.
+- Runs that predate typed events degrade to the `tool_error`/`result` chain
+  with a `(pre-trajectory run — choices not recorded)` note.
+- The plain `history` view is unchanged (pins/yield/findings); trajectory is
+  strictly additive behind the flag.
+
+## Build order
+
+1. §1 typed event enrichment (prerequisite for both consumers).
+2. §2 coverage diff — the ratified first payoff.
+3. §3 trajectory renderer.
+
+## Constraints
+
+- Deterministic tools only: marker lift, recovery binding, set diff, and
+  rendering are string/set arithmetic — no LLM stage anywhere in this spec.
+- One-way flow preserved: Events → Findings → Proposals; nothing here flows
+  backward, and nothing here creates a Finding or Proposal directly.
+- Charter seeds enter only via the plan gate; the tools never modify
+  `axes`, `covers`, scenarios, or any spec.
+- Ledger growth policy: no whole-ledger reads; no trajectory storage in
+  `ledger.json`; per-run event files remain the substrate, `raw.jsonl` the
+  archive.
+- Publication boundary: this spec states the mechanism only; decision
+  provenance lives on the operator's private policy surface.
+
+## Non-goals
+
+- A stored trajectory entity, database, or fourth pipeline noun — the view
+  is recomputed from events on every invocation.
+- Trajectory-driven scheduling, scoring, or search (MCTS or any
+  value-backup structure) — adaptivity stays a plan-gated scheduling nudge.
+- Auto-creating charters, editing the matrix, or updating specs from
+  observations — findings never auto-update specs.
+- Judging events at capture (friction classification stays in extraction).
+- Backfilling markers into historical runs.
+- Any served API or cross-repo access layer.
+
+## Acceptance
+
+- A fresh drive of one scenario yields `user_choice` (with `point`/`selected`)/`outcome` events in its
+  `events.jsonl` matching markers in `raw.jsonl` one-to-one; a run whose
+  driver emits no outcome marker still gets a synthesized `outcome`.
+- `history` prints the coverage-diff block; introducing a marker with a
+  `point` absent from `axes` surfaces it as a charter seed with correct
+  evidence pointers; ratifying it via the plan gate removes it from the
+  undeclared list on the next render.
+- `history --scenario <id> --trajectory` renders the path above from event files alone
+  (verified: no ledger read, no writes anywhere).
+- All three additions leave every existing test green and every existing
+  output (plain `history`, dashboard, brief) byte-identical when the new
+  flags are absent and no typed events exist.
