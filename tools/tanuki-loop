@@ -776,6 +776,14 @@ def cmd_recover(args):
     iterations, adjusts only head_expected/the worktree/the audit, and never
     mutates a closed iteration. Two explicit modes, no default; the operator
     chooses. Nothing here is ever invoked by the loop itself."""
+    # A missing mode is a refusal in the tool's own JSON convention (F37), not
+    # an argparse usage error — a scripted caller parses exit-3 {"breaker": …}.
+    if not args.restore and not args.adopt:
+        out({"breaker": "recover: choose exactly one mode — --restore "
+                        "(discard the external change, reset to the last "
+                        "verified loop state) or --adopt (re-baseline around "
+                        "it)"})
+        sys.exit(3)
     state = load_state(args.target, args.run)
 
     def refuse(msg):
@@ -1098,9 +1106,14 @@ def _fmt_ids(ids, cap=6):
     return s + (f" +{len(ids) - cap} more" if len(ids) > cap else "")
 
 
-def _short(text, n=90):
+def _short(text, n=90, pointer=None):
+    # Truncation on the dashboard must never hide a reason silently (F7): when
+    # it clips, it marks the clip AND points at the full text.
     text = " ".join((text or "").split())
-    return text if len(text) <= n else text[:n - 1] + "…"
+    if len(text) <= n:
+        return text
+    marker = "…" + (f" — full: {pointer}" if pointer else "")
+    return text[:n - 1] + marker
 
 
 def _queue_reasons(state):
@@ -1207,48 +1220,55 @@ def cmd_dashboard(args):
         cur = state["iterations"][-1] if state["iterations"] else None
         elapsed = int(time.time() - state["wall_start"])
 
-        # -- latest drive: progress + per-scenario results, anomalies classified
+        # -- (section 2) latest drive — ALWAYS present (Fixed skeleton): a
+        #    missing progress.json degrades to a stated reason, never absence.
         drive_lines, driving, unmatched = [], False, 0
-        if cur:
-            ppath = os.path.join(TANUKI_ROOT, state["target"], "events",
-                                 f"{state['run']}-iter{cur['n']}",
-                                 "progress.json")
-            if os.path.exists(ppath):
-                with open(ppath, encoding="utf-8") as f:
-                    p = json.load(f)
-                driving = (p.get("stage") != "complete"
-                           and cur["phase"] == "started")
-                if driving:
-                    drive_lines.append(
-                        f"  NOW: iter {cur['n']} driving "
-                        f"[{p['done']}/{p['total']}] {p.get('current')} — "
-                        f"{p.get('stage')} ({p.get('elapsed_s', 0)}s, "
-                        f"{p.get('captured_kb', 0)}KB)")
-                drive_lines.append(f"  latest drive (iter {cur['n']}):")
-                for r in p.get("results", []):
-                    line = (f"    {r['scenario']:<22} {r['status'][:28]:<28}"
-                            f" {r['events']:>3} events "
-                            f"{int(r.get('duration_s') or 0):>4}s")
-                    if not str(r.get("status", "")).startswith("ok"):
-                        known, tag = _classify_anomaly(r["scenario"],
-                                                       findings, state)
-                        unmatched += 0 if known else 1
-                        line += f"  <- {tag}"
-                    drive_lines.append(line)
-            elif cur["phase"] == "started":
-                driving = True
-                drive_lines.append(f"  NOW: iter {cur['n']} in progress "
-                                   "(pre-drive or mining/implementing)")
+        ppath = (os.path.join(TANUKI_ROOT, state["target"], "events",
+                              f"{state['run']}-iter{cur['n']}", "progress.json")
+                 if cur else None)
+        if ppath and os.path.exists(ppath):
+            with open(ppath, encoding="utf-8") as f:
+                p = json.load(f)
+            driving = (p.get("stage") != "complete"
+                       and cur["phase"] == "started")
+            if driving:
+                drive_lines.append(
+                    f"  NOW: iter {cur['n']} driving "
+                    f"[{p['done']}/{p['total']}] {p.get('current')} — "
+                    f"{p.get('stage')} ({p.get('elapsed_s', 0)}s, "
+                    f"{p.get('captured_kb', 0)}KB)")
+            drive_lines.append(f"  latest drive (iter {cur['n']}):")
+            for r in p.get("results", []):
+                line = (f"    {r['scenario']:<22} {r['status'][:28]:<28}"
+                        f" {r['events']:>3} events "
+                        f"{int(r.get('duration_s') or 0):>4}s")
+                if not str(r.get("status", "")).startswith("ok"):
+                    known, tag = _classify_anomaly(r["scenario"],
+                                                   findings, state)
+                    unmatched += 0 if known else 1
+                    line += f"  <- {tag}"
+                drive_lines.append(line)
+        elif cur and cur["phase"] == "started":
+            driving = True
+            drive_lines.append(f"  latest drive (iter {cur['n']}): none yet — "
+                               "iteration started, drive not begun "
+                               "(no progress.json)")
+        else:
+            drive_lines.append("  latest drive: none yet — no iteration has "
+                               "started a drive")
 
         lines = [f"tanuki-loop — {state['target']} / {state['run']}",
                  f"  health: {_health(state, driving, unmatched)}",
                  f"  integration: {state['integration_branch']}  "
                  f"(base {state['base']})",
-                 f"  iterations: {n_done}/{state['cap']} · elapsed "
-                 f"{elapsed // 60}m"]
+                 # F29: the counter is *consumed* iterations (rolled-back ones
+                 # count), so "cap hit" beside it never reads as a contradiction.
+                 f"  iterations: {n_done}/{state['cap']} consumed "
+                 f"(rolled-back count too) · elapsed {elapsed // 60}m"]
         lines += drive_lines
 
-        # -- this run's ledger movement (run-scoped; lifetime is one pointer)
+        # -- (section 3) this run's ledger movement — ALWAYS present; lifetime
+        #    totals stay a single pointer to the history view.
         deltas = _run_deltas(state, findings)
         reasons = _queue_reasons(state)
         if deltas:
@@ -1261,15 +1281,22 @@ def cmd_dashboard(args):
                 part("recurred", deltas["recurred"]),
                 f"deferred {len(state.get('deferred', []))}",
                 f"frozen {len(state.get('frozen', []))}")))
+            # F6: define the counters inline — 'fixed' is a ledger transition,
+            # not a landed commit, so 'fixed 0' beside a patch isn't a paradox.
+            lines.append("    (fixed = findings that stopped recurring this "
+                         "run, not commits; recurred = recurrence bumped)")
             if deltas["legacy"]:
                 lines.append("    (run predates status snapshots — "
                              "fixed/recurred not computable)")
             for fid in state.get("deferred", []):
                 lines.append(f"    deferred {fid}: "
-                             f"{_short(reasons.get(fid, 'see queue.md'))}")
+                             f"{_short(reasons.get(fid, 'see queue.md'), pointer='queue.md')}")
             for fid in state.get("frozen", []):
                 lines.append(f"    frozen {fid} (attempt cap): "
-                             f"{_short(reasons.get(fid, 'see queue.md'))}")
+                             f"{_short(reasons.get(fid, 'see queue.md'), pointer='queue.md')}")
+        else:
+            lines.append("  this run: no ledger movement yet — no iteration "
+                         "has started")
         if findings:
             by = {}
             for fd in findings:
@@ -1277,11 +1304,17 @@ def cmd_dashboard(args):
             lines.append(f"  findings: {len(findings)} lifetime — " +
                          " · ".join(f"{k} {v}" for k, v in sorted(by.items())) +
                          f" (history: /tanuki {state['target']} --history)")
+        else:
+            lines.append("  findings: none in the ledger yet")
 
-        # -- scheduler: its DECISIONS for this iteration when a persisted plan
-        #    exists; per-state pools otherwise (pre-revision runs).
+        # -- (section 4) scheduler decisions — ALWAYS present: its DECISIONS
+        #    for this iteration when a persisted plan exists; per-state pools
+        #    for pre-revision runs; a stated reason when there is no state.
         spath = os.path.join(TANUKI_ROOT, state["target"], "scheduler.json")
-        if os.path.exists(spath):
+        if not os.path.exists(spath):
+            lines.append("  scheduler decisions: no scheduler state for this "
+                         "target — run `tanuki-scheduler sync` first")
+        else:
             with open(spath, encoding="utf-8") as f:
                 sched = json.load(f)
             by = {}
@@ -1453,7 +1486,11 @@ def main():
                      "closed one) and requires the operator to choose "
                      "exactly one mode — there is no default and nothing "
                      "recovers automatically."))
-    g = sp.add_mutually_exclusive_group(required=True)
+    # Not required at the argparse layer: a missing mode is routed through
+    # cmd_recover's own {"breaker": …} refusal (F37) so the no-mode error
+    # matches the exit-3 JSON convention every other refusal uses, rather than
+    # argparse's plain-text usage error. (Both flags together still conflict.)
+    g = sp.add_mutually_exclusive_group(required=False)
     g.add_argument("--restore", action="store_true",
                    help="reset the worktree to head_expected, discarding "
                         "external commits/files (audited, reflog-recoverable)")

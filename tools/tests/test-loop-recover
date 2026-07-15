@@ -47,11 +47,14 @@ pass "external commit trips the breaker at iter-start"
 iters_before="$(iters)"
 
 # --- refusal: recover requires exactly one mode -------------------------------
-rc=0; "${L[@]}" recover >/dev/null 2>&1 || rc=$?
-[ "$rc" != "0" ] || fail "recover without a mode should be rejected"
+# No mode routes through the tool's {"breaker": ...} JSON convention (F37),
+# exit 3 — not argparse's plain-text usage error.
+rc=0; "${L[@]}" recover >/tmp/rn.json 2>&1 || rc=$?
+[ "$rc" = "3" ] && grep -q '"breaker".*choose exactly one mode' /tmp/rn.json \
+  || fail "recover without a mode should refuse via the JSON breaker convention (F37)"
 rc=0; "${L[@]}" recover --restore --adopt >/dev/null 2>&1 || rc=$?
 [ "$rc" != "0" ] || fail "recover with both modes should be rejected"
-pass "exactly one of --restore/--adopt is required"
+pass "no mode refuses via JSON breaker (F37); both modes rejected"
 
 # --- refusals write nothing: last_breaker + audit + state preserved -----------
 echo junk > "$wt/untracked.txt"            # dirt: makes --adopt refuse

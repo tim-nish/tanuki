@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Fixture for the dashboard's Fixed skeleton (spec-tanuki-loop "Fixed
+# skeleton"; findings F5/F6/F7/F29): the six sections render in a fixed order
+# with unconditional presence — a missing substrate degrades to a stated
+# reason, never silent absence — and counters carry their definitions inline.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+loop="$here/tanuki-loop"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+
+repo="$tmp/repo"
+git init -q "$repo" && git -C "$repo" config user.email t@e && git -C "$repo" config user.name t
+git -C "$repo" checkout -qb main && echo v0 > "$repo/f" && git -C "$repo" add -A && git -C "$repo" commit -qm base
+
+L=("$loop" --target t)
+"${L[@]}" init --loop-repo "$repo" --cap 3 >/dev/null
+
+# --- all six sections present on an init-only run (no drive/scheduler/findings)
+out="$("${L[@]}" dashboard)"
+grep -q "^  health:" <<<"$out"               || fail "section 1 (health) missing"
+grep -q "^  latest drive:" <<<"$out"         || fail "section 2 (latest drive) missing"
+grep -q "^  this run:" <<<"$out"             || fail "section 3 (this run) missing"
+grep -q "^  scheduler decisions:" <<<"$out"  || fail "section 4 (scheduler decisions) missing"
+grep -q "^  convergence:" <<<"$out"          || fail "section 5 (convergence) missing"
+grep -q "NEXT:" <<<"$out"                    || fail "section 6 (NEXT) missing"
+pass "all six sections render on an init-only run"
+
+# --- missing substrate degrades to a stated reason, never silent absence -----
+grep -q "latest drive: none yet" <<<"$out"                    || fail "drive degradation reason missing"
+grep -q "this run: no ledger movement yet" <<<"$out"          || fail "this-run degradation reason missing"
+grep -q "no scheduler state for this target" <<<"$out"        || fail "scheduler degradation reason missing"
+pass "missing substrate degrades to a stated reason"
+
+# --- fixed order: the section headings appear in the contract's order --------
+order="$(grep -nE "^  (health|latest drive|this run|scheduler decisions|convergence):|NEXT:" <<<"$out" \
+  | sed -E 's/.*(health|latest drive|this run|scheduler decisions|convergence|NEXT).*/\1/' | tr '\n' ',')"
+[ "$order" = "health,latest drive,this run,scheduler decisions,convergence,NEXT," ] \
+  || fail "sections out of order: $order"
+pass "sections render in the fixed contract order"
+
+# --- F29: the iteration counter is annotated as consumed ---------------------
+grep -qE "iterations: 0/3 consumed" <<<"$out" || fail "iteration counter not annotated 'consumed' (F29)"
+pass "iteration counter annotated as consumed (F29)"
+
+# --- F6: 'fixed' carries its inline definition once a run has movement --------
+"${L[@]}" iter-start >/dev/null
+echo v1 > "$("${L[@]}" status | python3 -c 'import json,sys;print(json.load(sys.stdin)["worktree"])')/f"
+out2="$("${L[@]}" dashboard)"
+grep -q "fixed = findings that stopped recurring" <<<"$out2" || fail "'fixed' inline definition missing (F6)"
+pass "'fixed' counter carries its inline definition (F6)"
+
+# --- F7: a long deferral reason truncates WITH a pointer, never bare ----------
+run="$("${L[@]}" status | python3 -c 'import json,sys;print(json.load(sys.stdin)["run"])')"
+qdir="$TANUKI_ROOT/t/loop/$run"
+longreason="this is a deliberately very long deferral reason that must exceed the ninety character truncation width so the pointer is appended to it clearly"
+printf -- "- DEFER F99: %s\n" "$longreason" > "$qdir/queue.md"
+python3 - "$qdir/state.json" <<'EOF'
+import json,sys
+p=sys.argv[1]; s=json.load(open(p)); s.setdefault("deferred",[]).append("F99")
+json.dump(s,open(p,"w"))
+EOF
+out3="$("${L[@]}" dashboard)"
+grep -q "deferred F99:" <<<"$out3"        || fail "deferred reason line missing"
+grep -q "… — full: queue.md" <<<"$out3"   || fail "truncated reason missing its pointer (F7)"
+pass "truncated deferral reason carries a pointer to the full text (F7)"
+
+echo "all dashboard skeleton checks passed"
