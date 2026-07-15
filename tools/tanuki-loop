@@ -11,6 +11,10 @@ Zero dependencies. State lives under ~/.tanuki/<target>/loop/<run>/:
   queue.md     the morning review queue (deferred / frozen items)
 A `current` pointer names the active run so subcommands need only --target.
 
+The global `--target <slug>` is required and MUST precede the subcommand name
+(`tanuki-loop --target foo init …`, never `tanuki-loop init --target foo`); the
+per-subcommand flags below are in addition to it (F40).
+
 Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
   init --loop-repo P [--scenarios F] [--cap N] [--base B] [--worktree W]
        [--phase 1|2|3] [--wall-time S] [--token-budget N] [--policy F]
