@@ -667,8 +667,13 @@ def cmd_doctor(args):
         report["breaker"] = (f"doctor: {len(failed)} check(s) failed "
                              f"({', '.join(failed)}) — not ready for "
                              f"phase {args.phase} headless execution")
+        # Surface the exit-code contract in the payload so a scripted headless
+        # caller learns it from the tool, not only from commands/tanuki-loop.md
+        # (F34): exit 3 == not ready / breaker; exit 0 == ready.
+        report["exit_code"] = 3
         out(report)
         sys.exit(3)
+    report["exit_code"] = 0
     out(report)
 
 
@@ -1325,7 +1330,13 @@ def main():
     sp.add_argument("--test-cmd", default=None)
     sp.add_argument("--allow-stale-base", action="store_true")
 
-    sp = sub.add_parser("doctor")
+    sp = sub.add_parser(
+        "doctor",
+        help="read-only headless-readiness check (exit 0 = ready, 3 = not ready)",
+        description=("Validate a target for a Phase 2/3 headless run without "
+                     "writing any state. Exit code 0 means ready; exit code 3 "
+                     "means not ready (the JSON carries a \"breaker\" reason "
+                     "and \"exit_code\": 3)."))
     sp.add_argument("--loop-repo", required=True)
     sp.add_argument("--scenarios", default=None)
     sp.add_argument("--cap", type=int, default=None)
