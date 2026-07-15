@@ -767,6 +767,91 @@ def cmd_rollback(args):
     out({"ok": True, "reset_to": start, "removed": removed_paths})
 
 
+def cmd_recover(args):
+    """Attended recovery from the external-modification breaker (story 1.2;
+    spec-tanuki-loop "Recovery from the external-modification breaker").
+    That breaker fires at iter-start — every iteration already closed — so
+    `rollback` (which needs an OPEN iteration) is structurally the wrong tool
+    and its misuse overwrites last_breaker (F17). Recovery runs BETWEEN
+    iterations, adjusts only head_expected/the worktree/the audit, and never
+    mutates a closed iteration. Two explicit modes, no default; the operator
+    chooses. Nothing here is ever invoked by the loop itself."""
+    state = load_state(args.target, args.run)
+
+    def refuse(msg):
+        # Breaker convention (exit 3, {"breaker": ...}) WITHOUT persisting:
+        # a refusal must not overwrite last_breaker or touch state/audit —
+        # the whole point is preserving the original diagnosis (F17).
+        out({"breaker": msg})
+        sys.exit(3)
+
+    lb = state.get("last_breaker") or {}
+    if "external modification" not in lb.get("reason", ""):
+        refuse("recover: last breaker is not an external-modification "
+               f"breaker (got: {lb.get('reason') or 'none'})")
+    if lb.get("recovered"):
+        refuse(f"recover: already recovered (--{lb['recovered']['mode']} "
+               f"at {lb['recovered']['at']})")
+    if state["iterations"] and state["iterations"][-1].get("phase") == "started":
+        refuse("recover: an iteration is still open — recovery runs only "
+               "between iterations (close it with iter-verify or rollback)")
+
+    wt, expected = state["worktree"], state["head_expected"]
+    head = _worktree_head(state)
+    if args.restore:
+        # Restore the loop-owned snapshot: discard the external commits and
+        # files from the worktree (reflog-recoverable), back to the last
+        # verified head_expected. Mirror rollback's mechanics, different ref.
+        rc, preview = git(wt, "clean", "-nd")
+        removed = [ln[len("Would remove "):] for ln in preview.splitlines()
+                   if ln.startswith("Would remove ")]
+        discarded = []
+        if head and git(wt, "merge-base", "--is-ancestor", expected, head)[0] == 0:
+            discarded = git(wt, "rev-list", "--oneline",
+                            f"{expected}..{head}")[1].splitlines()
+        git(wt, "reset", "--hard", expected)
+        git(wt, "clean", "-fd")
+        if not _clean(state) or _worktree_head(state) != expected:
+            breaker(state, "recover --restore failed to restore a clean "
+                           f"tree at {expected}")
+        mode = "restore"
+        note = (f"worktree reset to {expected[:12]}; discarded external "
+                f"commits: {discarded or 'none'}; removed untracked: "
+                f"{removed or 'none'} (reflog-recoverable)")
+        result = {"ok": True, "mode": mode, "head_expected": expected,
+                  "discarded": discarded, "removed": removed}
+    else:  # --adopt
+        # Re-baseline around the external change: the human accepts the
+        # current worktree HEAD as the loop's expected state. The adopted
+        # commits become part of the integration branch the morning-gate
+        # diff presents.
+        if not _clean(state):
+            refuse("recover --adopt: worktree not clean — commit or remove "
+                   "the external changes first (or choose --restore)")
+        ancestor = git(wt, "merge-base", "--is-ancestor",
+                       expected, head or "")[0] == 0
+        adopted = git(wt, "rev-list", "--oneline",
+                      f"{expected}..{head}")[1].splitlines() if ancestor else []
+        state["head_expected"] = head
+        mode = "adopt"
+        note = (f"head_expected re-baselined {expected[:12]} -> "
+                f"{(head or '?')[:12]}; adopted external commits: "
+                f"{adopted or 'none'}")
+        if not ancestor:
+            note += (" — WARNING: old head_expected is NOT an ancestor of "
+                     "the new HEAD (history rewritten, not extended)")
+        result = {"ok": True, "mode": mode, "head_expected": head,
+                  "adopted": adopted, "ancestor": ancestor}
+    # The original diagnosis is kept, annotated — never silently overwritten;
+    # the dashboard stops treating an annotated breaker as "STOPPED".
+    lb["recovered"] = {"mode": mode,
+                       "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    state["last_breaker"] = lb
+    save_state(state)
+    audit(state, f"recover --{mode}: {note}")
+    out(result)
+
+
 def cmd_attempt(args):
     state = load_state(args.target, args.run)
     cur = state["attempts"].get(args.finding, 0)
@@ -1256,13 +1341,20 @@ def cmd_dashboard(args):
             lines.append(f"  STOPPED: {state['finished']['reason']} "
                          f"(at {state['finished']['at']})")
             at_gate = state["finished"]["reason"] in ("converged", "cap")
-        elif state.get("last_breaker"):
+        elif state.get("last_breaker") and \
+                not state["last_breaker"].get("recovered"):
             lines.append(f"  STOPPED: breaker — "
                          f"{state['last_breaker']['reason']} "
                          f"(at {state['last_breaker']['at']})")
-            lines.append("  NEXT: inspect the audit trail, fix the breaker "
-                         "cause, then resume or run the morning gate on what "
-                         "already landed")
+            if "external modification" in state["last_breaker"]["reason"]:
+                lines.append("  NEXT: attended recovery — `tanuki-loop "
+                             "recover --restore` (reset to the last verified "
+                             "loop state) or `--adopt` (re-baseline around "
+                             "the external change); never rollback")
+            else:
+                lines.append("  NEXT: inspect the audit trail, fix the "
+                             "breaker cause, then resume or run the morning "
+                             "gate on what already landed")
         elif cur and cur["phase"] == "started":
             lines.append(f"  NEXT: loop finishes iteration {cur['n']} "
                          "(mine -> classify -> implement -> test -> commit) — "
@@ -1352,6 +1444,23 @@ def main():
     sub.add_parser("iter-start")
     sp = sub.add_parser("iter-verify"); sp.add_argument("--no-patch", action="store_true")
     sub.add_parser("rollback")
+    sp = sub.add_parser(
+        "recover",
+        help="attended recovery from the external-modification breaker "
+             "(refuses with exit 3 in any other state)",
+        description=("Recover a run stopped by the external-modification "
+                     "breaker. Runs between iterations (never mutates a "
+                     "closed one) and requires the operator to choose "
+                     "exactly one mode — there is no default and nothing "
+                     "recovers automatically."))
+    g = sp.add_mutually_exclusive_group(required=True)
+    g.add_argument("--restore", action="store_true",
+                   help="reset the worktree to head_expected, discarding "
+                        "external commits/files (audited, reflog-recoverable)")
+    g.add_argument("--adopt", action="store_true",
+                   help="re-baseline: accept the current worktree HEAD as "
+                        "head_expected (adopted range audited; requires a "
+                        "clean tree)")
     sub.add_parser("test")
     sp = sub.add_parser("attempt"); sp.add_argument("--finding", required=True)
     sp = sub.add_parser("record-cycle")
@@ -1377,7 +1486,8 @@ def main():
     args = p.parse_args()
     {"init": cmd_init, "doctor": cmd_doctor,
      "iter-start": cmd_iter_start, "iter-verify": cmd_iter_verify,
-     "rollback": cmd_rollback, "test": cmd_test, "attempt": cmd_attempt,
+     "rollback": cmd_rollback, "recover": cmd_recover,
+     "test": cmd_test, "attempt": cmd_attempt,
      "record-cycle": cmd_record_cycle, "defer": cmd_defer, "log": cmd_log,
      "gate-check": cmd_gate_check, "gate-push": cmd_gate_push,
      "issue-get": cmd_issue_get,
