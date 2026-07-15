@@ -1,9 +1,0 @@
-{
-  "stories_dir": "docs/stories",
-  "project": "tanuki",
-  "project_statuses": {
-    "todo": "Todo",
-    "in_review": "In Review",
-    "done": "Done"
-  }
-}
