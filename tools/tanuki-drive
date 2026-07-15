@@ -180,6 +180,51 @@ def pollution_check(clone):
     return r.stdout.strip().splitlines() if r.returncode == 0 else ["<git status failed>"]
 
 
+def _bash_commands(obj):
+    """Every Bash tool_use `command` string anywhere in a stream-json record —
+    what the scenario actually executed, not what it merely mentioned in text."""
+    out = []
+    def walk(o):
+        if isinstance(o, dict):
+            if o.get("type") == "tool_use":
+                inp = o.get("input")
+                if isinstance(inp, dict) and "command" in inp:
+                    out.append(str(inp["command"]))
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+    walk(obj)
+    return out
+
+
+def execution_escape_check(raw_path, real_plugin_abs):
+    """Isolation, asserted on what was RUN — not only on what was left dirty.
+    The pollution check inspects the disposable clone's git status, but a
+    scenario that reaches OUT of the sandbox and runs the plugin from its real
+    source checkout leaves that clone pristine, so pollution_check reports a
+    false all-clear. Scan the transcript for any Bash command that invoked the
+    plugin from real_plugin_abs (the source repo) rather than the clone, and
+    return the offending command strings."""
+    if not os.path.exists(raw_path):
+        return []
+    needle = os.path.normpath(real_plugin_abs)
+    offending = []
+    with open(raw_path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if needle not in line:                 # cheap prefilter
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            for cmd in _bash_commands(d):
+                if needle in cmd and cmd.strip()[:200] not in offending:
+                    offending.append(cmd.strip()[:200])
+    return offending
+
+
 def normalize(raw_path, run, scenario):
     """Mechanically map the claude stream-json transcript to Tanuki Events.
     Never judges — extraction of UX findings is the Miner's job."""
@@ -336,13 +381,32 @@ def drive_scenario(args, scenario, run_dir, cfg, prog=None):
             "choice, behave as a typical user would:\n"
             + "\n".join(pins) + "\n\n"
         )
+    # Sandbox pointer (hostless only): the cwd is an empty fabricated workspace,
+    # so a relative `tools/<tool>` in the charter resolves to nothing and the
+    # simulated user would otherwise hunt down and run whatever copy of the
+    # plugin it can find — most findably, the operator's REAL checkout. Name the
+    # clone's absolute path and forbid running any copy outside it, so the
+    # disposable clone (checked out at --plugin-ref) is what actually gets
+    # dogfooded. Hosted runs keep working inside the host clone as before.
+    sandbox = ""
+    if not args.host:
+        pc_abs = os.path.abspath(plugin_clone)
+        sandbox = (
+            f"SANDBOX: the plugin under test is checked out at {pc_abs}. Invoke "
+            f"its tools ONLY by that absolute path (e.g. {pc_abs}/tools/<tool>). "
+            "A copy of this plugin may exist elsewhere on this machine — you "
+            "must NOT run it; only the checkout above is under test. Your "
+            f"working directory ({os.path.abspath(host_clone)}) is empty scratch "
+            "space for any repos or files the task needs you to create.\n\n"
+        )
     prompt = (
         "You are a simulated user dogfooding a Claude Code plugin "
         "(exploratory-testing session).\n"
         f"CHARTER: {scenario['charter']}\n\n"
         f"{scenario['prompt']}\n\n"
         f"{pin_block}"
-        "Work only inside this repository. When you are done (or stuck), end "
+        f"{sandbox}"
+        "Work only inside this workspace. When you are done (or stuck), end "
         "your final message with a section titled 'FRICTION LOG' listing every "
         "point of friction you hit as a user: confusing instructions, missing "
         "guidance, surprising output, unnecessary steps, unclear errors. Be "
@@ -399,6 +463,20 @@ def drive_scenario(args, scenario, run_dir, cfg, prog=None):
                        "type": "note",
                        "detail": f"pollution: plugin clone dirty: {plugin_dirt[:20]}",
                        "evidence": f"{sid}/plugin git status"})
+    # Assert what was RUN: a scenario that escaped the sandbox and executed the
+    # plugin from its real source checkout dogfoods the wrong code (integration
+    # fixes never exercised) and breaches isolation — a false all-clear for the
+    # pollution check above, which only sees the untouched clone.
+    escapes = execution_escape_check(raw_path, os.path.abspath(os.path.expanduser(args.plugin)))
+    if escapes:
+        events.append({"run": args.run, "scenario": sid, "seq": len(events) + 1,
+                       "type": "note",
+                       "detail": ("isolation escape: scenario invoked the plugin "
+                                  "from its real source checkout, not the "
+                                  f"disposable clone: {escapes[:3]}"),
+                       "evidence": f"{sid}/execution-escape"})
+        if status == "ok":
+            status = "isolation-escape: ran the plugin from outside the sandbox"
     events_path = os.path.join(run_dir, f"{sid}.events.jsonl")
     with open(events_path, "w", encoding="utf-8") as f:
         for e in events:
@@ -414,7 +492,8 @@ def drive_scenario(args, scenario, run_dir, cfg, prog=None):
             # (specs/spec-tanuki-scenario-lifecycle, History & coverage).
             "decision_points": scenario.get("decision_points") or [],
             "host_clone_changes": len(pollution_check(host_clone)),
-            "plugin_clone_dirty": bool(plugin_dirt), "workspace": ws}
+            "plugin_clone_dirty": bool(plugin_dirt),
+            "execution_escape": bool(escapes), "workspace": ws}
 
 
 def main():

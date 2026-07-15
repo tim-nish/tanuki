@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Isolation is asserted on what was RUN, not only on what was left dirty.
+# A hostless scenario whose cwd is an empty workspace must be pointed at the
+# disposable plugin clone; if it instead reaches out and runs the plugin from
+# its real source checkout, the drive must FLAG it (execution_escape + non-ok
+# status) even though the clone's git status stays pristine.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+drive="$here/tanuki-drive"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+
+# A self-contained plugin repo; its REAL path is the escape target.
+git init -q "$tmp/plugin" && git -C "$tmp/plugin" config user.email t@e && git -C "$tmp/plugin" config user.name t
+git -C "$tmp/plugin" checkout -qb main && echo x > "$tmp/plugin/x" && git -C "$tmp/plugin" add -A && git -C "$tmp/plugin" commit -qm base
+
+# Stub claude: emits one Bash tool_use whose command references $ESCAPE_TARGET
+# (the real checkout) when set, else a benign command that stays in-sandbox.
+mkdir -p "$tmp/bin"
+cat > "$tmp/bin/claude" <<'EOF'
+#!/bin/sh
+if [ -n "${ESCAPE_TARGET:-}" ]; then
+  cmd="python3 ${ESCAPE_TARGET}/tools/tanuki-loop --help"
+else
+  cmd="echo staying inside the sandbox"
+fi
+printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"%s"}}]}}\n' "$cmd"
+cat <<'JSON'
+{"type":"result","subtype":"success","num_turns":1,"duration_ms":10,"total_cost_usd":0.001,"is_error":false,"result":"done"}
+JSON
+EOF
+chmod +x "$tmp/bin/claude"
+export PATH="$tmp/bin:$PATH"
+
+cat > "$tmp/scenarios.json" <<'EOF'
+{"scenarios": [{"id": "solo", "charter": "c", "prompt": "p", "max_turns": 3}]}
+EOF
+
+manifest() { echo "$1/t/events/$2/manifest.json"; }
+
+# --- 1. escape: scenario runs the plugin from its real checkout -> flagged ----
+root1="$tmp/root1"; export TANUKI_ROOT="$root1"
+# The escaping scenario is intentionally non-ok, so the drive exits non-zero —
+# that is the signal, not a harness failure. Assert on the manifest instead.
+ESCAPE_TARGET="$tmp/plugin" "$drive" --target t --plugin "$tmp/plugin" \
+  --scenarios "$tmp/scenarios.json" --run resc --timeout 60 >/dev/null || true
+[ -f "$(manifest "$root1" resc)" ] || fail "escape run wrote no manifest"
+python3 - "$(manifest "$root1" resc)" <<'PY' || fail "escape not flagged"
+import json, sys
+r = json.load(open(sys.argv[1]))["results"][0]
+assert r["execution_escape"] is True, r
+assert r["status"].startswith("isolation-escape"), r
+assert r["plugin_clone_dirty"] is False, r   # clone stayed pristine — the point
+PY
+pass "running the plugin from its real checkout is flagged as an isolation escape"
+
+# --- 2. clean: scenario stays in-sandbox -> not flagged, status ok ------------
+root2="$tmp/root2"; export TANUKI_ROOT="$root2"
+"$drive" --target t --plugin "$tmp/plugin" \
+  --scenarios "$tmp/scenarios.json" --run rok --timeout 60 >/dev/null \
+  || fail "drive exited non-zero on the clean run"
+python3 - "$(manifest "$root2" rok)" <<'PY' || fail "clean run wrongly flagged"
+import json, sys
+r = json.load(open(sys.argv[1]))["results"][0]
+assert r["execution_escape"] is False, r
+assert r["status"] == "ok", r
+PY
+pass "an in-sandbox scenario is not flagged and stays ok"
+
+# --- 3. hostless prompt names the clone path + forbids outside copies ---------
+# The fabricated workspace is the cwd; the injected SANDBOX line must point at
+# the clone so the simulated user never has to hunt for the tool.
+grep -q "SANDBOX: the plugin under test is checked out at" "$drive" \
+  || fail "drive lost the SANDBOX pointer injection"
+pass "hostless runs inject a SANDBOX pointer to the plugin clone"
+
+echo "all checks passed"
