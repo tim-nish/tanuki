@@ -83,7 +83,7 @@ exists — Tanuki runs with zero configuration.
 | `exploration_quota` | `1` | scheduler | unexplored scenarios each plan must include while any exist |
 | `low_yield_threshold` | `0` | scheduler | actionable findings at or below which a run counts as low-yield |
 | `brief_max_proposals` | `10` | command (consolidate) | ranked-proposal cap in the brief |
-| `issue_label_prefix` | `tanuki` | command (decide) | label namespace on filed issues: marker `<prefix>` + kind `<prefix>:<kind>` |
+| `issue_label_prefix` | `tanuki` | command (decide) | label namespace on filed issues: one kind label `<prefix>:<kind>` |
 | `policy_source` | unset | ledger policy-surface → command (consolidate + decide only) | opt-in advisory block `{path, files: [≤4 .md]}`: a local policy checkout read read-only and pinned at the brief/gate; never consulted at ingest/drive/extraction, never blocking (specs/spec-policy-advisory) |
 
 **Plan gate (scenario count + cost).** The user never has to pre-compute a
@@ -276,10 +276,15 @@ still explicitly confirmed), **dismiss**, or **defer** (stays `proposed`).
 Dispositions are written back via `set-status`. `tanuki-ledger status` shows
 anything left undecided, so a deferred decision is never lost, only visible.
 
-**Issue labels — the downstream boundary.** A filed issue carries exactly two
-labels, created in the target repo if absent: the marker `<issue_label_prefix>`
-(default `tanuki`) and the kind `<prefix>:<kind>` (`tanuki:friction`,
-`tanuki:papercut`, `tanuki:gap`). These labels are the *only* machine-readable
+**Issue labels — the downstream boundary.** A filed issue carries exactly one
+label, created in the target repo if absent: the kind `<prefix>:<kind>` where
+`<prefix>` is `issue_label_prefix` (default `tanuki`) — i.e. `tanuki:friction`,
+`tanuki:papercut`, or `tanuki:gap`. The prefix in the label name IS the
+provenance marker; no bare `<prefix>` marker label is applied (one label per
+issue keeps an open-source label list clean). The kind set is closed (the
+Finding vocabulary), so "everything Tanuki filed" is the enumeration of the
+kind labels — e.g. `label:"tanuki:friction","tanuki:papercut","tanuki:gap"` in
+issue search. This label is the *only* machine-readable
 contract Tanuki emits: the pipeline ends at the labeled issue. The channel
 split is strict — **labels carry the machine-readable identity (provenance,
 kind); the title carries only the human-readable problem statement**, with no

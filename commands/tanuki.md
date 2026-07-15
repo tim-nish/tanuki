@@ -298,16 +298,17 @@ one disposition each:
   the target repo. Accepted findings keep their recurrence tracking: the next
   run verifies the fix by their absence.
   **Labels (the only machine-readable contract Tanuki emits).** Every issue
-  Tanuki files carries exactly two labels: the marker `<prefix>` and the kind
-  `<prefix>:<kind>` where `<prefix>` is `issue_label_prefix` (config, default
-  `tanuki`) and `<kind>` is the finding's kind (`friction`/`papercut`/`gap`).
-  Before filing, ensure the labels exist in the target repo (`gh label list`,
-  then `gh label create` for any missing — marker: color `d4a017`,
-  description "filed by Tanuki dogfooding"; kind labels: same color,
-  description "Tanuki finding kind: <kind>"). Labels go on the
-  `gh issue create` call via `--label`. Downstream tooling may key off these
-  labels; Tanuki itself never reads them back and knows nothing about what
-  consumes them — it stops at the labeled issue.
+  Tanuki files carries exactly one label: the kind `<prefix>:<kind>` where
+  `<prefix>` is `issue_label_prefix` (config, default `tanuki`) and `<kind>`
+  is the finding's kind (`friction`/`papercut`/`gap`). The prefix in the
+  label name is the provenance marker — no bare `<prefix>` label is applied.
+  Before filing, ensure the label exists in the target repo (`gh label list`,
+  then `gh label create` if missing — color `d4a017`, description "Tanuki
+  finding kind: <kind>"). The label goes on the `gh issue create` call via
+  `--label`. Downstream tooling may key off these labels ("everything Tanuki
+  filed" = the three kind labels enumerated); Tanuki itself never reads them
+  back and knows nothing about what consumes them — it stops at the labeled
+  issue.
   **Titles are for humans only.** The issue title is the finding's plain
   problem statement — no `[tanuki:F2]`-style prefixes, no machine-readable
   markers: provenance and kind already live in the labels, and a prefix a
