@@ -173,6 +173,10 @@ def breaker_hint(reason):
         return "the run hit its ceiling — proceed to the morning gate; no more iterations run"
     if "test failure" in r:
         return "a test_cmd failed in the loop worktree — inspect it, then fix or `rollback`"
+    if "worktree not clean after commit" in r:
+        return ("test_cmd likely left untracked artifacts (e.g. __pycache__, "
+                ".pyc, coverage files) — add them to .gitignore or clean them; "
+                "the dirty paths are named in the breaker reason")
     if "integration invariant" in r:
         return "the four-part integration check failed — inspect the worktree against the audit trail"
     if "rollback failed" in r:
@@ -775,7 +779,11 @@ def cmd_iter_verify(args):
     if not args.no_patch and head == start:
         breaker(state, "integration invariant: HEAD == start SHA but a patch was expected")
     if not _clean(state):
-        breaker(state, "integration invariant: worktree not clean after commit")
+        rc, porc = git(wt, "status", "--porcelain")
+        names = [ln[3:] for ln in porc.splitlines()] if rc == 0 else []
+        shown = ", ".join(names[:8]) + (" …" if len(names) > 8 else "")
+        breaker(state, "integration invariant: worktree not clean after commit"
+                       + (f" (dirty: {shown})" if names else ""))
     it["end"] = head
     it["phase"] = "verified"
     state["head_expected"] = head
@@ -930,9 +938,13 @@ def cmd_test(args):
     tail = ((r.stdout or "") + (r.stderr or "")).strip()[-300:]
     if r.returncode != 0:
         audit(state, f"test FAILED (exit {r.returncode}): …{tail}")
-        breaker(state, f"test failure (exit {r.returncode})")
+        # Name the command that failed and echo its output tail (F67), so the
+        # operator sees what ran without opening the scenarios file.
+        breaker(state, f"test failure (exit {r.returncode}) running `{cmd}`"
+                       + (f": …{tail}" if tail else ""))
     audit(state, "test: passed")
-    out({"ok": True})
+    # Echo the command that passed (F67).
+    out({"ok": True, "cmd": cmd})
 
 
 def cmd_record_cycle(args):
