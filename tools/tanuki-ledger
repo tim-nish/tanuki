@@ -627,7 +627,12 @@ def cmd_stats(args, ledger):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--target", required=True)
+    # --target is a short namespace slug, NOT a filesystem path (F18): state
+    # lives under $TANUKI_ROOT/<target>/ (default ~/.tanuki/<target>/), so the
+    # current directory is ignored and a path-like value nests silently.
+    p.add_argument("--target", required=True,
+                   help="target namespace slug (not a path); state lives under "
+                        "$TANUKI_ROOT/<target>/ (default ~/.tanuki/<target>/)")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("init")
     sp = sub.add_parser(
@@ -653,11 +658,23 @@ def main():
                     help=f"finding kind (default: friction); one of {KINDS}")
     sp.add_argument("--evidence", required=True)
     sp.add_argument("--match"); sp.add_argument("--note")
-    sp = sub.add_parser("promote")
+    sp = sub.add_parser(
+        "promote",
+        help="read-only preview of findings meeting the recurrence/scenario "
+             "thresholds; does NOT change status",
+        description=(
+            "List findings that qualify for promotion by recurrence and "
+            "scenario-spread thresholds. Preview only — it never mutates "
+            "state. Actually changing a finding's status is a separate "
+            "`set-status` call after the human gate."))
     sp.add_argument("--min-recurrence", type=int, default=None)
     sp.add_argument("--min-scenarios", type=int, default=None)
     sp = sub.add_parser("set-status")
-    sp.add_argument("--id", required=True); sp.add_argument("--status", required=True)
+    sp.add_argument("--id", required=True)
+    # Enumerate valid statuses in --help (F60), not only via a rejection error;
+    # choices= also yields a clear argparse message on a bad value.
+    sp.add_argument("--status", required=True, choices=STATUSES,
+                    help=f"new status; one of {STATUSES}")
     sp = sub.add_parser("compact")
     sp.add_argument("--unseen-runs", type=int, default=None)
     sp = sub.add_parser("scenario-yield")

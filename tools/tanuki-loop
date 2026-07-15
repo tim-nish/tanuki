@@ -1437,7 +1437,12 @@ def cmd_status(args):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--target", required=True)
+    # --target is a global option and must precede the subcommand, e.g.
+    # `tanuki-loop --target foo iter-start` (F40); it is a namespace slug, not a
+    # path (F52) — state lives under $TANUKI_ROOT/<target>/.
+    p.add_argument("--target", required=True,
+                   help="target namespace slug (not a path); global option — "
+                        "must come before the subcommand")
     p.add_argument("--run", default=None)
     sub = p.add_subparsers(dest="cmd", required=True)
 
