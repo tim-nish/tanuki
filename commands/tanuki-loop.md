@@ -169,7 +169,10 @@ breakers, records the start SHA, and snapshots the ledger (exit 3 +
 If an iteration fails after step 4, run `tanuki-loop rollback` (`reset --hard`
 to the start SHA + `git clean -fd` + clean-tree verify, removed paths logged),
 so untracked files don't leak forward and prior successes are untouched, then
-apply the breaker.
+apply the breaker. **A rolled-back iteration still counts toward the cap** —
+`iter-start` records it and `rollback` does not give the attempt back, so a run
+with rollbacks reaches the "iteration cap reached" breaker sooner than the raw
+count of *landed* iterations suggests (F27).
 
 **Convergence (stop early — the cap is only a ceiling).** After each closed
 iteration call `tanuki-loop record-cycle` (no counts — the tool computes

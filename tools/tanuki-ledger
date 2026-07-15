@@ -657,7 +657,13 @@ def main():
     sp.add_argument("--kind", default="friction", choices=KINDS,
                     help=f"finding kind (default: friction); one of {KINDS}")
     sp.add_argument("--evidence", required=True)
-    sp.add_argument("--match"); sp.add_argument("--note")
+    # --match takes an existing finding id to accumulate onto (bumps recurrence
+    # and scenario spread) instead of creating a duplicate (F62); omit it to
+    # create a new finding (then --title is required).
+    sp.add_argument("--match",
+                    help="existing finding id to bump (accumulate recurrence) "
+                         "instead of creating a new one; omit to create")
+    sp.add_argument("--note")
     sp = sub.add_parser(
         "promote",
         help="read-only preview of findings meeting the recurrence/scenario "
