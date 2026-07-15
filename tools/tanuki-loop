@@ -1120,6 +1120,11 @@ def cmd_finish(args):
     """Mark the run terminal, machine-readably: converged | cap |
     gate-ratified | aborted. The dashboard's answer to 'why did it stop?'."""
     state = load_state(args.target, args.run)
+    # A run can be finished twice by design (e.g. `cap` at the end of the
+    # unattended run, then `gate-ratified` after the morning gate). Surface the
+    # prior close rather than overwriting it silently, so a double-close is
+    # visible, not accidental (F32).
+    prev_finished = state.get("finished")
     state["finished"] = {"reason": args.reason,
                          "at": time.strftime("%Y-%m-%d %H:%M:%S")}
     # Host drift note (spec-host-snapshot): the ONE permitted post-init read of
@@ -1151,8 +1156,14 @@ def cmd_finish(args):
                      f"{cleaned['deleted'] or 'none'}; kept (unmerged): "
                      f"{cleaned['kept'] or 'none'}; skipped: "
                      f"{cleaned['skipped_reasons'] or 'none'}")
-    out({"ok": True, "reason": args.reason, "branch_cleanup": cleaned,
-         "host_drift": host_drift})
+    payload = {"ok": True, "reason": args.reason, "branch_cleanup": cleaned,
+               "host_drift": host_drift}
+    if prev_finished:
+        payload["previously_finished"] = prev_finished
+        audit(state, f"note: run was already finished as "
+                     f"'{prev_finished['reason']}' at {prev_finished['at']} — "
+                     f"re-finished as '{args.reason}'")
+    out(payload)
 
 
 def _fmt_ids(ids, cap=6):
