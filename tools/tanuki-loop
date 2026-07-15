@@ -574,7 +574,10 @@ def cmd_doctor(args):
         "detail": ("every headless ceiling is configured" if not missing else
                    "an unattended run would have no ceiling for: "
                    + ", ".join(missing) + " — set them in the scenarios "
-                   "file's \"loop\" block (shown below) or pass the init flags"),
+                   "file's \"loop\" block (shown below) or pass the init flags. "
+                   "Consequence: init refuses to start without them; a forced "
+                   "run would be unbounded (no cap/wall-time/token ceiling) with "
+                   "no regression gate (F74)"),
     }
     if missing:
         loop_check["set_via_flag"] = {k: flag_for[k] for k in missing}
