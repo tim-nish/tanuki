@@ -465,10 +465,15 @@ def cmd_status(args, ledger):
     """Human-readable state of a target: what awaits a decision, what's being
     watched, what happened last. The answer to 'where was I?'."""
     tdir = os.path.join(TANUKI_ROOT, args.target)
-    runs = []
     events_dir = os.path.join(tdir, "events")
-    if os.path.isdir(events_dir):
-        runs = sorted(os.listdir(events_dir))
+    dir_runs = set(os.listdir(events_dir)) if os.path.isdir(events_dir) else set()
+    # A plain `ingest` records events into the ledger without creating an
+    # events/<run>/ directory, so directory-listing alone reports runs:0 even
+    # after a successful ingest (F21). Union in the run ids carried by the
+    # ledger's own event records so the count reflects what was ingested.
+    ingested_runs = {r for e in ledger["events"].values()
+                     for r in e.get("runs", []) if r}
+    runs = sorted(dir_runs | ingested_runs, key=run_key)
     briefs_dir = os.path.join(tdir, "briefs")
     briefs = sorted(os.listdir(briefs_dir)) if os.path.isdir(briefs_dir) else []
 
@@ -641,7 +646,11 @@ def main():
     sp = sub.add_parser("ingest-note"); sp.add_argument("--text", required=True)
     sp = sub.add_parser("findings"); sp.add_argument("--status")
     sp = sub.add_parser("upsert-finding")
-    sp.add_argument("--title"); sp.add_argument("--kind", default="friction")
+    sp.add_argument("--title")
+    # List the valid enum so it's discoverable from --help, not only from a
+    # rejection error (F33). choices= also produces a clear argparse message.
+    sp.add_argument("--kind", default="friction", choices=KINDS,
+                    help=f"finding kind (default: friction); one of {KINDS}")
     sp.add_argument("--evidence", required=True)
     sp.add_argument("--match"); sp.add_argument("--note")
     sp = sub.add_parser("promote")
