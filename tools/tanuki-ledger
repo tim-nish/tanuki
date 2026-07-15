@@ -503,9 +503,20 @@ def cmd_status(args, ledger):
         for f in watching[:5]:
             print(f"    {priority(f)} {f['id']} [{f['kind']}] "
                   f"rec:{f['recurrence']} — {f['title'][:90]}")
-    print("\n  next: review the latest brief, decide proposed items "
-          "(set-status), re-run after fixes to verify accepted items stop "
-          "recurring")
+    # Adapt the hint to the ledger's actual state (F24) — a static line that
+    # says "decide proposed items" when none are proposed is noise.
+    if by["proposed"]:
+        nxt = (f"decide the {len(by['proposed'])} proposed item(s) with "
+               "set-status (accept/dismiss)")
+    elif awaiting:
+        nxt = (f"re-run the pipeline to verify the {len(awaiting)} accepted "
+               "item(s) stop recurring")
+    elif watching:
+        nxt = ("promote chronic/high-confidence open findings with "
+               "'promote --min-recurrence N', then decide them")
+    else:
+        nxt = "ingest a run's events to start surfacing findings"
+    print(f"\n  next: {nxt}")
 
 
 # specs/spec-policy-advisory: the read allowlist is capped and code-enforced.
@@ -614,7 +625,19 @@ def main():
     p.add_argument("--target", required=True)
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("init")
-    sp = sub.add_parser("ingest"); sp.add_argument("files", nargs="+")
+    sp = sub.add_parser(
+        "ingest",
+        help="record events from JSONL file(s); exact dupes collapse to a count",
+        description=(
+            "Record events into the ledger from one or more JSONL files (one "
+            "JSON object per line). Each event object: "
+            "{run: <run-id>, scenario: <slug>, seq: <int>, type: "
+            "tool_error|note|result|..., detail: <str>}. The evidence pointer "
+            "for a finding is formed as '<run>/<scenario>#<seq>'. Exact "
+            "duplicates (same scenario+type+detail) collapse to an occurrence "
+            "count rather than creating separate records."))
+    sp.add_argument("files", nargs="+",
+                    help="one or more .events.jsonl files to ingest")
     sp = sub.add_parser("ingest-note"); sp.add_argument("--text", required=True)
     sp = sub.add_parser("findings"); sp.add_argument("--status")
     sp = sub.add_parser("upsert-finding")
