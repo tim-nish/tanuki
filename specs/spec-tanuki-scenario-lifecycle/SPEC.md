@@ -1,10 +1,13 @@
 # Spec: Tanuki scenario lifecycle — init onboarding, ad-hoc scenarios, adaptive exploration
 
 Status: PROPOSED 2026-07-14, awaiting operator ratification. Extends
-`docs/tanuki-spec.md` (Driver/Miner contracts unchanged) and **amends
-`specs/spec-tanuki-loop/SPEC.md`** in exactly one place (convergence — see
-"Loop amendment"). Supersedes the hand-derived charter-rotation instruction
-in `commands/tanuki-loop.md` with a deterministic scheduler.
+`docs/tanuki-spec.md` — originally with Driver/Miner contracts unchanged;
+later revisions in this file also amend the Miner's compaction semantics
+(driven-absence, "Verify/cap" revision) and add Driver manifest fields
+("History" revision) — and **amends `specs/spec-tanuki-loop/SPEC.md`** in one
+place (convergence — see "Loop amendment"). Supersedes the hand-derived
+charter-rotation instruction in `commands/tanuki-loop.md` with a
+deterministic scheduler.
 
 Problem: scenario design is the biggest onboarding bottleneck — a new target
 requires hand-authoring a charter matrix before the first run, and nothing
@@ -25,7 +28,7 @@ cd ~/work/<plugin-repo>
    name as the target slug; confirm.
 2. **Register** `{"<abs repo path>": "<target>"}` in `~/.tanuki/registry.json`
    (Tanuki-owned, outside every target repo) via
-   `tanuki-scheduler register --repo <path> --target <slug>`. **Nothing is
+   `tanuki-scheduler --target <slug> register --repo <path>`. **Nothing is
    ever written into the target repository** — the existing non-negotiable
    holds; a target the user does not own onboards identically.
 3. Ask whether the plugin operates on a repository's content; if yes, record
