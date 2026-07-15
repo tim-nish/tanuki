@@ -116,7 +116,9 @@ The tool also owns the operator surface: `doctor` (the read-only Phase 2/3
 headless-readiness validator — see "Headless readiness" below), `policy`
 (records iteration-1
 judgment answers — the mechanism behind "questions only in iteration 1"),
-`finish` (machine-readable terminal reason: converged | cap | gate-ratified |
+`recover` (the attended external-modification recovery path — see "Circuit
+breakers"), `finish` (machine-readable terminal reason: converged | cap |
+gate-ratified |
 aborted; breakers persist `last_breaker` the same way), and `dashboard`
 (one-screen **operational status** — see "Dashboard revision" below;
 `--follow N` self-refreshes). Per-target run settings — `test_cmd`,
@@ -367,6 +369,35 @@ decision with no run-policy answer → **defer**; a finding past its attempt cap
 → **freeze** (that finding only). The loop keeps processing other independent
 actionable findings and stops **only** if a deferred/frozen item blocks *all*
 remaining work.
+
+**Recovery from the external-modification breaker (attended — ADDED
+2026-07-15, resolves ledger finding F4).** The external-modification breaker
+fires when every iteration is already closed (`iter-start` is the detector),
+so `rollback` — which requires an *open* iteration — is structurally the wrong
+tool and must never be the answer (misusing it also overwrites `last_breaker`
+with a less-informative sequencing breaker; ledger F17). Recovery is a
+dedicated attended subcommand, `tanuki-loop recover`, with these guarantees:
+
+- **Preconditions (guarded, breaker on violation):** `last_breaker.reason` is
+  an external-modification breaker, and no iteration is open. `recover` is an
+  operator command — the loop never invokes it, and nothing recovers
+  automatically.
+- **Two explicit modes — the human chooses; there is no default:**
+  - `recover --restore` — restore the loop-owned state: `git reset --hard
+    <head_expected>` + `git clean -fd` in the loop worktree only. The
+    externally-introduced commits/files are discarded from the worktree
+    (recoverable via reflog), and the audit records the discarded range and
+    removed paths.
+  - `recover --adopt` — re-baseline around the external change: require a
+    clean tree, then set `head_expected` to the current worktree HEAD. The
+    audit records old → new and the adopted commit range (flagged loudly when
+    the old `head_expected` is not an ancestor — history was rewritten, not
+    extended). Adopted commits become part of the integration branch the
+    morning-gate diff presents.
+- **Closed iterations are immutable:** neither mode edits any recorded
+  iteration (`start`/`end`/`phase`); recovery happens *between* iterations,
+  adjusting only `head_expected`, the worktree, and the audit. The next
+  `iter-start` then passes its own guards normally.
 
 ## Morning gate (attended — invariant across all phases)
 
