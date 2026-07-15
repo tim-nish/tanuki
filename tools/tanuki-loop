@@ -209,15 +209,24 @@ def cleanup_merged_integration_branches(repo, base, target):
     checked_out = {ln[len("branch "):].replace("refs/heads/", "")
                    for ln in wt.splitlines() if ln.startswith("branch ")}
     deleted, kept, skipped = [], [], []
+    # Why each branch was skipped, so the status isn't opaque on-screen (F9):
+    # a live worktree can't be deleted, and a merged branch whose delete failed
+    # is a different (and more alarming) situation than the routine former.
+    skipped_reasons = {}
     for b in branches:
         if b in checked_out:
             skipped.append(b)                       # can't delete a live branch
+            skipped_reasons[b] = "checked out in a worktree — remove it first"
         elif git(repo, "merge-base", "--is-ancestor", b, base)[0] == 0:
-            (deleted if git(repo, "branch", "-D", b)[0] == 0
-             else skipped).append(b)
+            if git(repo, "branch", "-D", b)[0] == 0:
+                deleted.append(b)
+            else:
+                skipped.append(b)
+                skipped_reasons[b] = "merged but 'git branch -D' failed"
         else:
             kept.append(b)                          # unmerged tip — never delete
-    return {"deleted": deleted, "kept": kept, "skipped": skipped}
+    return {"deleted": deleted, "kept": kept, "skipped": skipped,
+            "skipped_reasons": skipped_reasons}
 
 
 def resolve_loop_config(args):
@@ -519,15 +528,26 @@ def cmd_doctor(args):
                 "token_budget": cfg["token_budget"],
                 "attempt_cap": cfg["attempt_cap"], "iterations": cfg["cap"]}
     missing = sorted(k for k, v in required.items() if v is None)
-    checks.append({
+    # A missing config key and the flag that sets it are named differently
+    # (F31); and the keys must nest under a top-level "loop" object (F1). Spell
+    # both out so the operator can act without reading resolve_loop_config().
+    flag_for = {"test_cmd": "--test-cmd", "wall_time_s": "--wall-time",
+                "token_budget": "--token-budget", "attempt_cap": "--attempt-cap",
+                "iterations": "--cap"}
+    loop_check = {
         "check": "loop-config", "ok": not missing,
         "configured": {k: v for k, v in required.items() if v is not None},
         "missing": missing,
         "detail": ("every headless ceiling is configured" if not missing else
                    "an unattended run would have no ceiling for: "
                    + ", ".join(missing) + " — set them in the scenarios "
-                   "file's \"loop\" block or pass the init flags"),
-    })
+                   "file's \"loop\" block (shown below) or pass the init flags"),
+    }
+    if missing:
+        loop_check["set_via_flag"] = {k: flag_for[k] for k in missing}
+        loop_check["scenarios_loop_shape"] = {
+            "loop": {k: "<value>" for k in required}}
+    checks.append(loop_check)
 
     # 2. Base freshness — the same measurement init fails closed on (issue #2).
     fresh = check_base_freshness(repo, base)
@@ -804,6 +824,20 @@ def cmd_record_cycle(args):
     plan = plan_record(state, it["n"])
     quota_met = plan.get("quota_met", True) if plan else True
     quiet = new_actionable == 0 and not patched and quota_met
+    # State the formula inline (F2): quiet requires all three, so a landed patch
+    # or an unmet quota defeats an otherwise-quiet cycle. Without this the JSON
+    # shows the inputs but not why quiet is false.
+    if quiet:
+        quiet_because = "no new actionable findings, no patch landed, quota met"
+    else:
+        blockers = []
+        if new_actionable != 0:
+            blockers.append(f"{new_actionable} new actionable finding(s)")
+        if patched:
+            blockers.append("a patch landed this cycle")
+        if not quota_met:
+            blockers.append("exploration quota not met")
+        quiet_because = "not quiet — " + "; ".join(blockers)
     state["quiet_streak"] = state["quiet_streak"] + 1 if quiet else 0
     converged = state["quiet_streak"] >= 2
     # Persisted so the dashboard can explain the streak, not just count it.
@@ -816,7 +850,7 @@ def cmd_record_cycle(args):
                  f"quiet_streak={state['quiet_streak']}"
                  + (" -> CONVERGED" if converged else ""))
     out({"new_actionable": new_actionable, "patched": patched,
-         "quota_met": quota_met, "quiet": quiet,
+         "quota_met": quota_met, "quiet": quiet, "quiet_because": quiet_because,
          "quiet_streak": state["quiet_streak"], "converged": converged})
 
 
@@ -960,8 +994,8 @@ def cmd_finish(args):
     if any(cleaned.values()):
         audit(state, "branch cleanup — deleted: "
                      f"{cleaned['deleted'] or 'none'}; kept (unmerged): "
-                     f"{cleaned['kept'] or 'none'}; skipped (worktree): "
-                     f"{cleaned['skipped'] or 'none'}")
+                     f"{cleaned['kept'] or 'none'}; skipped: "
+                     f"{cleaned['skipped_reasons'] or 'none'}")
     out({"ok": True, "reason": args.reason, "branch_cleanup": cleaned,
          "host_drift": host_drift})
 
