@@ -225,8 +225,11 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
 — nothing outward-facing until the merge is a fact:
 1. **Final tests** on integration HEAD — `tanuki-loop test` (the same
    configured `test_cmd` each iteration runs); abort the gate on failure.
-2. **Merge `integration → main`** (executed by the gate only after approval;
-   never unattended).
+2. **Merge `integration → main`** — a plain `git merge --no-ff
+   <integration-branch>` on `main` (there is no `tanuki-loop merge` subcommand;
+   this one gate step is a hand-run git operation). Use `--no-ff` so the batch
+   lands as one reviewable merge commit that `gate-check` can then confirm is
+   reachable; executed by the gate only after approval, never unattended (F12).
 3. **Verify** with `tanuki-loop gate-check` (integration HEAD reachable from
    base).
 4. **Push the base branch** with `tanuki-loop gate-push` — the first
