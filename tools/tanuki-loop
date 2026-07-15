@@ -158,13 +158,42 @@ def open_scenarios(path, target):
     return open(p, encoding="utf-8")
 
 
+def breaker_hint(reason):
+    """The concrete next step for a breaker, so the {"breaker": …} JSON names
+    its remedy instead of forcing the operator to read the source (F4, F53).
+    Matched on the reason text; None when no specific remedy applies."""
+    r = reason.lower()
+    if "external modification" in r:
+        return ("run `tanuki-loop --target <t> recover` and choose --restore "
+                "(discard the external change, reset to the last verified HEAD) "
+                "or --adopt (accept the current HEAD as the new baseline)")
+    if "sequencing violation" in r:
+        return "close the open iteration with `iter-verify` or `rollback` first"
+    if "iteration cap reached" in r or "wall-time" in r:
+        return "the run hit its ceiling — proceed to the morning gate; no more iterations run"
+    if "test failure" in r:
+        return "a test_cmd failed in the loop worktree — inspect it, then fix or `rollback`"
+    if "integration invariant" in r:
+        return "the four-part integration check failed — inspect the worktree against the audit trail"
+    if "rollback failed" in r:
+        return "the worktree could not be reset cleanly — inspect it by hand at the start SHA"
+    return None
+
+
 def breaker(state, reason):
     # Persist machine-readably so a dashboard can answer "why did it stop?"
-    state["last_breaker"] = {"reason": reason,
-                             "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    hint = breaker_hint(reason)
+    entry = {"reason": reason, "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    if hint:
+        entry["hint"] = hint
+    state["last_breaker"] = entry
     save_state(state)
-    audit(state, f"BREAKER (immediate stop): {reason}")
-    out({"breaker": reason})
+    audit(state, f"BREAKER (immediate stop): {reason}"
+                 + (f" | hint: {hint}" if hint else ""))
+    payload = {"breaker": reason}
+    if hint:
+        payload["hint"] = hint
+    out(payload)
     sys.exit(3)
 
 
@@ -1384,6 +1413,9 @@ def cmd_dashboard(args):
                              "recover --restore` (reset to the last verified "
                              "loop state) or `--adopt` (re-baseline around "
                              "the external change); never rollback")
+            elif state["last_breaker"].get("hint"):
+                # breaker-specific remedy carried on the breaker itself (F53)
+                lines.append(f"  NEXT: {state['last_breaker']['hint']}")
             else:
                 lines.append("  NEXT: inspect the audit trail, fix the "
                              "breaker cause, then resume or run the morning "
