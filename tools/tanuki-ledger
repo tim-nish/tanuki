@@ -525,11 +525,18 @@ def cmd_status(args, ledger):
     elif watching:
         nxt = ("promote chronic/high-confidence open findings with "
                "'promote --min-recurrence N', then decide them")
-    elif runs:
+    elif runs and not ledger["findings"]:
         # Events are ingested but no finding exists yet — the hint must advance
         # to extraction, not repeat "ingest" (F24/F36).
         nxt = ("events are ingested but no findings yet — extract one with "
                "upsert-finding --title … --evidence <run>/<scenario>#<seq>")
+    elif ledger["findings"]:
+        # Findings exist but none are proposed/awaiting/open — they are all
+        # decided (accepted/dismissed) or compacted. Don't fall through to the
+        # fresh-ledger "extract a finding" advice for a state you're not in
+        # (F76 — regression from the F24 next-hint fix).
+        nxt = ("all findings are decided (accepted/dismissed/compacted) — "
+               "re-run the pipeline to surface any new ones")
     else:
         nxt = "ingest a run's events to start surfacing findings"
     print(f"\n  next: {nxt}")
