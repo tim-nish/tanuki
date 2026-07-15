@@ -89,8 +89,12 @@ live in the scenarios file's `"loop"` block, stored once, never retyped:
    behind-count. (A missing upstream or an offline fetch is tolerated with a
    note, not a stop.)
 4. Run `${CLAUDE_PLUGIN_ROOT}/tools/tanuki-preflight <plugin-worktree>`; on failure stop
-   and report (lint is not the loop's job). `tanuki-ledger --target <target>
-   init` (idempotent).
+   and report (lint is not the loop's job). **`tanuki-preflight` assumes the
+   loop-repo is a Claude plugin** — its `skills-dir` check hard-fails a repo
+   with no `skills/` and no `commands/*.md`. For a non-plugin dogfooding target
+   (a plain code repo), that check does not apply: skip preflight rather than
+   fabricating placeholder plugin scaffolding to satisfy it (F39). `tanuki-ledger
+   --target <target> init` (idempotent).
 
 ## 1. Iterate (until convergence or the cap or a breaker)
 
