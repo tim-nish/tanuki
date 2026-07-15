@@ -225,6 +225,38 @@ def execution_escape_check(raw_path, real_plugin_abs):
     return offending
 
 
+def host_source_escape_check(raw_path, host_setup, host_source_abs):
+    """The host-side symmetry of the plugin execution-escape check
+    (spec-host-snapshot): `host_setup` runs `shell=True` in the disposable host
+    clone, so an absolute path can still reach the clone SOURCE — the live host
+    (or, for a loop run, its pinned fixture). The contract is sandbox-relative
+    paths: setup and scenario commands operate on the per-scenario clone via
+    cwd, never on host_source_abs. Return offending commands — host_setup
+    first, then any scenario command in the transcript. A hit means a real tree
+    outside the sandbox was reached; the pollution check cannot see it (it only
+    inspects the clone), so this assertion is the only guard."""
+    if not host_source_abs:
+        return []
+    needle = os.path.normpath(host_source_abs)
+    offending = []
+    for cmd in host_setup or []:
+        if needle in cmd and cmd.strip()[:200] not in offending:
+            offending.append(cmd.strip()[:200])
+    if os.path.exists(raw_path):
+        with open(raw_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if needle not in line:                 # cheap prefilter
+                    continue
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                for cmd in _bash_commands(d):
+                    if needle in cmd and cmd.strip()[:200] not in offending:
+                        offending.append(cmd.strip()[:200])
+    return offending
+
+
 def normalize(raw_path, run, scenario):
     """Mechanically map the claude stream-json transcript to Tanuki Events.
     Never judges — extraction of UX findings is the Miner's job."""
@@ -363,6 +395,33 @@ def drive_scenario(args, scenario, run_dir, cfg, prog=None):
             prog.update({"current": sid, "stage": name, **extra})
             save_progress(run_dir, prog)
 
+    # Host-source guard (spec-host-snapshot), pre-check: `host_setup` runs
+    # shell=True and could reach the clone SOURCE (the live host, or a loop
+    # run's fixture) via an absolute path — the incident's own host_setup did.
+    # Refuse BEFORE cloning/running so no tree outside the sandbox is touched;
+    # setup must be sandbox-relative (the cloned host is already the cwd).
+    host_source_abs = (os.path.abspath(os.path.expanduser(args.host))
+                       if args.host else None)
+    setup_escape = host_source_escape_check("", scenario.get("host_setup"),
+                                            host_source_abs)
+    if setup_escape:
+        events = [{"run": args.run, "scenario": sid, "seq": 1, "type": "note",
+                   "detail": ("host-source escape: host_setup referenced the "
+                              "clone-source path (sandbox-relative required): "
+                              f"{setup_escape[:3]}"),
+                   "evidence": f"{sid}/host-source-escape"}]
+        events_path = os.path.join(run_dir, f"{sid}.events.jsonl")
+        with open(events_path, "w", encoding="utf-8") as f:
+            for e in events:
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+        return {"scenario": sid,
+                "status": "host-escape: host_setup touched the clone-source path",
+                "events": len(events), "model": model, "cost_usd": None,
+                "num_turns": None, "duration_s": 0.0, "events_path": events_path,
+                "decision_points": scenario.get("decision_points") or [],
+                "host_clone_changes": 0, "plugin_clone_dirty": False,
+                "execution_escape": False, "host_escape": True, "workspace": ws}
+
     print(f"  [{sid}] stage: clone + setup", flush=True)
     stage("clone + setup", elapsed_s=0, captured_kb=0)
     plugin_clone, host_clone = prepare_workspace(
@@ -477,6 +536,19 @@ def drive_scenario(args, scenario, run_dir, cfg, prog=None):
                        "evidence": f"{sid}/execution-escape"})
         if status == "ok":
             status = "isolation-escape: ran the plugin from outside the sandbox"
+    # Host-source guard, post-run: a scenario command (not host_setup — already
+    # pre-checked) that reached the clone source. Same assert-what-was-touched
+    # posture; the pollution check can't see it (it only inspects the clone).
+    host_escapes = host_source_escape_check(raw_path, None, host_source_abs)
+    if host_escapes:
+        events.append({"run": args.run, "scenario": sid, "seq": len(events) + 1,
+                       "type": "note",
+                       "detail": ("host-source escape: scenario command touched "
+                                  "the clone-source path, not the disposable "
+                                  f"host clone: {host_escapes[:3]}"),
+                       "evidence": f"{sid}/host-source-escape"})
+        if status == "ok":
+            status = "host-escape: touched the clone-source path"
     events_path = os.path.join(run_dir, f"{sid}.events.jsonl")
     with open(events_path, "w", encoding="utf-8") as f:
         for e in events:
@@ -493,7 +565,8 @@ def drive_scenario(args, scenario, run_dir, cfg, prog=None):
             "decision_points": scenario.get("decision_points") or [],
             "host_clone_changes": len(pollution_check(host_clone)),
             "plugin_clone_dirty": bool(plugin_dirt),
-            "execution_escape": bool(escapes), "workspace": ws}
+            "execution_escape": bool(escapes),
+            "host_escape": bool(host_escapes), "workspace": ws}
 
 
 def main():
