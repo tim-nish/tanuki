@@ -1362,7 +1362,13 @@ def cmd_dashboard(args):
                          " · ".join(f"{k} {v}" for k, v in sorted(by.items())) +
                          f" (history: /tanuki {state['target']} --history)")
         else:
-            lines.append("  findings: none in the ledger yet")
+            # Deferred/frozen items live in the morning queue, not the
+            # long-term ledger, so "none yet" beside a "deferred N" count is not
+            # a contradiction — say so (F44).
+            note = (" (deferred/frozen items above are morning-queue entries, "
+                    "not ledger findings)"
+                    if state.get("deferred") or state.get("frozen") else "")
+            lines.append("  findings: none in the ledger yet" + note)
 
         # -- (section 4) scheduler decisions — ALWAYS present: its DECISIONS
         #    for this iteration when a persisted plan exists; per-state pools
@@ -1597,7 +1603,12 @@ def main():
     sp.add_argument("--key", required=True); sp.add_argument("--issue", required=True)
     sp = sub.add_parser("policy")
     sp.add_argument("--finding", required=True); sp.add_argument("--decision", required=True)
-    sp = sub.add_parser("finish"); sp.add_argument("--reason", required=True)
+    sp = sub.add_parser("finish")
+    # Validate against the documented enum (F71) so a typo'd reason can't be
+    # silently accepted; choices= also lists them in --help.
+    sp.add_argument("--reason", required=True,
+                    choices=["converged", "cap", "aborted", "gate-ratified"],
+                    help="terminal reason for the run (machine-readable)")
     sp = sub.add_parser("dashboard")
     sp.add_argument("--follow", type=int, default=None)
     sub.add_parser("status")
