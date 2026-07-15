@@ -663,7 +663,15 @@ def main():
                     help="one or more .events.jsonl files to ingest")
     sp = sub.add_parser("ingest-note"); sp.add_argument("--text", required=True)
     sp = sub.add_parser("findings"); sp.add_argument("--status")
-    sp = sub.add_parser("upsert-finding")
+    sp = sub.add_parser(
+        "upsert-finding",
+        description=(
+            "Create a finding (--title) or accumulate onto an existing one "
+            "(--match <id>). NOTE: 'recurrence' counts the number of "
+            "upsert-finding calls that touched the finding (i.e. how many times "
+            "it was observed-and-recorded), NOT the number of --evidence "
+            "pointers or underlying event occurrences — a creation with two "
+            "--evidence pointers is still recurrence:1 (F72)."))
     sp.add_argument("--title")
     # List the valid enum so it's discoverable from --help, not only from a
     # rejection error (F33). choices= also produces a clear argparse message.
