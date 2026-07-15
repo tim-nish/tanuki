@@ -687,7 +687,20 @@ def main():
     sp.add_argument("--runs", type=int, default=5)
     sub.add_parser("stats")
     sub.add_parser("status")
-    sub.add_parser("policy-surface")
+    sub.add_parser(
+        "policy-surface",
+        help="read-only: print the operator's pinned policy source (the "
+             "allowlisted files under policy_source in the scenarios config) "
+             "as numbered lines, a judgment-time input for classification; "
+             "prints {\"configured\": false} when no policy_source is set",
+        description=(
+            "Emit the operator's advisory policy as numbered file:line lines "
+            "so classification can quote it. Reads ONLY the `files` allowlist "
+            "under `policy_source` in the target's scenarios config, pins the "
+            "checkout, and never touches the ledger/events/scheduler. It is an "
+            "enhancer, not a dependency: unset policy_source -> "
+            "{\"configured\": false}; unusable path -> {\"available\": false}. "
+            "See specs/spec-policy-advisory."))
     args = p.parse_args()
 
     if args.cmd == "upsert-finding" and not args.match and not args.title:
