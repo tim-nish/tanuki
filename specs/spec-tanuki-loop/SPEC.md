@@ -155,7 +155,7 @@ another execution mode**: it runs no drive, no mining, no iteration.
 
 It reuses `init`'s own resolution and guards (`resolve_loop_config`,
 `resolve_base`, `check_base_freshness`) — never parallel logic — so it cannot
-disagree with the run it validates. Four checks:
+disagree with the run it validates. Five checks:
 
 1. **Required headless config** — `test_cmd`, `wall_time_s`, `token_budget`,
    `attempt_cap`, and `iterations` all resolved (scenarios `"loop"` block or
@@ -175,6 +175,12 @@ disagree with the run it validates. Four checks:
    **Informational, never fatal** — deferral is the designed-safe headless
    outcome; the check exists so a night of it is a known cost, not a morning
    surprise. A malformed policy file, by contrast, is a failed check.
+5. **Host cloneable** (hosted targets; mandated by
+   `specs/spec-host-snapshot/SPEC.md`) — the scenarios file's live host path
+   exists, is a git repo, and a throwaway clone of it succeeds (removed
+   afterward), so `init`'s fixture pinning cannot fail overnight. Hostless
+   targets report the check as passing with a "no host fixture to pin" note.
+   Fatal for a hosted target.
 
 **Read-only contract:** `doctor` writes no repo, ledger, loop-state, or policy
 data (check 2's fetch refreshes remote-tracking refs only, exactly like
@@ -226,6 +232,43 @@ Enforcement note (same revision): `record-cycle` now *enforces* the loop
 amendment itself — quiet requires the iteration's persisted plan to report
 `quota_met: true` (absent plan record ⇒ ungated, for pre-scheduler runs).
 Previously the amendment was documented but the tool did not check it.
+
+### Fixed skeleton (REVISED 2026-07-15 — section structure is harness-owned)
+
+The six points above govern *content*; this revision pins *structure*, closing
+the gap dogfooding surfaced (finding F5: sections silently absent, leaving a
+cold reader unable to distinguish "no data yet" from "missing data").
+
+1. **Six sections, fixed order, unconditional presence.** Every render emits,
+   in this order: (1) header + health verdict, (2) latest drive, (3) this run,
+   (4) scheduler decisions, (5) convergence, (6) why stopped / NEXT. Section
+   presence is enforced by the rendering code, never by the availability of a
+   substrate file — the skeleton is the contract a cold reader learns once.
+2. **A missing substrate degrades to a stated reason, never to absence.**
+   When a section's input does not exist, the section renders its heading plus
+   one explicit line naming what is missing and why that is expected, e.g.
+   `latest drive: none yet — iteration 1 has not started a drive
+   (no progress.json)`, `scheduler decisions: no scheduler state for this
+   target — run tanuki-scheduler sync first`, `this run: no ledger movement
+   yet`. This generalizes point 4's "degrade … with an explicit note — never
+   silently" from the plan record to **every** section.
+3. **Counters carry their definitions inline.** Any number whose meaning is
+   not derivable from the line it appears on states its definition next to
+   its first use — e.g. `fixed` = findings that stopped recurring this run
+   (not commits landed); the iteration counter counts *consumed* iterations,
+   including rolled-back ones (so `cap hit` next to `1/3` cannot read as a
+   contradiction). A counter needing a paragraph belongs in the audit, not
+   the dashboard.
+4. **No model-supplied text except quoted reasons.** The only free text on
+   the dashboard is operator/model-authored reason strings (deferral/freeze
+   reasons). These render truncated to one line with an explicit ellipsis
+   marker **and** a pointer to the full text (`… — full: queue.md`); a
+   truncation that hides the justification a reviewer needs is a contract
+   violation, not a cosmetic choice.
+
+The skeleton is verifiable mechanically: a dashboard render against an
+`init`-only run (no drive, no scheduler state, no findings) must still emit
+all six section headings with their degradation lines.
 
 **Materialization key.** The morning gate stamps each issue body with
 `tanuki-loop: <run-id>/<problem-key>`, where `<problem-key>` is the lead ledger
@@ -289,13 +332,14 @@ prior successful iterations are untouched.
 The cap is a ceiling; **convergence is the success condition**, and the loop
 stops on **convergence or cap, whichever comes first.**
 
-A drive → mine is **quiet** when all three hold: **no new actionable
-findings**, **no accepted patch** was generated, and every remaining finding is
-a **duplicate**, **deferred**, or **frozen**. Per the
-spec-tanuki-scenario-lifecycle loop amendment, a cycle additionally counts as
-quiet **only if its scheduler plan met the exploration quota** —
-`record-cycle` reads the iteration's persisted plan record and gates on
-`quota_met` itself (see "Dashboard revision", enforcement note).
+**Canonical quiet-cycle definition** (every other statement of it — dashboard,
+command doc — references this one): a cycle is **quiet** when all three hold:
+**no new actionable finding** (computed from the `iter-start` ledger snapshot —
+a finding is *not* new-actionable when it is a duplicate bump, deferred, or
+frozen), **no patch landed** (start SHA == end SHA), and — per the
+spec-tanuki-scenario-lifecycle loop amendment — **the iteration's persisted
+scheduler plan reported `quota_met: true`**; `record-cycle` computes and gates
+all three itself (see "Dashboard revision", enforcement note).
 **Convergence requires two consecutive quiet cycles** — a single quiet drive
 can be luck given the deliberately weak driver. `tanuki-loop record-cycle`
 tracks the streak and reports `converged` at streak ≥ 2 (a non-quiet cycle
@@ -352,9 +396,13 @@ outward-facing record is written until the merge is a fact:
    push does anything else outward-facing run.
 5. **Materialize** the converged work as GitHub issues — **one issue per
    resolved problem** (collapsing the intermediate findings), describing **what
-   landed**, each stamped with a stable `tanuki-loop-run: <run-id>` marker.
+   landed**, each stamped `tanuki-loop: <run-id>/<problem-key>` (the
+   Materialization key above — one format, everywhere).
 6. **Link** each issue to the (now pushed) merge commit, **close it as
    completed**, and reconcile the board to Done.
+7. **Remove the loop worktree** and close the run machine-readably
+   (`tanuki-loop finish --reason gate-ratified`), which also owns the
+   merged-integration-branch deletion.
 
 **Idempotent retry:** before creating an issue, search for its `<run-id>`
 marker (plus a per-problem key); an existing one is reused, never duplicated.
@@ -362,7 +410,7 @@ If the gate dies after the push, re-running resumes at step 5 and creates only
 the missing issues. The GitHub history is a clean record of resolved problems,
 not a transcript of the overnight search.
 
-**Branch cleanup has an owner.** Gate step 6 removes the worktree; the deferred
+**Branch cleanup has an owner.** Gate step 7 removes the worktree; the deferred
 "delete the integration branch once the merge is confirmed" is then executed by
 `tanuki-loop finish` (with the next `init` for the target as backstop): it
 deletes integration branches whose tip is reachable from the base branch and
