@@ -397,7 +397,11 @@ the loop never decides a spec alternative on its own.
 - Cumulative on one integration branch; never fan out per-iteration branches
   from `main`.
 - Rollback is `reset --hard <start SHA>` **plus** `git clean -fd` in the loop
-  worktree only, recorded in the audit; prior successes are untouched.
+  worktree only, recorded in the audit; prior successes are untouched. **A
+  rolled-back iteration still consumes one of the `cap` slots** (F27) — the cap
+  counts every *consumed* iteration, verified or rolled back, so a cap of N
+  bounds total attempts, not just successful ones (visible in `status` /
+  the dashboard's "N/N consumed" counter).
 - Questions only in iteration 1 (recorded as run policy); iterations ≥ 2 never
   ask — unanswered judgment defers. A finding is re-fixed up to its attempt
   cap (default 4), then frozen — never a whole-loop stop.
