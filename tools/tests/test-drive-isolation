@@ -77,4 +77,43 @@ grep -q "SANDBOX: the plugin under test is checked out at" "$drive" \
   || fail "drive lost the SANDBOX pointer injection"
 pass "hostless runs inject a SANDBOX pointer to the plugin clone"
 
+# --- 4. hosted host_setup that touches the clone SOURCE -> flagged, not run ---
+# spec-host-snapshot / story 2.2: host_setup must be sandbox-relative. An
+# absolute path to the clone source (the live host) is refused BEFORE the run.
+host="$tmp/host"
+git init -q "$host" && git -C "$host" config user.email t@e && git -C "$host" config user.name t
+git -C "$host" checkout -qb main && echo hostfile > "$host/data" && git -C "$host" add -A && git -C "$host" commit -qm h0
+root3="$tmp/root3"; export TANUKI_ROOT="$root3"
+cat > "$tmp/hosted-escape.json" <<EOF
+{"scenarios":[{"id":"solo","charter":"c","prompt":"p","max_turns":3,
+   "host_setup":["cat $host/data"]}]}
+EOF
+"$drive" --target t --plugin "$tmp/plugin" --host "$host" \
+  --scenarios "$tmp/hosted-escape.json" --run rhe --timeout 60 >/dev/null || true
+python3 - "$(manifest "$root3" rhe)" <<'PY' || fail "hosted host_setup escape not flagged"
+import json, sys
+r = json.load(open(sys.argv[1]))["results"][0]
+assert r["host_escape"] is True, r
+assert r["status"].startswith("host-escape"), r
+assert r["num_turns"] is None, r   # refused BEFORE running the scenario
+PY
+pass "host_setup referencing the clone source is refused before the scenario runs"
+
+# --- 5. hosted, sandbox-relative host_setup -> not flagged, ok ----------------
+root4="$tmp/root4"; export TANUKI_ROOT="$root4"
+cat > "$tmp/hosted-ok.json" <<'EOF'
+{"scenarios":[{"id":"solo","charter":"c","prompt":"p","max_turns":3,
+   "host_setup":["cat data"]}]}
+EOF
+"$drive" --target t --plugin "$tmp/plugin" --host "$host" \
+  --scenarios "$tmp/hosted-ok.json" --run rho --timeout 60 >/dev/null \
+  || fail "drive exited non-zero on the sandbox-relative hosted run"
+python3 - "$(manifest "$root4" rho)" <<'PY' || fail "sandbox-relative hosted run wrongly flagged"
+import json, sys
+r = json.load(open(sys.argv[1]))["results"][0]
+assert r["host_escape"] is False, r
+assert r["status"] == "ok", r
+PY
+pass "sandbox-relative host_setup (operates on the clone) is not flagged"
+
 echo "all checks passed"
