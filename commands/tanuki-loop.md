@@ -220,7 +220,8 @@ Do not end at "here is what ran." Present, for one review:
 
 Then, behind the operator's single approval, run **merge-first and idempotent**
 — nothing outward-facing until the merge is a fact:
-1. **Final tests** on integration HEAD; abort the gate on failure.
+1. **Final tests** on integration HEAD — `tanuki-loop test` (the same
+   configured `test_cmd` each iteration runs); abort the gate on failure.
 2. **Merge `integration → main`** (executed by the gate only after approval;
    never unattended).
 3. **Verify** with `tanuki-loop gate-check` (integration HEAD reachable from
