@@ -297,6 +297,12 @@ def cmd_promote(args, ledger):
            (f["recurrence"] >= min_rec or
             len(f["scenarios"]) >= min_scen)]
     out.sort(key=lambda f: (-f["recurrence"], -len(f["scenarios"])))
+    # Name the thresholds that were applied so an empty result is unambiguous
+    # between "nothing qualifies" and "you forgot to pass thresholds" (F68).
+    if not out:
+        print(f"note: no open finding met the promotion bar "
+              f"(recurrence >= {min_rec} OR scenarios >= {min_scen}); pass "
+              f"--min-recurrence/--min-scenarios to widen it", file=sys.stderr)
     print(json.dumps(with_priority(out), indent=2, ensure_ascii=False))
 
 
@@ -649,8 +655,10 @@ def main():
             "{run: <run-id>, scenario: <slug>, seq: <int>, type: "
             "tool_error|note|result|..., detail: <str>}. The evidence pointer "
             "for a finding is formed as '<run>/<scenario>#<seq>'. Exact "
-            "duplicates (same scenario+type+detail) collapse to an occurrence "
-            "count rather than creating separate records."))
+            "duplicates collapse to an occurrence count rather than creating "
+            "separate records; the identity key is scenario+type+detail ONLY — "
+            "run and seq are NOT part of it, so the same detail seen in two "
+            "different runs collapses into one record with count=2 (F70)."))
     sp.add_argument("files", nargs="+",
                     help="one or more .events.jsonl files to ingest")
     sp = sub.add_parser("ingest-note"); sp.add_argument("--text", required=True)
