@@ -702,8 +702,21 @@ def main():
     # choices= also yields a clear argparse message on a bad value.
     sp.add_argument("--status", required=True, choices=STATUSES,
                     help=f"new status; one of {STATUSES}")
-    sp = sub.add_parser("compact")
-    sp.add_argument("--unseen-runs", type=int, default=None)
+    sp = sub.add_parser(
+        "compact",
+        help="tombstone accepted/dismissed findings verified-absent for enough "
+             "re-driven runs; keeps the ledger's frontier small",
+        description=(
+            "Archive (tombstone) a decided finding once it has been "
+            "verified-absent — i.e. its scenario was RE-DRIVEN (a run with a "
+            "manifest.json listing that scenario) without the finding "
+            "recurring. --unseen-runs N is that threshold: the count of "
+            "re-driven runs the finding must be absent from, NOT wall-clock "
+            "runs elapsed. Plain `ingest` of hand-written events does not "
+            "create a manifest, so it never advances this counter (F75)."))
+    sp.add_argument("--unseen-runs", type=int, default=None,
+                    help="re-driven runs the finding must be absent from before "
+                         "tombstoning (default from config)")
     sp = sub.add_parser("scenario-yield")
     sp.add_argument("--runs", type=int, default=5)
     sub.add_parser("stats")
