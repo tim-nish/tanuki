@@ -257,10 +257,11 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
 7. Remove the loop worktree (`git worktree remove`), then close the run
    machine-readably: `tanuki-loop finish --reason gate-ratified` (likewise
    `converged` / `cap` / `aborted` when a run ends without a gate). **`finish`
-   owns the branch cleanup** — it deletes integration branches whose tip is
-   reachable from the base branch and reports any it kept (unmerged tips stay);
-   the next `init` for the target is the backstop. No branch is left to
-   accumulate until an unrelated tool collects it.
+   owns the branch cleanup** — its `branch_cleanup` report has three buckets:
+   `deleted` (tip reachable from the base branch), `kept` (unmerged tips stay),
+   and `skipped` (e.g. a branch still checked out in a worktree — "remove it
+   first"). The next `init` for the target is the backstop. No branch is left
+   to accumulate until an unrelated tool collects it.
 
 ## Monitoring (the operator's window)
 
