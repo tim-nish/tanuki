@@ -465,10 +465,15 @@ def cmd_status(args, ledger):
     """Human-readable state of a target: what awaits a decision, what's being
     watched, what happened last. The answer to 'where was I?'."""
     tdir = os.path.join(TANUKI_ROOT, args.target)
-    runs = []
     events_dir = os.path.join(tdir, "events")
-    if os.path.isdir(events_dir):
-        runs = sorted(os.listdir(events_dir))
+    dir_runs = set(os.listdir(events_dir)) if os.path.isdir(events_dir) else set()
+    # A plain `ingest` records events into the ledger without creating an
+    # events/<run>/ directory, so directory-listing alone reports runs:0 even
+    # after a successful ingest (F21). Union in the run ids carried by the
+    # ledger's own event records so the count reflects what was ingested.
+    ingested_runs = {r for e in ledger["events"].values()
+                     for r in e.get("runs", []) if r}
+    runs = sorted(dir_runs | ingested_runs, key=run_key)
     briefs_dir = os.path.join(tdir, "briefs")
     briefs = sorted(os.listdir(briefs_dir)) if os.path.isdir(briefs_dir) else []
 
@@ -503,9 +508,20 @@ def cmd_status(args, ledger):
         for f in watching[:5]:
             print(f"    {priority(f)} {f['id']} [{f['kind']}] "
                   f"rec:{f['recurrence']} — {f['title'][:90]}")
-    print("\n  next: review the latest brief, decide proposed items "
-          "(set-status), re-run after fixes to verify accepted items stop "
-          "recurring")
+    # Adapt the hint to the ledger's actual state (F24) — a static line that
+    # says "decide proposed items" when none are proposed is noise.
+    if by["proposed"]:
+        nxt = (f"decide the {len(by['proposed'])} proposed item(s) with "
+               "set-status (accept/dismiss)")
+    elif awaiting:
+        nxt = (f"re-run the pipeline to verify the {len(awaiting)} accepted "
+               "item(s) stop recurring")
+    elif watching:
+        nxt = ("promote chronic/high-confidence open findings with "
+               "'promote --min-recurrence N', then decide them")
+    else:
+        nxt = "ingest a run's events to start surfacing findings"
+    print(f"\n  next: {nxt}")
 
 
 # specs/spec-policy-advisory: the read allowlist is capped and code-enforced.
@@ -614,11 +630,27 @@ def main():
     p.add_argument("--target", required=True)
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("init")
-    sp = sub.add_parser("ingest"); sp.add_argument("files", nargs="+")
+    sp = sub.add_parser(
+        "ingest",
+        help="record events from JSONL file(s); exact dupes collapse to a count",
+        description=(
+            "Record events into the ledger from one or more JSONL files (one "
+            "JSON object per line). Each event object: "
+            "{run: <run-id>, scenario: <slug>, seq: <int>, type: "
+            "tool_error|note|result|..., detail: <str>}. The evidence pointer "
+            "for a finding is formed as '<run>/<scenario>#<seq>'. Exact "
+            "duplicates (same scenario+type+detail) collapse to an occurrence "
+            "count rather than creating separate records."))
+    sp.add_argument("files", nargs="+",
+                    help="one or more .events.jsonl files to ingest")
     sp = sub.add_parser("ingest-note"); sp.add_argument("--text", required=True)
     sp = sub.add_parser("findings"); sp.add_argument("--status")
     sp = sub.add_parser("upsert-finding")
-    sp.add_argument("--title"); sp.add_argument("--kind", default="friction")
+    sp.add_argument("--title")
+    # List the valid enum so it's discoverable from --help, not only from a
+    # rejection error (F33). choices= also produces a clear argparse message.
+    sp.add_argument("--kind", default="friction", choices=KINDS,
+                    help=f"finding kind (default: friction); one of {KINDS}")
     sp.add_argument("--evidence", required=True)
     sp.add_argument("--match"); sp.add_argument("--note")
     sp = sub.add_parser("promote")
