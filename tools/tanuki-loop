@@ -956,19 +956,22 @@ def cmd_record_cycle(args):
         breaker(state, "sequencing violation: record-cycle before the "
                        "iteration was closed by iter-verify or rollback")
     it = state["iterations"][-1]
-    # Computed by default — convergence never trusts a model-supplied count.
-    if args.new_actionable is not None:
-        new_actionable = args.new_actionable
-    else:
-        before = set(it.get("findings_before", []))
-        excluded = set(state["frozen"]) | set(state.get("deferred", []))
-        new_actionable = len([f for f in ledger_finding_ids(state["target"])
-                              if f not in before and f not in excluded])
-    if args.patched is not None:
-        patched = args.patched
-    else:
-        patched = bool(it.get("phase") == "verified" and it.get("end")
-                       and it["end"] != it["start"])
+    # Always computed — convergence never trusts a model-supplied count
+    # (spec-tanuki-loop). The --new-actionable / --patched flags are advisory
+    # only: if one disagrees with the computed value it is IGNORED with a stderr
+    # warning, so a caller mistake can never silently corrupt convergence (F26).
+    before = set(it.get("findings_before", []))
+    excluded = set(state["frozen"]) | set(state.get("deferred", []))
+    new_actionable = len([f for f in ledger_finding_ids(state["target"])
+                          if f not in before and f not in excluded])
+    patched = bool(it.get("phase") == "verified" and it.get("end")
+                   and it["end"] != it["start"])
+    if args.new_actionable is not None and args.new_actionable != new_actionable:
+        print(f"warning: --new-actionable={args.new_actionable} ignored; "
+              f"computed {new_actionable} from the ledger snapshot", file=sys.stderr)
+    if args.patched is not None and args.patched != patched:
+        print(f"warning: --patched={args.patched} ignored; computed "
+              f"{patched} from the iteration SHAs", file=sys.stderr)
     # Loop amendment (spec-tanuki-scenario-lifecycle): a cycle counts as quiet
     # only if its scheduler plan met the exploration quota — a run that skipped
     # exploration while unexplored branches remained cannot manufacture
@@ -1568,10 +1571,21 @@ def main():
                         "clean tree)")
     sub.add_parser("test")
     sp = sub.add_parser("attempt"); sp.add_argument("--finding", required=True)
-    sp = sub.add_parser("record-cycle")
-    sp.add_argument("--new-actionable", type=int, default=None)
-    sp.add_argument("--patched", dest="patched", action="store_true")
-    sp.add_argument("--no-patched", dest="patched", action="store_false")
+    sp = sub.add_parser(
+        "record-cycle",
+        description=("Record the closed iteration's convergence accounting. "
+                     "new-actionable and patched are ALWAYS computed (from the "
+                     "ledger snapshot and iteration SHAs); the flags below are "
+                     "advisory only and are ignored with a warning if they "
+                     "disagree with the computed value (F26)."))
+    sp.add_argument("--new-actionable", type=int, default=None,
+                    help="advisory only; ignored if it disagrees with the "
+                         "ledger-computed count")
+    sp.add_argument("--patched", dest="patched", action="store_true",
+                    help="advisory only; ignored if it disagrees with the "
+                         "SHA-computed value")
+    sp.add_argument("--no-patched", dest="patched", action="store_false",
+                    help="advisory only (see --patched)")
     sp.set_defaults(patched=None)
     sp = sub.add_parser("defer")
     sp.add_argument("--finding", required=True); sp.add_argument("--reason", required=True)
