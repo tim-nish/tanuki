@@ -198,6 +198,15 @@ one.
   attempt cap → **freeze** (that finding only). Keep processing other
   independent actionable findings; stop **only** if a deferred/frozen item
   blocks *all* remaining work.
+- *Recovery from the external-modification breaker* (attended;
+  spec-tanuki-loop "Circuit breakers"): never `rollback` — it needs an open
+  iteration and the breaker fires with all iterations closed. The operator
+  runs `tanuki-loop recover` and explicitly chooses `--restore` (reset the
+  worktree to the last verified `head_expected`, discarding external commits;
+  audited, reflog-recoverable) or `--adopt` (re-baseline: accept the current
+  HEAD as `head_expected`; adopted range audited and surfaced in the
+  morning-gate diff). Closed iterations are never mutated; nothing recovers
+  automatically.
 
 ## 2. Morning gate (attended — invariant in every phase)
 
