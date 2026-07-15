@@ -1,20 +1,23 @@
 # Spec: host snapshot — the run observes a fixture, never the live host
 
-Status: PROPOSED 2026-07-15. Touches `tools/tanuki-loop` (init, doctor,
-state), `tools/tanuki-drive` (host resolution), and `commands/tanuki-loop.md`
-(the zero-host-footprint rule). Depends on spec-tanuki-loop; refines the
-host side of tanuki-drive's isolation contract.
+Status: RATIFIED 2026-07-15 (triage of issue #15; amended at ratification —
+genericized origin, additive skill rule, host_setup escape guard, read-only
+freshness). Touches `tools/tanuki-loop` (init, doctor, state),
+`tools/tanuki-drive` (host resolution + touched-path guard), and
+`commands/tanuki-loop.md` (the out-of-scope rule). Depends on
+spec-tanuki-loop; refines the host side of tanuki-drive's isolation contract.
 
 Origin: during loop-20260715-121003 (writing-assistant, Phase 2) the operator
-deleted three tracked files in the live host `~/work/product-lab` while the
-loop was running — intentional, normal work on their own repo. The loop read
-the live host tree, classified the operator's edits as a zero-host-footprint
-violation, aborted the run, and **"restored" the files — reverting the
-operator's deliberate work**. Meanwhile a parallel product-lab loop committed
-to the same host mid-run, so later drives cloned a different host than earlier
-ones. The tacit rule this created — *the operator may not touch the host repo
-for the entire (multi-hour) run* — is an unacceptable operating burden, and
-the auto-restore was a write into a repo the loop has no authority over.
+deleted three tracked files in the live host — a repo of their own they were
+concurrently working in — while the loop was running: intentional, normal
+work. The orchestrating session read the live host tree, classified the
+operator's edits as a footprint violation, aborted the run, and **"restored"
+the files — reverting the operator's deliberate work**. Meanwhile a parallel
+loop on another target committed to the same host mid-run, so later drives
+cloned a different host than earlier ones. The tacit rule this created — *the
+operator may not touch the host repo for the entire (multi-hour) run* — is an
+unacceptable operating burden, and the auto-restore was a write into a repo
+the loop has no authority over.
 
 ## The principle
 
@@ -58,10 +61,19 @@ the clone, and `pollution_check` inspects the clone. Two gaps remain:
   clones — the spec makes it a contract instead of an accident.)
 - **Drives clone from the fixture.** For the whole run, every
   `tanuki-drive --host` resolves to `<run-dir>/host-base`, never the
-  scenarios file's live path. Per-scenario disposable clones, `host_setup`
-  (including destructive steps — now genuinely consequence-free), and
-  `pollution_check` all keep working unchanged; only the clone *source*
-  moves. Every iteration dogfoods the identical host.
+  scenarios file's live path. Per-scenario disposable clones, `host_setup`,
+  and `pollution_check` all keep working unchanged; only the clone *source*
+  moves. Every iteration dogfoods the identical host. Destructive
+  `host_setup` steps are consequence-free **only when sandbox-relative** —
+  see the next non-negotiable.
+- **`host_setup` and the scenario must never touch the live host path.**
+  `host_setup` runs `shell=True` with the clone as cwd, so an absolute path
+  still reaches the real tree — the incident's own `host_setup` did exactly
+  that. Sandbox-relative paths are the contract, and the drive enforces it:
+  assert *what was touched* — fail the scenario if `host_setup` or any
+  scenario command referenced the clone-source path (the same
+  assert-what-was-run posture as the hostless execution-escape check,
+  issue #13).
 - **The real host is never written. No auto-restore, any phase.** If the
   loop believes the real host changed, that belief is *out of its
   jurisdiction*: the operator's repo is the operator's. Remediation of real
@@ -84,9 +96,13 @@ the clone, and `pollution_check` inspects the clone. Two gaps remain:
 
 - **`tanuki-loop init`**: clone the host fixture into the run dir; record
   `host_base_sha` and `host_fixture_path` in `state.json`; fail closed if the
-  clone fails (a run that cannot pin its host must not start). Host base
-  freshness at init follows the same rule as the plugin base — fetch and
-  fail closed when behind upstream, `--allow-stale-base` to override.
+  clone fails (a run that cannot pin its host must not start). Host
+  freshness is **informational only, and read-only**: a `git ls-remote`
+  compare may note the host is behind its upstream, but init never fetches
+  in the live host (`git fetch` writes its `.git` — remote-tracking refs)
+  and never fails closed on host staleness. The plugin base earns
+  fail-closed freshness because it is the code under test; the host is an
+  observation fixture, and its staleness is the operator's business.
 - **`tanuki-loop doctor`**: add a fifth check — the host path resolves and is
   cloneable (a throwaway clone, removed afterward, mirroring the baseline-test
   worktree pattern). Fatal for hosted targets; skipped for hostless.
@@ -96,10 +112,11 @@ the clone, and `pollution_check` inspects the clone. Two gaps remain:
   `--host <run-dir>/host-base`. (Attended `/tanuki` single runs may keep
   cloning the live path directly — a one-shot attended run has no drift
   window; the fixture is a *loop* requirement.)
-- **`commands/tanuki-loop.md`**: delete "treat any real-host working-tree
-  change as a breaker" semantics; replace with the out-of-scope rule above.
-  The skill never inspects or modifies any path outside the run dir and the
-  loop worktree after init.
+- **`commands/tanuki-loop.md`**: **add** the out-of-scope rule above — no
+  real-host-breaker text exists today; the incident behavior was improvised
+  by the orchestrating session, which is exactly why the rule must be
+  written down. The skill never inspects or modifies any path outside the
+  run dir and the loop worktree after init.
 
 ## Alternatives rejected
 
