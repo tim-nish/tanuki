@@ -576,6 +576,16 @@ def cmd_doctor(args):
         loop_check["set_via_flag"] = {k: flag_for[k] for k in missing}
         loop_check["scenarios_loop_shape"] = {
             "loop": {k: "<value>" for k in required}}
+        # Name the canonical path so the operator knows WHERE the "loop" block
+        # goes and that it is not auto-loaded (F38).
+        loop_check["scenarios_file"] = {
+            "canonical": os.path.join(
+                TANUKI_ROOT, "scenarios", f"{args.target}.scenarios.json"),
+            "note": ("put the \"loop\" block in this file; its name must match "
+                     "--target. doctor/init do NOT auto-load it — pass it with "
+                     "--scenarios. $TANUKI_ROOT (default ~/.tanuki) sets the "
+                     "root."),
+        }
     checks.append(loop_check)
 
     # 2. Base freshness — the same measurement init fails closed on (issue #2).
@@ -722,7 +732,7 @@ def cmd_iter_start(args):
         breaker(state, "sequencing violation: previous iteration was never "
                        "closed by iter-verify or rollback")
     if len(state["iterations"]) >= state["cap"]:
-        breaker(state, "iteration cap reached")
+        breaker(state, "iteration cap reached (rolled-back iterations count toward the cap)")
     if state["wall_limit_s"] and \
             time.time() - state["wall_start"] >= state["wall_limit_s"]:
         breaker(state, "wall-time limit exceeded")
@@ -1513,7 +1523,11 @@ def main():
 
     sub.add_parser("iter-start")
     sp = sub.add_parser("iter-verify"); sp.add_argument("--no-patch", action="store_true")
-    sub.add_parser("rollback")
+    sub.add_parser(
+        "rollback",
+        help="reset the loop worktree --hard to the iteration start SHA + git "
+             "clean -fd (removed paths logged); the rolled-back iteration still "
+             "counts toward the --cap ceiling (F27)")
     sp = sub.add_parser(
         "recover",
         help="attended recovery from the external-modification breaker "
