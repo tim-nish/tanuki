@@ -103,6 +103,13 @@ breakers, records the start SHA, and snapshots the ledger (exit 3 +
    --plugin <loop-repo> --plugin-ref <integration-branch> … --run <run>-iterN`,
    so this iteration dogfoods the changes prior iterations landed (`--plugin-ref`
    clones the integration commit, not the repo's checked-out branch).
+   **Host fixture (spec-host-snapshot).** For a hosted target, pass
+   `--host <host_fixture_path from state.json>` — the run-scoped fixture `init`
+   pinned — **never the scenarios file's live host path**. Every iteration
+   then dogfoods the identical host, and operator activity in the real host
+   during the run is out of scope by construction. Hostless targets pass no
+   `--host` (issue #13). The live host is a clone source at `init` and nothing
+   else, ever.
    **Scenario selection (deterministic — supersedes hand-derived rotation).**
    Each iteration's scenario set comes from `tanuki-scheduler --target <t>
    plan --scenarios <file> --run <run>-iterN` (`sync` first if the matrix
@@ -275,6 +282,17 @@ the loop never decides a spec alternative on its own.
   working tree; never create GitHub issues / labels / PRs / story files during
   iterations. Outward-facing artifacts are written only at the morning gate,
   after the merge, describing what landed.
+- **The live host is out of scope after `init` (spec-host-snapshot).** `init`
+  pins a run-scoped host fixture; from then on the run reads, diffs, and
+  drives only that fixture and the disposable clones under the run dir — the
+  real host tree is **never** inspected, diffed, written, or "restored". If
+  the loop believes the real host changed, that belief is out of its
+  jurisdiction: the operator's repo is the operator's, and remediation of
+  real trees is not a loop capability. Anomaly checks compare fixture against
+  fixture (did the drive leave a footprint in *its* workspace?); live-host
+  drift is a read-only informational note at `finish`, never a breaker. The
+  skill never inspects or modifies any path outside the run dir and the loop
+  worktree after init.
 - The ledger is the source of truth overnight.
 - Cumulative on one integration branch; never fan out per-iteration branches
   from `main`.

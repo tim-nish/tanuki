@@ -280,6 +280,60 @@ def check_base_freshness(repo, base):
     return {"upstream": upstream, "behind": n_behind, "note": note}
 
 
+def resolve_host(args):
+    """The scenarios file's top-level `host` path (a repo the plugin operates
+    on), expanded and absolutized — or None for a hostless target. The live
+    host is a CLONE SOURCE at init and nothing else, ever (spec-host-snapshot)."""
+    if not args.scenarios:
+        return None
+    with open_scenarios(args.scenarios, args.target) as f:
+        host = json.load(f).get("host")
+    return os.path.abspath(os.path.expanduser(host)) if host else None
+
+
+def host_freshness_note(host):
+    """Read-only, informational host freshness (spec-host-snapshot): NEVER
+    fetch (that writes the live host's .git) and NEVER fail closed — the host
+    is an observation fixture, its staleness is the operator's business. Notes
+    the uncommitted paths the fixture excludes and, best-effort via
+    `git ls-remote` (no fetch), whether the host's branch differs from its
+    remote. Returns a one-line note, or ''."""
+    notes = []
+    rc, dirty = git(host, "status", "--porcelain")
+    n = len([ln for ln in dirty.splitlines() if ln.strip()]) if rc == 0 else 0
+    if n:
+        notes.append(f"{n} uncommitted path(s) excluded from the fixture "
+                     "(committed tip only, by design)")
+    rc_b, branch = git(host, "symbolic-ref", "--short", "HEAD")
+    if rc_b == 0 and branch:
+        rc_r, remote = git(host, "config", "--get", f"branch.{branch}.remote")
+        if rc_r == 0 and remote:
+            rc_l, line = git(host, "ls-remote", remote, branch)
+            rc_h, local = git(host, "rev-parse", "HEAD")
+            if rc_l == 0 and line and rc_h == 0 and line.split()[0] != local:
+                notes.append(f"live host branch '{branch}' differs from "
+                             f"{remote}/{branch} (informational; never fetched)")
+    return "; ".join(notes)
+
+
+def pin_host_fixture(host, dest):
+    """Materialize the run-scoped host fixture: `git clone` the live host into
+    <dest> (committed tip only — effectively atomic; no rsync/raw-.git copy of
+    a repo another process may be writing). Returns the fixture HEAD sha. The
+    caller fails the run closed if this raises — a run that cannot pin its host
+    must not start."""
+    if os.path.isdir(dest):
+        shutil.rmtree(dest)
+    rc, err = git(os.path.dirname(dest), "clone", "--quiet", "--no-hardlinks",
+                  host, dest)
+    if rc != 0:
+        raise RuntimeError(f"host fixture clone failed: {err}")
+    rc, sha = git(dest, "rev-parse", "HEAD")
+    if rc != 0:
+        raise RuntimeError(f"host fixture has no HEAD: {sha}")
+    return sha
+
+
 # --- subcommands -------------------------------------------------------------
 
 def cmd_init(args):
@@ -341,6 +395,21 @@ def cmd_init(args):
 
     d = loop_dir(args.target, run)
     os.makedirs(d, exist_ok=True)
+    # Host fixture (spec-host-snapshot): pin the live host ONCE, here, as an
+    # immutable run-scoped clone. Every drive clones from this fixture, so the
+    # whole run dogfoods one host and operator activity in the real host after
+    # init is invisible by construction. Hostless targets skip this entirely.
+    host = resolve_host(args)
+    host_fixture_path, host_base_sha, host_note = None, None, None
+    if host:
+        if git(host, "rev-parse", "--git-dir")[0] != 0:
+            die(f"host is not a git repo: {host}")
+        host_note = host_freshness_note(host)   # read-only, never fails closed
+        host_fixture_path = os.path.join(d, "host-base")
+        try:
+            host_base_sha = pin_host_fixture(host, host_fixture_path)
+        except RuntimeError as e:
+            die(str(e))                          # a run that cannot pin its host must not start
     policy = {}
     if args.policy and os.path.exists(os.path.expanduser(args.policy)):
         with open(os.path.expanduser(args.policy), encoding="utf-8") as f:
@@ -365,6 +434,12 @@ def cmd_init(args):
         # reader can see exactly what was dogfooded (issue #2).
         "base_tip": "local", "base_upstream": upstream,
         "base_behind": n_behind,
+        # Host fixture (spec-host-snapshot): the pinned clone every drive
+        # sources from, and its HEAD. None for a hostless target. After init
+        # the live host is out of scope — never read (except the finish drift
+        # note), diffed, written, or "restored".
+        "host": host, "host_fixture_path": host_fixture_path,
+        "host_base_sha": host_base_sha,
     }
     save_state(state)
     with open(os.path.join(TANUKI_ROOT, args.target, "loop", "current"),
@@ -375,9 +450,15 @@ def cmd_init(args):
                  + (f", {n_behind} behind {upstream}" if n_behind else "")
                  + f") in worktree {worktree}; cap={cap} phase={args.phase}"
                  + (f" — {base_note}" if base_note else ""))
+    if host:
+        audit(state, f"host fixture pinned @ {host_base_sha[:12]} from {host} "
+                     f"-> {host_fixture_path}"
+                     + (f" ({host_note})" if host_note else ""))
     out({"run": run, "integration_branch": integration, "worktree": worktree,
          "base_sha": base_sha, "base_upstream": upstream,
-         "base_behind": n_behind, "branch_cleanup": cleaned})
+         "base_behind": n_behind, "branch_cleanup": cleaned,
+         "host_fixture_path": host_fixture_path, "host_base_sha": host_base_sha,
+         "host_freshness": host_note})
 
 
 def _doctor_policy(args):
@@ -533,6 +614,31 @@ def cmd_doctor(args):
                        "actionable": len(actionable),
                        "covered": len(actionable) - len(uncovered),
                        "would_defer": uncovered, "detail": detail})
+
+    # 5. Host cloneable (spec-host-snapshot) — init pins a run-scoped host
+    #    fixture by cloning the live host; a host that cannot be cloned must
+    #    surface here, not at init. Throwaway clone, removed afterward
+    #    (mirrors the baseline-test worktree pattern). Hostless: skipped.
+    host = resolve_host(args)
+    if not host:
+        checks.append({"check": "host-cloneable", "ok": True,
+                       "detail": "hostless target — no host fixture to pin"})
+    elif git(host, "rev-parse", "--git-dir")[0] != 0:
+        checks.append({"check": "host-cloneable", "ok": False,
+                       "detail": f"host is not a git repo: {host}"})
+    else:
+        tmpdir = tempfile.mkdtemp(prefix="tanuki-doctor-host-")
+        try:
+            pin_host_fixture(host, os.path.join(tmpdir, "host-base"))
+            note = host_freshness_note(host)
+            checks.append({"check": "host-cloneable", "ok": True,
+                           "detail": (f"host '{host}' resolves and clones"
+                                      + (f" — {note}" if note else ""))})
+        except RuntimeError as e:
+            checks.append({"check": "host-cloneable", "ok": False,
+                           "detail": str(e)})
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     failed = [c["check"] for c in checks if not c["ok"]]
     report = {"phase": args.phase, "target": args.target, "base": base,
@@ -827,6 +933,22 @@ def cmd_finish(args):
     state = load_state(args.target, args.run)
     state["finished"] = {"reason": args.reason,
                          "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    # Host drift note (spec-host-snapshot): the ONE permitted post-init read of
+    # the live host — read-only `git rev-parse`, informational only. It never
+    # blocks, aborts, or reconciles; the run mined against the init-time
+    # fixture, and this just tells the operator whether the live host moved.
+    host, base = state.get("host"), state.get("host_base_sha")
+    host_drift = None
+    if host and base and git(host, "rev-parse", "--git-dir")[0] == 0:
+        rc, live = git(host, "rev-parse", "HEAD")
+        if rc == 0 and live != base:
+            rc_c, n = git(host, "rev-list", "--count", f"{base}..{live}")
+            span = f"{base[:12]} -> {live[:12]}"
+            host_drift = (f"live host moved during the run ({span}"
+                          + (f", {n} commit(s) ahead)" if rc_c == 0 and n.isdigit()
+                             else ")"))
+            audit(state, f"host drift (informational): {host_drift}")
+    state["host_drift"] = host_drift
     save_state(state)
     audit(state, f"run finished: {args.reason}")
     # Own the deferred "later branch cleanup" (issue #6): delete merged
@@ -840,7 +962,8 @@ def cmd_finish(args):
                      f"{cleaned['deleted'] or 'none'}; kept (unmerged): "
                      f"{cleaned['kept'] or 'none'}; skipped (worktree): "
                      f"{cleaned['skipped'] or 'none'}")
-    out({"ok": True, "reason": args.reason, "branch_cleanup": cleaned})
+    out({"ok": True, "reason": args.reason, "branch_cleanup": cleaned,
+         "host_drift": host_drift})
 
 
 def _fmt_ids(ids, cap=6):
