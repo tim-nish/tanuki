@@ -251,7 +251,11 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
    `tanuki-loop issue-get --key <problem-key>` (and a marker search) returns
    any existing issue; create only the missing ones and record each with
    `tanuki-loop issue-put --key <problem-key> --issue <n>` — a mid-gate death
-   re-runs from here without duplicating.
+   re-runs from here without duplicating. **Steps 5–6 apply only where an issue
+   tracker is configured** (as with the board reconciliation in step 6): for a
+   hostless/trackerless target the landed batch is already recorded in the merge
+   commit and the audit trail, so skip issue materialization entirely rather
+   than inventing a substitute (F15).
 6. **Link** each to the (now pushed) merge commit, **close as completed**,
    reconcile the board to Done (where project-board tooling is configured).
 7. Remove the loop worktree (`git worktree remove`), then close the run
