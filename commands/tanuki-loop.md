@@ -89,8 +89,12 @@ live in the scenarios file's `"loop"` block, stored once, never retyped:
    behind-count. (A missing upstream or an offline fetch is tolerated with a
    note, not a stop.)
 4. Run `${CLAUDE_PLUGIN_ROOT}/tools/tanuki-preflight <plugin-worktree>`; on failure stop
-   and report (lint is not the loop's job). `tanuki-ledger --target <target>
-   init` (idempotent).
+   and report (lint is not the loop's job). **`tanuki-preflight` assumes the
+   loop-repo is a Claude plugin** — its `skills-dir` check hard-fails a repo
+   with no `skills/` and no `commands/*.md`. For a non-plugin dogfooding target
+   (a plain code repo), that check does not apply: skip preflight rather than
+   fabricating placeholder plugin scaffolding to satisfy it (F39). `tanuki-ledger
+   --target <target> init` (idempotent).
 
 ## 1. Iterate (until convergence or the cap or a breaker)
 
@@ -169,7 +173,10 @@ breakers, records the start SHA, and snapshots the ledger (exit 3 +
 If an iteration fails after step 4, run `tanuki-loop rollback` (`reset --hard`
 to the start SHA + `git clean -fd` + clean-tree verify, removed paths logged),
 so untracked files don't leak forward and prior successes are untouched, then
-apply the breaker.
+apply the breaker. **A rolled-back iteration still counts toward the cap** —
+`iter-start` records it and `rollback` does not give the attempt back, so a run
+with rollbacks reaches the "iteration cap reached" breaker sooner than the raw
+count of *landed* iterations suggests (F27).
 
 **Convergence (stop early — the cap is only a ceiling).** After each closed
 iteration call `tanuki-loop record-cycle` (no counts — the tool computes
@@ -220,9 +227,13 @@ Do not end at "here is what ran." Present, for one review:
 
 Then, behind the operator's single approval, run **merge-first and idempotent**
 — nothing outward-facing until the merge is a fact:
-1. **Final tests** on integration HEAD; abort the gate on failure.
-2. **Merge `integration → main`** (executed by the gate only after approval;
-   never unattended).
+1. **Final tests** on integration HEAD — `tanuki-loop test` (the same
+   configured `test_cmd` each iteration runs); abort the gate on failure.
+2. **Merge `integration → main`** — a plain `git merge --no-ff
+   <integration-branch>` on `main` (there is no `tanuki-loop merge` subcommand;
+   this one gate step is a hand-run git operation). Use `--no-ff` so the batch
+   lands as one reviewable merge commit that `gate-check` can then confirm is
+   reachable; executed by the gate only after approval, never unattended (F12).
 3. **Verify** with `tanuki-loop gate-check` (integration HEAD reachable from
    base).
 4. **Push the base branch** with `tanuki-loop gate-push` — the first
@@ -240,16 +251,21 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
    `tanuki-loop issue-get --key <problem-key>` (and a marker search) returns
    any existing issue; create only the missing ones and record each with
    `tanuki-loop issue-put --key <problem-key> --issue <n>` — a mid-gate death
-   re-runs from here without duplicating.
+   re-runs from here without duplicating. **Steps 5–6 apply only where an issue
+   tracker is configured** (as with the board reconciliation in step 6): for a
+   hostless/trackerless target the landed batch is already recorded in the merge
+   commit and the audit trail, so skip issue materialization entirely rather
+   than inventing a substitute (F15).
 6. **Link** each to the (now pushed) merge commit, **close as completed**,
    reconcile the board to Done (where project-board tooling is configured).
 7. Remove the loop worktree (`git worktree remove`), then close the run
    machine-readably: `tanuki-loop finish --reason gate-ratified` (likewise
    `converged` / `cap` / `aborted` when a run ends without a gate). **`finish`
-   owns the branch cleanup** — it deletes integration branches whose tip is
-   reachable from the base branch and reports any it kept (unmerged tips stay);
-   the next `init` for the target is the backstop. No branch is left to
-   accumulate until an unrelated tool collects it.
+   owns the branch cleanup** — its `branch_cleanup` report has three buckets:
+   `deleted` (tip reachable from the base branch), `kept` (unmerged tips stay),
+   and `skipped` (e.g. a branch still checked out in a worktree — "remove it
+   first"). The next `init` for the target is the backstop. No branch is left
+   to accumulate until an unrelated tool collects it.
 
 ## Monitoring (the operator's window)
 

@@ -11,6 +11,10 @@ Zero dependencies. State lives under ~/.tanuki/<target>/loop/<run>/:
   queue.md     the morning review queue (deferred / frozen items)
 A `current` pointer names the active run so subcommands need only --target.
 
+The global `--target <slug>` is required and MUST precede the subcommand name
+(`tanuki-loop --target foo init …`, never `tanuki-loop init --target foo`); the
+per-subcommand flags below are in addition to it (F40).
+
 Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
   init --loop-repo P [--scenarios F] [--cap N] [--base B] [--worktree W]
        [--phase 1|2|3] [--wall-time S] [--token-budget N] [--policy F]
@@ -158,13 +162,46 @@ def open_scenarios(path, target):
     return open(p, encoding="utf-8")
 
 
+def breaker_hint(reason):
+    """The concrete next step for a breaker, so the {"breaker": …} JSON names
+    its remedy instead of forcing the operator to read the source (F4, F53).
+    Matched on the reason text; None when no specific remedy applies."""
+    r = reason.lower()
+    if "external modification" in r:
+        return ("run `tanuki-loop --target <t> recover` and choose --restore "
+                "(discard the external change, reset to the last verified HEAD) "
+                "or --adopt (accept the current HEAD as the new baseline)")
+    if "sequencing violation" in r:
+        return "close the open iteration with `iter-verify` or `rollback` first"
+    if "iteration cap reached" in r or "wall-time" in r:
+        return "the run hit its ceiling — proceed to the morning gate; no more iterations run"
+    if "test failure" in r:
+        return "a test_cmd failed in the loop worktree — inspect it, then fix or `rollback`"
+    if "worktree not clean after commit" in r:
+        return ("test_cmd likely left untracked artifacts (e.g. __pycache__, "
+                ".pyc, coverage files) — add them to .gitignore or clean them; "
+                "the dirty paths are named in the breaker reason")
+    if "integration invariant" in r:
+        return "the four-part integration check failed — inspect the worktree against the audit trail"
+    if "rollback failed" in r:
+        return "the worktree could not be reset cleanly — inspect it by hand at the start SHA"
+    return None
+
+
 def breaker(state, reason):
     # Persist machine-readably so a dashboard can answer "why did it stop?"
-    state["last_breaker"] = {"reason": reason,
-                             "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    hint = breaker_hint(reason)
+    entry = {"reason": reason, "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    if hint:
+        entry["hint"] = hint
+    state["last_breaker"] = entry
     save_state(state)
-    audit(state, f"BREAKER (immediate stop): {reason}")
-    out({"breaker": reason})
+    audit(state, f"BREAKER (immediate stop): {reason}"
+                 + (f" | hint: {hint}" if hint else ""))
+    payload = {"breaker": reason}
+    if hint:
+        payload["hint"] = hint
+    out(payload)
     sys.exit(3)
 
 
@@ -541,12 +578,25 @@ def cmd_doctor(args):
         "detail": ("every headless ceiling is configured" if not missing else
                    "an unattended run would have no ceiling for: "
                    + ", ".join(missing) + " — set them in the scenarios "
-                   "file's \"loop\" block (shown below) or pass the init flags"),
+                   "file's \"loop\" block (shown below) or pass the init flags. "
+                   "Consequence: init refuses to start without them; a forced "
+                   "run would be unbounded (no cap/wall-time/token ceiling) with "
+                   "no regression gate (F74)"),
     }
     if missing:
         loop_check["set_via_flag"] = {k: flag_for[k] for k in missing}
         loop_check["scenarios_loop_shape"] = {
             "loop": {k: "<value>" for k in required}}
+        # Name the canonical path so the operator knows WHERE the "loop" block
+        # goes and that it is not auto-loaded (F38).
+        loop_check["scenarios_file"] = {
+            "canonical": os.path.join(
+                TANUKI_ROOT, "scenarios", f"{args.target}.scenarios.json"),
+            "note": ("put the \"loop\" block in this file; its name must match "
+                     "--target. doctor/init do NOT auto-load it — pass it with "
+                     "--scenarios. $TANUKI_ROOT (default ~/.tanuki) sets the "
+                     "root."),
+        }
     checks.append(loop_check)
 
     # 2. Base freshness — the same measurement init fails closed on (issue #2).
@@ -693,7 +743,7 @@ def cmd_iter_start(args):
         breaker(state, "sequencing violation: previous iteration was never "
                        "closed by iter-verify or rollback")
     if len(state["iterations"]) >= state["cap"]:
-        breaker(state, "iteration cap reached")
+        breaker(state, "iteration cap reached (rolled-back iterations count toward the cap)")
     if state["wall_limit_s"] and \
             time.time() - state["wall_start"] >= state["wall_limit_s"]:
         breaker(state, "wall-time limit exceeded")
@@ -736,7 +786,11 @@ def cmd_iter_verify(args):
     if not args.no_patch and head == start:
         breaker(state, "integration invariant: HEAD == start SHA but a patch was expected")
     if not _clean(state):
-        breaker(state, "integration invariant: worktree not clean after commit")
+        rc, porc = git(wt, "status", "--porcelain")
+        names = [ln[3:] for ln in porc.splitlines()] if rc == 0 else []
+        shown = ", ".join(names[:8]) + (" …" if len(names) > 8 else "")
+        breaker(state, "integration invariant: worktree not clean after commit"
+                       + (f" (dirty: {shown})" if names else ""))
     it["end"] = head
     it["phase"] = "verified"
     state["head_expected"] = head
@@ -764,7 +818,10 @@ def cmd_rollback(args):
     save_state(state)
     audit(state, f"iter {it['n']}: rolled back to {start[:12]}; "
                  f"removed untracked: {removed_paths or 'none'}")
-    out({"ok": True, "reset_to": start, "removed": removed_paths})
+    # 'removed_untracked' names ONLY the git clean -fd paths; the reset --hard
+    # also silently discards tracked/staged changes back to the start SHA, which
+    # this list does not enumerate (F69).
+    out({"ok": True, "reset_to": start, "removed_untracked": removed_paths})
 
 
 def cmd_recover(args):
@@ -891,9 +948,13 @@ def cmd_test(args):
     tail = ((r.stdout or "") + (r.stderr or "")).strip()[-300:]
     if r.returncode != 0:
         audit(state, f"test FAILED (exit {r.returncode}): …{tail}")
-        breaker(state, f"test failure (exit {r.returncode})")
+        # Name the command that failed and echo its output tail (F67), so the
+        # operator sees what ran without opening the scenarios file.
+        breaker(state, f"test failure (exit {r.returncode}) running `{cmd}`"
+                       + (f": …{tail}" if tail else ""))
     audit(state, "test: passed")
-    out({"ok": True})
+    # Echo the command that passed (F67).
+    out({"ok": True, "cmd": cmd})
 
 
 def cmd_record_cycle(args):
@@ -902,19 +963,22 @@ def cmd_record_cycle(args):
         breaker(state, "sequencing violation: record-cycle before the "
                        "iteration was closed by iter-verify or rollback")
     it = state["iterations"][-1]
-    # Computed by default — convergence never trusts a model-supplied count.
-    if args.new_actionable is not None:
-        new_actionable = args.new_actionable
-    else:
-        before = set(it.get("findings_before", []))
-        excluded = set(state["frozen"]) | set(state.get("deferred", []))
-        new_actionable = len([f for f in ledger_finding_ids(state["target"])
-                              if f not in before and f not in excluded])
-    if args.patched is not None:
-        patched = args.patched
-    else:
-        patched = bool(it.get("phase") == "verified" and it.get("end")
-                       and it["end"] != it["start"])
+    # Always computed — convergence never trusts a model-supplied count
+    # (spec-tanuki-loop). The --new-actionable / --patched flags are advisory
+    # only: if one disagrees with the computed value it is IGNORED with a stderr
+    # warning, so a caller mistake can never silently corrupt convergence (F26).
+    before = set(it.get("findings_before", []))
+    excluded = set(state["frozen"]) | set(state.get("deferred", []))
+    new_actionable = len([f for f in ledger_finding_ids(state["target"])
+                          if f not in before and f not in excluded])
+    patched = bool(it.get("phase") == "verified" and it.get("end")
+                   and it["end"] != it["start"])
+    if args.new_actionable is not None and args.new_actionable != new_actionable:
+        print(f"warning: --new-actionable={args.new_actionable} ignored; "
+              f"computed {new_actionable} from the ledger snapshot", file=sys.stderr)
+    if args.patched is not None and args.patched != patched:
+        print(f"warning: --patched={args.patched} ignored; computed "
+              f"{patched} from the iteration SHAs", file=sys.stderr)
     # Loop amendment (spec-tanuki-scenario-lifecycle): a cycle counts as quiet
     # only if its scheduler plan met the exploration quota — a run that skipped
     # exploration while unexplored branches remained cannot manufacture
@@ -1063,6 +1127,11 @@ def cmd_finish(args):
     """Mark the run terminal, machine-readably: converged | cap |
     gate-ratified | aborted. The dashboard's answer to 'why did it stop?'."""
     state = load_state(args.target, args.run)
+    # A run can be finished twice by design (e.g. `cap` at the end of the
+    # unattended run, then `gate-ratified` after the morning gate). Surface the
+    # prior close rather than overwriting it silently, so a double-close is
+    # visible, not accidental (F32).
+    prev_finished = state.get("finished")
     state["finished"] = {"reason": args.reason,
                          "at": time.strftime("%Y-%m-%d %H:%M:%S")}
     # Host drift note (spec-host-snapshot): the ONE permitted post-init read of
@@ -1094,8 +1163,14 @@ def cmd_finish(args):
                      f"{cleaned['deleted'] or 'none'}; kept (unmerged): "
                      f"{cleaned['kept'] or 'none'}; skipped: "
                      f"{cleaned['skipped_reasons'] or 'none'}")
-    out({"ok": True, "reason": args.reason, "branch_cleanup": cleaned,
-         "host_drift": host_drift})
+    payload = {"ok": True, "reason": args.reason, "branch_cleanup": cleaned,
+               "host_drift": host_drift}
+    if prev_finished:
+        payload["previously_finished"] = prev_finished
+        audit(state, f"note: run was already finished as "
+                     f"'{prev_finished['reason']}' at {prev_finished['at']} — "
+                     f"re-finished as '{args.reason}'")
+    out(payload)
 
 
 def _fmt_ids(ids, cap=6):
@@ -1305,7 +1380,13 @@ def cmd_dashboard(args):
                          " · ".join(f"{k} {v}" for k, v in sorted(by.items())) +
                          f" (history: /tanuki {state['target']} --history)")
         else:
-            lines.append("  findings: none in the ledger yet")
+            # Deferred/frozen items live in the morning queue, not the
+            # long-term ledger, so "none yet" beside a "deferred N" count is not
+            # a contradiction — say so (F44).
+            note = (" (deferred/frozen items above are morning-queue entries, "
+                    "not ledger findings)"
+                    if state.get("deferred") or state.get("frozen") else "")
+            lines.append("  findings: none in the ledger yet" + note)
 
         # -- (section 4) scheduler decisions — ALWAYS present: its DECISIONS
         #    for this iteration when a persisted plan exists; per-state pools
@@ -1384,6 +1465,9 @@ def cmd_dashboard(args):
                              "recover --restore` (reset to the last verified "
                              "loop state) or `--adopt` (re-baseline around "
                              "the external change); never rollback")
+            elif state["last_breaker"].get("hint"):
+                # breaker-specific remedy carried on the breaker itself (F53)
+                lines.append(f"  NEXT: {state['last_breaker']['hint']}")
             else:
                 lines.append("  NEXT: inspect the audit trail, fix the "
                              "breaker cause, then resume or run the morning "
@@ -1437,7 +1521,12 @@ def cmd_status(args):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--target", required=True)
+    # --target is a global option and must precede the subcommand, e.g.
+    # `tanuki-loop --target foo iter-start` (F40); it is a namespace slug, not a
+    # path (F52) — state lives under $TANUKI_ROOT/<target>/.
+    p.add_argument("--target", required=True,
+                   help="target namespace slug (not a path); global option — "
+                        "must come before the subcommand")
     p.add_argument("--run", default=None)
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -1476,7 +1565,13 @@ def main():
 
     sub.add_parser("iter-start")
     sp = sub.add_parser("iter-verify"); sp.add_argument("--no-patch", action="store_true")
-    sub.add_parser("rollback")
+    sub.add_parser(
+        "rollback",
+        help="reset the loop worktree --hard to the iteration start SHA + git "
+             "clean -fd; reports the cleaned untracked paths as "
+             "'removed_untracked' (reset --hard also discards tracked/staged "
+             "changes, which that list does not enumerate); the rolled-back "
+             "iteration still counts toward the --cap ceiling (F27, F69)")
     sp = sub.add_parser(
         "recover",
         help="attended recovery from the external-modification breaker "
@@ -1500,10 +1595,21 @@ def main():
                         "clean tree)")
     sub.add_parser("test")
     sp = sub.add_parser("attempt"); sp.add_argument("--finding", required=True)
-    sp = sub.add_parser("record-cycle")
-    sp.add_argument("--new-actionable", type=int, default=None)
-    sp.add_argument("--patched", dest="patched", action="store_true")
-    sp.add_argument("--no-patched", dest="patched", action="store_false")
+    sp = sub.add_parser(
+        "record-cycle",
+        description=("Record the closed iteration's convergence accounting. "
+                     "new-actionable and patched are ALWAYS computed (from the "
+                     "ledger snapshot and iteration SHAs); the flags below are "
+                     "advisory only and are ignored with a warning if they "
+                     "disagree with the computed value (F26)."))
+    sp.add_argument("--new-actionable", type=int, default=None,
+                    help="advisory only; ignored if it disagrees with the "
+                         "ledger-computed count")
+    sp.add_argument("--patched", dest="patched", action="store_true",
+                    help="advisory only; ignored if it disagrees with the "
+                         "SHA-computed value")
+    sp.add_argument("--no-patched", dest="patched", action="store_false",
+                    help="advisory only (see --patched)")
     sp.set_defaults(patched=None)
     sp = sub.add_parser("defer")
     sp.add_argument("--finding", required=True); sp.add_argument("--reason", required=True)
@@ -1515,7 +1621,12 @@ def main():
     sp.add_argument("--key", required=True); sp.add_argument("--issue", required=True)
     sp = sub.add_parser("policy")
     sp.add_argument("--finding", required=True); sp.add_argument("--decision", required=True)
-    sp = sub.add_parser("finish"); sp.add_argument("--reason", required=True)
+    sp = sub.add_parser("finish")
+    # Validate against the documented enum (F71) so a typo'd reason can't be
+    # silently accepted; choices= also lists them in --help.
+    sp.add_argument("--reason", required=True,
+                    choices=["converged", "cap", "aborted", "gate-ratified"],
+                    help="terminal reason for the run (machine-readable)")
     sp = sub.add_parser("dashboard")
     sp.add_argument("--follow", type=int, default=None)
     sub.add_parser("status")
