@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Fixture for the trajectory view (spec-tanuki-trajectory §3):
+# `tanuki-scheduler history --scenario <id> --trajectory [--run R]` renders
+# each run of the scenario as a seq-ordered path from event files alone.
+#
+# Asserts:
+#   1. runs render newest first with the compact line-per-step shape
+#      (choice + alternatives, error, recovery of #N, outcome incl.
+#      synthesized tag);
+#   2. --run filters to one run;
+#   3. a run predating typed events degrades to the error/result chain with
+#      the "(pre-trajectory run — choices not recorded)" note;
+#   4. the renderer reads no ledger and writes nothing — proven by an
+#      unparseable ledger.json (a read would crash) and checksummed inputs;
+#   5. plain history is unchanged without the flag; --trajectory without
+#      --scenario refuses.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+sched="$here/tanuki-scheduler"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+S=("$sched" --target t)
+
+old="$TANUKI_ROOT/t/events/20260701-000000"
+new="$TANUKI_ROOT/t/events/20260716-000000"
+mkdir -p "$old" "$new"
+echo '{"run": "20260701-000000", "completed_at": "2026-07-01", "results": []}' > "$old/manifest.json"
+echo '{"run": "20260716-000000", "completed_at": "2026-07-16", "results": []}' > "$new/manifest.json"
+cat > "$old/s1.events.jsonl" <<'EOF'
+{"run": "20260701-000000", "scenario": "s1", "seq": 1, "type": "tool_error", "detail": "Bash: old failure", "evidence": "s1.raw.jsonl#1"}
+{"run": "20260701-000000", "scenario": "s1", "seq": 2, "type": "result", "detail": "{\"subtype\": \"success\"}", "evidence": "s1.raw.jsonl#2"}
+EOF
+cat > "$new/s1.events.jsonl" <<'EOF'
+{"run": "20260716-000000", "scenario": "s1", "seq": 3, "type": "user_choice", "detail": "TANUKI-CHOICE point=doctor-entry selected=--help", "evidence": "s1.raw.jsonl#L3", "point": "doctor-entry", "selected": "--help", "alternatives": ["README", "source"]}
+{"run": "20260716-000000", "scenario": "s1", "seq": 5, "type": "tool_error", "detail": "Bash: exit 2 — missing --loop-repo", "evidence": "s1.raw.jsonl#5"}
+{"run": "20260716-000000", "scenario": "s1", "seq": 6, "type": "recovery", "detail": "of #5 — tanuki-loop continued successfully", "evidence": "s1.raw.jsonl#L6", "of_seq": 5}
+{"run": "20260716-000000", "scenario": "s1", "seq": 9, "type": "outcome", "detail": "synthesized from result: success", "evidence": "s1.raw.jsonl#9", "disposition": "partial", "synthesized": true}
+EOF
+# An unparseable ledger: any ledger read crashes the tool (spec: the renderer
+# loads no ledger — verified).
+echo 'NOT JSON' > "$TANUKI_ROOT/t/ledger.json"
+e_sum="$(md5sum "$new/s1.events.jsonl" | cut -d' ' -f1)"
+
+# --- 1: rendering shape, newest first ------------------------------------------
+txt="$("${S[@]}" history --scenario s1 --trajectory)"
+[ "$(echo "$txt" | head -1)" = "20260716-000000  (2026-07-16, 4 events)" ] \
+  || fail "newest run must render first with date + event count"
+echo "$txt" | grep -q "#3 user_choice doctor-entry: selected=--help        (alt: README|source)" \
+  || fail "choice line shape"
+echo "$txt" | grep -q "#5 error    Bash: exit 2 — missing --loop-repo" || fail "error line shape"
+echo "$txt" | grep -q "#6 recovery of #5 — tanuki-loop continued successfully" \
+  || fail "recovery line shape"
+echo "$txt" | grep -q "#9 outcome  partial — synthesized from result: success (synthesized)" \
+  || fail "outcome line shape incl. synthesized tag"
+echo "$txt" | grep -q "20260701-000000" || fail "older run must also render"
+pass "path renders newest first, one compact line per step"
+
+# --- 2: --run filters ------------------------------------------------------------
+one="$("${S[@]}" history --scenario s1 --trajectory --run 20260701-000000)"
+echo "$one" | grep -q "20260716-000000" && fail "--run must filter to one run" || true
+echo "$one" | grep -q "20260701-000000" || fail "--run must keep the named run"
+pass "--run filters to a single run"
+
+# --- 3: pre-trajectory degradation ------------------------------------------------
+echo "$one" | grep -q "#1 error    Bash: old failure" || fail "degraded error chain"
+echo "$one" | grep -q "(pre-trajectory run — choices not recorded)" \
+  || fail "pre-trajectory note"
+echo "$txt" | grep -c "(pre-trajectory run — choices not recorded)" | grep -qx 1 \
+  || fail "typed run must not carry the pre-trajectory note"
+pass "pre-trajectory run degrades to the error/result chain with the note"
+
+# --- 4: no ledger read, no writes -------------------------------------------------
+# (the unparseable ledger above already proves no read: the renders succeeded)
+[ "$(md5sum "$new/s1.events.jsonl" | cut -d' ' -f1)" = "$e_sum" ] \
+  || fail "renderer must not modify event files"
+[ "$(cat "$TANUKI_ROOT/t/ledger.json")" = "NOT JSON" ] || fail "ledger touched"
+pass "verified: no ledger read (unparseable ledger), no writes"
+
+# --- 5: additive only --------------------------------------------------------------
+plain="$("${S[@]}" history --scenario s1 2>/dev/null)" || true
+echo "$plain" | grep -q "user_choice" && fail "plain history must not render the path" || true
+rc=0; "${S[@]}" history --trajectory >/dev/null 2>&1 || rc=$?
+[ "$rc" = "2" ] || fail "--trajectory without --scenario must refuse (exit 2)"
+pass "plain history unchanged; --trajectory requires --scenario"
+
+echo "all checks passed"
