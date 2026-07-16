@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# Fixture for tanuki-drive's typed trajectory events (spec-tanuki-trajectory §1):
+# the normalize pass lifts TANUKI-CHOICE / TANUKI-OUTCOME markers verbatim into
+# typed events, binds recoveries to errors, and guarantees an outcome per
+# completed run.
+#
+# Asserts:
+#   1. well-formed markers lift one-to-one: user_choice carries
+#      point/selected/alternatives, outcome carries disposition + free text,
+#      and both point at the actual raw line (raw.jsonl#L<n>);
+#   2. malformed markers are dropped and counted, never lifted, never fatal;
+#   3. a tool_error followed by a same-command success (or a marker naming the
+#      command) yields a recovery with of_seq; an unmatched error yields none;
+#   4. a run with no outcome marker gets a synthesized disposition=partial
+#      outcome from the result event, flagged synthesized;
+#   5. a markerless stream produces exactly the legacy events plus only the
+#      synthesized outcome — nothing else changes shape.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+drive="$here/tanuki-drive"
+
+python3 - "$drive" <<'PY' || fail "typed trajectory event lift"
+import importlib.machinery, importlib.util, json, os, sys, tempfile
+loader = importlib.machinery.SourceFileLoader("td", sys.argv[1])
+spec = importlib.util.spec_from_loader("td", loader)
+td = importlib.util.module_from_spec(spec); loader.exec_module(td)
+
+
+def raw(lines):
+    f = tempfile.NamedTemporaryFile("w", suffix=".raw.jsonl", delete=False)
+    for obj in lines:
+        f.write(json.dumps(obj) + "\n")
+    f.close()
+    return f.name
+
+
+def assistant(*blocks):
+    return {"type": "assistant", "message": {"content": list(blocks)}}
+
+
+def text(t):
+    return {"type": "text", "text": t}
+
+
+def tool_use(tid, name, **inp):
+    return {"type": "tool_use", "id": tid, "name": name, "input": inp}
+
+
+def tool_result(tid, content, is_error=False):
+    return {"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": tid,
+         "is_error": is_error, "content": content}]}}
+
+
+RESULT = {"type": "result", "subtype": "success", "num_turns": 4,
+          "duration_ms": 10, "total_cost_usd": 0.01, "is_error": False,
+          "result": "done"}
+
+# --- unit: field parsing and the recovery key -------------------------------
+fields, tail = td.parse_marker_fields("disposition=success ready understood")
+assert fields == {"disposition": "success"} and tail == "ready understood"
+assert td.recovery_key("Bash", {"command": "tools/tanuki-loop --target t doctor"}) \
+    == "tanuki-loop"
+assert td.recovery_key("Read", None) == "Read"
+
+# --- 1+2: marker lift, one-to-one, raw-line evidence, malformed counted -----
+p = raw([
+    assistant(text("TANUKI-CHOICE point=doctor-entry selected=--help "
+                   "alternatives=README|source")),          # L1 well-formed
+    assistant(text("TANUKI-CHOICE point=orphan-no-selected")),  # L2 malformed
+    assistant(text("TANUKI-OUTCOME disposition=nonsense x")),   # L3 malformed
+    assistant(text("TANUKI-OUTCOME disposition=success ready report "
+                   "understood")),                           # L4 well-formed
+    RESULT,
+])
+events, dropped = td.normalize(p, "r1", "s1")
+os.unlink(p)
+choices = [e for e in events if e["type"] == "user_choice"]
+outcomes = [e for e in events if e["type"] == "outcome"]
+assert len(choices) == 1 and len(outcomes) == 1, (choices, outcomes)
+c = choices[0]
+assert c["point"] == "doctor-entry" and c["selected"] == "--help"
+assert c["alternatives"] == ["README", "source"]
+assert c["evidence"] == "s1.raw.jsonl#L1", c["evidence"]
+assert c["detail"].startswith("TANUKI-CHOICE "), "lift must be verbatim"
+o = outcomes[0]
+assert o["disposition"] == "success"
+assert o["detail"] == "ready report understood"
+assert o["evidence"] == "s1.raw.jsonl#L4", o["evidence"]
+assert "synthesized" not in o, "marker-lifted outcome is not synthesized"
+assert dropped == 2, dropped
+print("ok: marker lift one-to-one, raw-line evidence, malformed counted")
+
+# --- 3: recovery binding ------------------------------------------------------
+p = raw([
+    assistant(tool_use("t1", "Bash", command="tools/tanuki-loop doctor")),
+    tool_result("t1", "exit 2 — missing --loop-repo", is_error=True),   # error A
+    assistant(tool_use("t2", "Bash", command="git status")),
+    tool_result("t2", "boom", is_error=True),                           # error B
+    assistant(tool_use("t3", "Bash",
+                       command="tools/tanuki-loop doctor --loop-repo x")),
+    tool_result("t3", "ready"),                       # success, same command as A
+    RESULT,
+])
+events, dropped = td.normalize(p, "r1", "s2")
+os.unlink(p)
+errs = [e for e in events if e["type"] == "tool_error"]
+recs = [e for e in events if e["type"] == "recovery"]
+assert len(errs) == 2 and len(recs) == 1, (errs, recs)
+assert recs[0]["of_seq"] == errs[0]["seq"], "recovery must bind error A"
+assert "tanuki-loop" in recs[0]["detail"]
+assert dropped == 0
+print("ok: same-command success binds recovery; unmatched error gets none")
+
+# --- 4: synthesized outcome ---------------------------------------------------
+p = raw([assistant(text("no markers here")), RESULT])
+events, dropped = td.normalize(p, "r1", "s3")
+os.unlink(p)
+outcomes = [e for e in events if e["type"] == "outcome"]
+assert len(outcomes) == 1, outcomes
+assert outcomes[0]["disposition"] == "partial"
+assert outcomes[0]["synthesized"] is True
+print("ok: markerless completed run gets synthesized partial outcome")
+
+# --- 5: markerless stream = legacy events + only the synthesized outcome ------
+p = raw([
+    assistant(text("FRICTION LOG: none")),
+    assistant(tool_use("t1", "Bash", command="ls")),
+    tool_result("t1", "permission denied", is_error=True),
+    RESULT,
+])
+events, dropped = td.normalize(p, "r1", "s4")
+os.unlink(p)
+types = [e["type"] for e in events]
+assert types == ["note", "permission_block", "result", "note", "outcome"], types
+legacy = [e for e in events if e["type"] != "outcome"]
+for e in legacy:
+    assert e["evidence"] == f"s4.raw.jsonl#{e['seq']}", \
+        "legacy events keep the event-seq evidence pointer"
+    assert not set(e) - {"run", "scenario", "seq", "type", "detail",
+                         "evidence"}, "legacy event shape must not change"
+assert dropped == 0
+print("ok: markerless stream changes nothing but the synthesized outcome")
+PY
+pass "typed trajectory events: lift, recovery, outcome guarantee, legacy shape"
+
+echo "all checks passed"
