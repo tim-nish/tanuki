@@ -38,12 +38,18 @@ Subcommands (JSON out):
                                    actionable finding re-promotes); persists
                                    the per-scenario yield snapshot and every
                                    state transition {run, from, to, reason}
-  history [--scenario ID] [--scenarios F] [--json]
+  history [--scenario ID] [--scenarios F] [--trajectory [--run R]] [--json]
                                    cross-run monitoring from persisted
                                    artifacts: per-scenario executions (dates,
                                    pins, yield, approx for pre-revision runs),
                                    cumulative findings/recurrence, transition
                                    log; repo-wide coverage + selection history.
+                                   --scenario ID --trajectory: the step-by-
+                                   step path view (choices, errors,
+                                   recoveries, outcome) per run, newest
+                                   first, from event files alone — reads no
+                                   ledger, writes nothing; pre-trajectory
+                                   runs degrade to the error/result chain.
                                    With --scenarios (a matrix declaring axes/
                                    covers): per-axis exploration coverage
                                    (explored / authored / uncovered), the
@@ -401,12 +407,101 @@ def render_coverage_diff(cd, no_axes=False):
               "before trajectory capture — observations incomplete)")
 
 
+TRAJECTORY_TYPES = ("user_choice", "recovery", "outcome")
+
+
+def trajectory_view(target, sid, run_filter, as_json):
+    """`history --scenario <id> --trajectory` (spec-tanuki-trajectory §3):
+    render each run of the scenario, newest first, as a seq-ordered path —
+    one compact line per step. Reads only the per-run event files (plus the
+    manifest for the date header); prints and exits. It writes nothing,
+    judges nothing, scores nothing, and loads no ledger."""
+    events_dir = os.path.join(TANUKI_ROOT, target, "events")
+    runs = []
+    if os.path.isdir(events_dir):
+        for run in sorted(os.listdir(events_dir), reverse=True):  # newest first
+            if run_filter and run != run_filter:
+                continue
+            path = os.path.join(events_dir, run, f"{sid}.events.jsonl")
+            if not os.path.exists(path):
+                continue
+            events = []
+            with open(path, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    try:
+                        events.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+            manifest = read_json(os.path.join(events_dir, run,
+                                              "manifest.json"), {})
+            typed = any(e.get("type") in TRAJECTORY_TYPES and
+                        (e.get("type") != "user_choice" or e.get("point"))
+                        for e in events)
+            runs.append({"run": run,
+                         "at": manifest.get("completed_at")
+                         or (run.split("-")[0][:8] or "?"),
+                         "events": len(events), "typed": typed,
+                         "steps": events})
+    if as_json:
+        json_runs = []
+        for r in runs:
+            keep = (TRAJECTORY_TYPES if r["typed"]
+                    else ("tool_error", "permission_block", "result"))
+            json_runs.append({"run": r["run"], "at": r["at"],
+                              "events": r["events"], "typed": r["typed"],
+                              "steps": [e for e in r["steps"]
+                                        if e.get("type") in keep]})
+        out({"scenario": sid, "runs": json_runs})
+        return
+    if not runs:
+        print(f"no runs recorded for scenario {sid}"
+              + (f" (run {run_filter})" if run_filter else ""))
+        return
+    for r in runs:
+        print(f"{r['run']}  ({r['at']}, {r['events']} events)")
+        if not r["typed"]:
+            # Runs that predate typed events degrade to the error/result
+            # chain — choices were never recorded, nothing is backfilled.
+            for e in r["steps"]:
+                if e.get("type") in ("tool_error", "permission_block"):
+                    print(f"  #{e.get('seq')} error    {e.get('detail', '')[:110]}")
+                elif e.get("type") == "result":
+                    print(f"  #{e.get('seq')} result   {e.get('detail', '')[:110]}")
+            print("  (pre-trajectory run — choices not recorded)")
+            continue
+        for e in r["steps"]:
+            t, seq = e.get("type"), e.get("seq")
+            if t == "user_choice" and e.get("point"):
+                alt = ("        (alt: " + "|".join(e["alternatives"]) + ")"
+                       if e.get("alternatives") else "")
+                print(f"  #{seq} user_choice {e['point']}: "
+                      f"selected={e.get('selected')}{alt}")
+            elif t in ("tool_error", "permission_block"):
+                print(f"  #{seq} error    {e.get('detail', '')[:110]}")
+            elif t == "recovery":
+                print(f"  #{seq} recovery {e.get('detail', '')[:110]}")
+            elif t == "outcome":
+                syn = " (synthesized)" if e.get("synthesized") else ""
+                print(f"  #{seq} outcome  {e.get('disposition')} — "
+                      f"{e.get('detail', '')[:110]}{syn}")
+
+
 def cmd_history(args):
     """Cross-run scenario monitoring from persisted artifacts only
     (History & coverage revision). Default: repo-wide coverage. --scenario:
-    the single-scenario deep view. Runs recorded before the yield-snapshot
-    revision are reconstructed from manifests + (capped) ledger evidence and
-    labeled approx. --json for the machine-readable form."""
+    the single-scenario deep view; with --trajectory, the step-by-step path
+    view (spec-tanuki-trajectory §3) rendered from event files alone. Runs
+    recorded before the yield-snapshot revision are reconstructed from
+    manifests + (capped) ledger evidence and labeled approx. --json for the
+    machine-readable form."""
+    if args.trajectory:
+        # Strictly additive mode: renders from per-run event files only and
+        # returns before any scheduler/ledger/manifest aggregation below —
+        # the verified no-ledger-read guarantee.
+        if not args.scenario:
+            die("--trajectory requires --scenario <id>")
+        trajectory_view(args.target, args.scenario, args.run, args.json)
+        return
     sched = read_json(sched_path(args.target),
                       {"scenarios": {}, "runs_recorded": [], "history": {},
                        "plans": []})
@@ -678,6 +773,11 @@ def main():
     sp.add_argument("--scenario", default=None)
     sp.add_argument("--scenarios", default=None,
                     help="scenarios file; enables axis coverage + debt")
+    sp.add_argument("--trajectory", action="store_true",
+                    help="with --scenario: render each run's step-by-step "
+                         "path from its event files (newest first)")
+    sp.add_argument("--run", default=None,
+                    help="with --trajectory: filter to one run")
     sp.add_argument("--plans", type=int, default=10)
     sp.add_argument("--json", action="store_true")
     sub.add_parser("status")
