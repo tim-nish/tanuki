@@ -25,6 +25,7 @@ Usage:
   tanuki-ledger --target <slug> compact [--unseen-runs N]
   tanuki-ledger --target <slug> scenario-yield [--runs N]
   tanuki-ledger --target <slug> status   # human-readable "where was I?" view
+  tanuki-ledger --target <slug> next     # just the derived next step
   tanuki-ledger --target <slug> stats
   tanuki-ledger --target <slug> policy-surface   # specs/spec-policy-advisory
 
@@ -481,19 +482,103 @@ def cmd_scenario_yield(args, ledger):
                      indent=2))
 
 
+# The closed enumeration of ledger states (story 4.3 — F24/F36/F76). The
+# next-step hint was fixed twice and regressed twice as patched string logic;
+# it is now derived: classify_ledger() maps a ledger to exactly one of these
+# states, render_next() maps each state to exactly one next command, and
+# tools/tests/test-ledger-next pins one fixture per state. A state outside
+# the enumeration fails loudly instead of falling through to a wrong hint.
+LEDGER_STATES = (
+    "fresh",               # no events, no findings — nothing ingested yet
+    "events-no-findings",  # runs ingested, nothing extracted yet
+    "proposed-awaiting",   # proposals await the human gate
+    "accepted-awaiting",   # accepted findings await fix verification
+    "watching-only",       # only open (below-bar) findings remain
+    "all-decided",         # findings exist; every one decided/tombstoned
+)
+
+
+def known_runs(target, ledger):
+    """All run ids for a target: events/<run>/ dirs unioned with the run ids
+    carried by the ledger's own event records — a plain `ingest` records
+    events without creating a run directory (F21), so neither source alone
+    is complete."""
+    events_dir = os.path.join(TANUKI_ROOT, target, "events")
+    dir_runs = set(os.listdir(events_dir)) if os.path.isdir(events_dir) else set()
+    ingested_runs = {r for e in ledger["events"].values()
+                     for r in e.get("runs", []) if r}
+    return sorted(dir_runs | ingested_runs, key=run_key)
+
+
+def classify_ledger(ledger, runs):
+    """Map a ledger to exactly one LEDGER_STATES member. Decision-bearing
+    states win over passive ones: proposed > accepted-awaiting > watching."""
+    by = {s: [f for f in ledger["findings"] if f["status"] == s]
+          for s in STATUSES}
+    # Tombstoned accepted findings are verified-fixed — not awaiting (F76).
+    awaiting = [f for f in by["accepted"] if not f.get("tombstone")]
+    if by["proposed"]:
+        return "proposed-awaiting"
+    if awaiting:
+        return "accepted-awaiting"
+    if by["open"]:
+        return "watching-only"
+    if ledger["findings"]:
+        return "all-decided"
+    if runs:
+        return "events-no-findings"
+    return "fresh"
+
+
+def render_next(state, target, ledger):
+    """The single next command for an enumerated state — a /tanuki form where
+    one exists, the tool form otherwise. Raises on a state outside the
+    enumeration rather than guessing (the F24/F36/F76 regression mode was a
+    fall-through to advice for a state you were not in)."""
+    by = {s: [f for f in ledger["findings"] if f["status"] == s]
+          for s in STATUSES}
+    awaiting = [f for f in by["accepted"] if not f.get("tombstone")]
+    hints = {
+        "fresh": "ingest a run's events to start surfacing findings",
+        "events-no-findings": (
+            "events are ingested but no findings yet — extract one with "
+            "upsert-finding --title … --evidence <run>/<scenario>#<seq>"),
+        "proposed-awaiting": (
+            f"decide the {len(by['proposed'])} proposed item(s): "
+            f"/tanuki {target} --brief"),
+        "accepted-awaiting": (
+            f"re-run the pipeline (/tanuki {target}) to verify the "
+            f"{len(awaiting)} accepted item(s) stop recurring"),
+        "watching-only": (
+            "promote chronic/high-confidence open findings with "
+            "'promote --min-recurrence N', then decide them: "
+            f"/tanuki {target} --brief"),
+        "all-decided": (
+            "all findings are decided (accepted/dismissed/compacted) — "
+            f"re-run the pipeline (/tanuki {target}) to surface any new ones"),
+    }
+    if state not in hints:
+        raise ValueError(f"unenumerated ledger state: {state!r} "
+                         f"(known: {LEDGER_STATES})")
+    return hints[state]
+
+
+def next_step(target, ledger):
+    """Derivation used by both `status` (trailing line) and `next` — one
+    derivation, two surfaces."""
+    return render_next(classify_ledger(ledger, known_runs(target, ledger)),
+                       target, ledger)
+
+
+def cmd_next(args, ledger):
+    print(next_step(args.target, ledger))
+
+
 def cmd_status(args, ledger):
     """Human-readable state of a target: what awaits a decision, what's being
     watched, what happened last. The answer to 'where was I?'."""
     tdir = os.path.join(TANUKI_ROOT, args.target)
-    events_dir = os.path.join(tdir, "events")
-    dir_runs = set(os.listdir(events_dir)) if os.path.isdir(events_dir) else set()
-    # A plain `ingest` records events into the ledger without creating an
-    # events/<run>/ directory, so directory-listing alone reports runs:0 even
-    # after a successful ingest (F21). Union in the run ids carried by the
-    # ledger's own event records so the count reflects what was ingested.
-    ingested_runs = {r for e in ledger["events"].values()
-                     for r in e.get("runs", []) if r}
-    runs = sorted(dir_runs | ingested_runs, key=run_key)
+    runs = known_runs(args.target, ledger)
     briefs_dir = os.path.join(tdir, "briefs")
     briefs = sorted(os.listdir(briefs_dir)) if os.path.isdir(briefs_dir) else []
 
@@ -528,32 +613,9 @@ def cmd_status(args, ledger):
         for f in watching[:5]:
             print(f"    {priority(f)} {f['id']} [{f['kind']}] "
                   f"rec:{f['recurrence']} — {f['title'][:90]}")
-    # Adapt the hint to the ledger's actual state (F24) — a static line that
-    # says "decide proposed items" when none are proposed is noise.
-    if by["proposed"]:
-        nxt = (f"decide the {len(by['proposed'])} proposed item(s) with "
-               "set-status (accept/dismiss)")
-    elif awaiting:
-        nxt = (f"re-run the pipeline to verify the {len(awaiting)} accepted "
-               "item(s) stop recurring")
-    elif watching:
-        nxt = ("promote chronic/high-confidence open findings with "
-               "'promote --min-recurrence N', then decide them")
-    elif runs and not ledger["findings"]:
-        # Events are ingested but no finding exists yet — the hint must advance
-        # to extraction, not repeat "ingest" (F24/F36).
-        nxt = ("events are ingested but no findings yet — extract one with "
-               "upsert-finding --title … --evidence <run>/<scenario>#<seq>")
-    elif ledger["findings"]:
-        # Findings exist but none are proposed/awaiting/open — they are all
-        # decided (accepted/dismissed) or compacted. Don't fall through to the
-        # fresh-ledger "extract a finding" advice for a state you're not in
-        # (F76 — regression from the F24 next-hint fix).
-        nxt = ("all findings are decided (accepted/dismissed/compacted) — "
-               "re-run the pipeline to surface any new ones")
-    else:
-        nxt = "ingest a run's events to start surfacing findings"
-    print(f"\n  next: {nxt}")
+    # Derived, never patched string logic (F24/F36/F76): the same closed-
+    # enumeration derivation the `next` subcommand exposes alone.
+    print(f"\n  next: {next_step(args.target, ledger)}")
 
 
 # specs/spec-policy-advisory: the read allowlist is capped and code-enforced.
@@ -756,6 +818,15 @@ def main():
     sub.add_parser("stats")
     sub.add_parser("status")
     sub.add_parser(
+        "next",
+        help="print only the derived next step (the same line `status` ends "
+             "with — one derivation, two surfaces)",
+        description=(
+            "Derive the single next command from the ledger's state — a "
+            "closed enumeration (fresh / events-no-findings / "
+            "proposed-awaiting / accepted-awaiting / watching-only / "
+            "all-decided); a state outside it errors rather than guessing."))
+    sub.add_parser(
         "policy-surface",
         help="read-only: print the operator's pinned policy source (the "
              "allowlisted files under policy_source in the scenarios config) "
@@ -781,7 +852,7 @@ def main():
      "promote": cmd_promote, "set-status": cmd_set_status,
      "compact": cmd_compact, "scenario-yield": cmd_scenario_yield,
      "stats": cmd_stats, "policy-surface": cmd_policy_surface,
-     "status": cmd_status}[args.cmd](args, ledger)
+     "status": cmd_status, "next": cmd_next}[args.cmd](args, ledger)
     return 0
 
 

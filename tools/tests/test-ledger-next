@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# Fixture for the derived next-step hint (story 4.3, F24/F36/F76):
+#   - one assertion per enumerated ledger state (fresh / events-no-findings /
+#     proposed-awaiting / accepted-awaiting / watching-only / all-decided);
+#   - `next` prints exactly the line `status` ends with (one derivation,
+#     two surfaces);
+#   - a state outside the enumeration raises instead of falling through
+#     (the F76 regression mode).
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
+export TANUKI_ROOT="$root"
+L=("$here/tanuki-ledger" --target t)
+
+expect_state() { # <label> <grep pattern>
+  local nxt status_nxt
+  nxt="$("${L[@]}" next)"
+  status_nxt="$("${L[@]}" status | sed -n 's/^  next: //p')"
+  [ "$nxt" = "$status_nxt" ] \
+    || fail "$1: next [$nxt] != status trailing line [$status_nxt]"
+  echo "$nxt" | grep -q "$2" || fail "$1: hint [$nxt] misses [$2]"
+  pass "$1: $nxt"
+}
+
+# --- fresh: nothing ingested ---------------------------------------------------
+"${L[@]}" init >/dev/null
+expect_state "fresh" "ingest a run's events"
+
+# --- events-no-findings: a run ingested, nothing extracted ---------------------
+printf '{"run":"r001","scenario":"s","seq":1,"type":"note","detail":"x"}\n' \
+  > "$root/e.jsonl"
+"${L[@]}" ingest "$root/e.jsonl" >/dev/null
+expect_state "events-no-findings" "no findings yet — extract"
+
+# --- watching-only: an open finding below any decision -------------------------
+"${L[@]}" upsert-finding --title "Open papercut" --kind papercut \
+  --evidence "r001/s#1" >/dev/null
+expect_state "watching-only" "promote chronic/high-confidence open findings"
+
+# --- proposed-awaiting: promoted past the bar ----------------------------------
+"${L[@]}" upsert-finding --match F1 --evidence "r002/s#1" >/dev/null
+"${L[@]}" upsert-finding --match F1 --evidence "r003/s#1" >/dev/null
+"${L[@]}" promote --min-recurrence 3 --min-scenarios 99 >/dev/null 2>&1
+expect_state "proposed-awaiting" "decide the 1 proposed item(s): /tanuki t --brief"
+
+# --- accepted-awaiting: gate said yes, fix unverified --------------------------
+"${L[@]}" set-status --id F1 --status accepted >/dev/null
+expect_state "accepted-awaiting" "verify the 1 accepted item(s) stop recurring"
+
+# --- all-decided: every finding decided (dismissed here) -----------------------
+"${L[@]}" set-status --id F1 --status dismissed >/dev/null
+expect_state "all-decided" "all findings are decided"
+
+# --- precedence: proposed outranks accepted-awaiting and watching --------------
+"${L[@]}" upsert-finding --title "Another open" --kind friction \
+  --evidence "r001/s#1" >/dev/null
+"${L[@]}" upsert-finding --title "Proposed one" --kind gap \
+  --evidence "r001/s#1" >/dev/null
+"${L[@]}" set-status --id F3 --status proposed >/dev/null
+expect_state "precedence (proposed wins)" "decide the 1 proposed item(s)"
+
+# --- unenumerated state fails loudly, never falls through ----------------------
+python3 - "$here/tanuki-ledger" <<'EOF'
+import sys
+from importlib.machinery import SourceFileLoader
+m = SourceFileLoader("tl", sys.argv[1]).load_module()
+assert m.classify_ledger({"events": {}, "findings": []}, []) in m.LEDGER_STATES
+try:
+    m.render_next("bogus-state", "t", {"events": {}, "findings": []})
+except ValueError as e:
+    assert "unenumerated ledger state" in str(e)
+else:
+    sys.exit("render_next accepted an unenumerated state")
+EOF
+pass "unenumerated state raises ValueError (no fall-through hint)"
+
+echo "ALL OK"
