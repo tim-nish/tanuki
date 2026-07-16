@@ -390,8 +390,25 @@ def cmd_promote(args, ledger):
     # the values came from flags or config.
     bar = f"recurrence >= {min_rec} OR scenarios >= {min_scen}"
     if not out:
-        print(f"note: no open finding met the promotion bar ({bar}); pass "
-              f"--min-recurrence/--min-scenarios to widen it", file=sys.stderr)
+        # "Widen it" alone does not explain WHY nothing qualified. The bar is
+        # deliberately a chronic-only filter, so a freshly-extracted finding
+        # (recurrence 1, one scenario) is unpromotable BY DESIGN — following
+        # the documented ingest -> upsert -> promote lifecycle literally always
+        # hits this wall, and it reads as a broken tool rather than a working
+        # filter (F92). Say what the bar is for, and name the nearest miss.
+        opens = [f for f in ledger["findings"] if f["status"] == "open"]
+        near = max(opens, key=lambda f: (f["recurrence"], len(f["scenarios"])),
+                   default=None)
+        why = ("there are no open findings at all" if not opens else
+               "the bar promotes CHRONIC findings only — a finding seen once "
+               "(recurrence 1, one scenario) is not promotable by design; it "
+               "qualifies once it recurs or turns up in a second scenario. "
+               "Closest open finding: %s at recurrence %d / %d scenario(s)"
+               % (near["id"], near["recurrence"], len(near["scenarios"])))
+        print(f"note: no open finding met the promotion bar ({bar}) — {why}. "
+              f"To promote anyway (e.g. walking the lifecycle end-to-end on a "
+              f"single finding), widen with --min-recurrence 1 --min-scenarios 1",
+              file=sys.stderr)
     elif args.dry_run:
         print(f"dry-run ({bar}): {len(out)} finding(s) would move to proposed "
               f"({', '.join(f['id'] for f in out)}); ledger unchanged",
@@ -855,23 +872,40 @@ def render_next(state, target, ledger):
         "events-no-findings": (
             "events are ingested but no findings yet — extract one with "
             "upsert-finding --title … --evidence <run>/<scenario>#<seq>"),
+        # `/tanuki …` is the PLUGIN's slash command, driven from Claude Code —
+        # not something this CLI implements, and not runnable from the shell
+        # you are reading this in (F84). Name the CLI equivalent first, then
+        # the slash command, and say which is which.
         "proposed-awaiting": (
             f"decide the {len(by['proposed'])} proposed item(s): "
-            f"/tanuki {target} --brief"),
+            f"`findings --status proposed` to read them, then `set-status "
+            f"--id <F> --status accepted|dismissed` for each "
+            f"(or the /tanuki {target} decide slash command in Claude Code "
+            f"for the guided pass)"),
+        # tanuki-drive is a SIBLING tool next to this one, not a subcommand —
+        # naming it bare just moved the dead end (F90): the operator went
+        # looking for it in `tanuki-ledger --help` and did not find it. Say
+        # where it lives.
         "accepted-awaiting": (
-            f"re-run the pipeline (/tanuki {target}) to verify the "
-            f"{len(awaiting)} accepted item(s) stop recurring"),
+            f"re-run the pipeline to verify the {len(awaiting)} accepted "
+            f"item(s) stop recurring: `tanuki-drive` (a sibling tool beside "
+            f"this one in the plugin's tools/ dir, not a subcommand of it) "
+            f"then `ingest` its events here "
+            f"(or the /tanuki {target} slash command in Claude Code, which "
+            f"drives both)"),
         "watching-only": (
             "promote chronic/high-confidence open findings with "
             "'promote --min-recurrence N', then decide them: "
-            f"/tanuki {target} --brief"),
+            f"/tanuki {target} decide"),
         "all-decided": (
             # "compacted" is NOT a status — a tombstoned finding is still
             # accepted or dismissed (issue #62 / F25; the F99 regression was
             # naming it here as a peer, which `findings --status compacted`
             # then rejects).
             "all findings are decided (accepted/dismissed, some tombstoned) — "
-            f"re-run the pipeline (/tanuki {target}) to surface any new ones"),
+            f"re-run the pipeline (`tanuki-drive`, the sibling tool beside "
+            f"this one, then `ingest` here; or the /tanuki {target} slash "
+            f"command in Claude Code) to surface any new ones"),
     }
     if state not in hints:
         raise ValueError(f"unenumerated ledger state: {state!r} "
