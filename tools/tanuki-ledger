@@ -148,8 +148,20 @@ def load(target):
         return json.load(f)
 
 
+def announce_new_target(target):
+    """A bare --target slug resolves to ~/.tanuki/<slug>/ and write commands
+    create it implicitly, so a typo'd slug silently forks a fresh ledger
+    (issue #50 / F18). Announce the creation once, at the moment a write is
+    about to bring the namespace into existence — never a prompt (unattended
+    callers must keep working)."""
+    tdir = os.path.join(TANUKI_ROOT, target)
+    if not os.path.isdir(tdir):
+        print(f"note: creating new target namespace {tdir}/", file=sys.stderr)
+
+
 def save(target, ledger):
     path = ledger_path(target)
+    announce_new_target(target)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -214,6 +226,7 @@ def cmd_ingest_note(args, ledger):
         sys.exit(2)
     run = "manual-" + date.today().strftime("%Y%m%d")
     run_dir = os.path.join(TANUKI_ROOT, args.target, "events", run)
+    announce_new_target(args.target)
     os.makedirs(run_dir, exist_ok=True)
     events_file = os.path.join(run_dir, "ingest.events.jsonl")
     # Sequence within the day so repeated same-day ingests don't collide.
