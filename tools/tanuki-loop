@@ -671,10 +671,15 @@ def cmd_doctor(args):
         "check": "loop-config", "ok": not missing,
         "configured": {k: v for k, v in required.items() if v is not None},
         "missing": missing,
+        # Name each missing key WITH its flag inline ("iterations (--cap)"):
+        # the two names for one knob were only reconcilable by cross-checking
+        # the separate set_via_flag map (F86).
         "detail": ("every headless ceiling is configured" if not missing else
                    "an unattended run would have no ceiling for: "
-                   + ", ".join(missing) + " — set them in the scenarios "
-                   "file's \"loop\" block (shown below) or pass the init flags. "
+                   + ", ".join("%s (%s)" % (k, flag_for[k]) for k in missing)
+                   + " — set them in the scenarios "
+                   "file's \"loop\" block (shown below, using the config key "
+                   "names) or pass the init flags shown in parentheses. "
                    "Consequence: init refuses to start without them; a forced "
                    "run would be unbounded (no cap/wall-time/token ceiling) with "
                    "no regression gate (F74)"),
@@ -683,6 +688,20 @@ def cmd_doctor(args):
         loop_check["set_via_flag"] = {k: flag_for[k] for k in missing}
         loop_check["scenarios_loop_shape"] = {
             "loop": {k: "<value>" for k in required}}
+        if "test_cmd" in missing:
+            # Nothing said what a good test_cmd validates, so a first-timer
+            # could not tell whether a trivial "true" was acceptable or a
+            # misconfiguration (F88).
+            loop_check["test_cmd_guidance"] = (
+                "test_cmd is the headless run's ONLY regression gate: it runs "
+                "in the loop worktree after every iteration's commits, and a "
+                "non-zero exit stops the run. Use the repo's real test/check "
+                "suite (e.g. `make test`, `pytest -q`, `npm test`), minus any "
+                "check that already fails on the base branch — a baseline "
+                "failure is inherited state, not a regression, and would trip "
+                "the breaker on iteration 1. A placeholder like `true` is "
+                "accepted but leaves the run with NO regression gate; doctor "
+                "cannot tell the difference, so it is your call.")
         # Name the canonical path so the operator knows WHERE the "loop" block
         # goes and that it is not auto-loaded (F38).
         loop_check["scenarios_file"] = {
