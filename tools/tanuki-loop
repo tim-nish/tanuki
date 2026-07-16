@@ -65,6 +65,15 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
                                  gate-ratified | aborted) — machine-readable;
                                  also deletes merged integration branches for
                                  the target (unmerged tips kept) — issue #6
+  recover --restore | --adopt    ATTENDED recovery from the external-modification
+                                 breaker (the one breaker `rollback` cannot clear:
+                                 it needs an open iteration, and the breaker fires
+                                 with all iterations closed). --restore resets the
+                                 worktree to the last verified head_expected,
+                                 discarding external commits (audited, recoverable
+                                 via reflog); --adopt re-baselines, accepting the
+                                 current HEAD as head_expected. Never automatic —
+                                 the operator chooses.
   status                         JSON summary for the morning gate
   dashboard [--follow SECS]      operational status, one screen: health verdict,
                                  latest drive with each anomaly classified against
@@ -78,6 +87,24 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
 Sequencing is guarded: each iteration must move started -> (verified |
 rolled_back) before the next iter-start, and record-cycle refuses an open
 iteration — a skipped check is itself a breaker, never a silent pass.
+
+Breakers — what actually trips each one, and where (every breaker prints
+{"breaker": …, "hint": …} + exit 3; the hint names the remedy):
+  iteration cap reached      iter-start, when len(iterations) >= cap. NOTE:
+                             rolled-back iterations count toward the cap — a
+                             rollback does not give the attempt back.
+  wall-time exceeded         iter-start, when now - wall_start > wall_limit_s.
+  external modification      iter-start, when the worktree HEAD is not the
+                             head_expected the last iter-verify recorded (i.e.
+                             something committed outside the loop). Fires on the
+                             NEXT iter-start, not at the moment of the edit; clear
+                             it with `recover --restore|--adopt`, never `rollback`.
+  sequencing violation       iter-start on an unclosed iteration, or record-cycle
+                             with an iteration still open.
+  test failure               test, when the configured test_cmd exits non-zero.
+  worktree not clean         after commit, when test_cmd left untracked artifacts.
+  integration invariant      iter-verify, when the four-part check fails.
+  rollback failed            rollback, when the worktree could not be reset.
 
 The token budget is stored but NOT enforced here — token accounting is the
 runtime's; the loop treats it as an operator-supplied ceiling the harness trips.
