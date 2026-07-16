@@ -187,7 +187,8 @@ Subcommands (deterministic): `init`, `ingest <events.jsonl>` (records events,
 exact-dupe collapse by fingerprint), `findings` (list, with recurrence counts
 and event pointers), `upsert-finding` (create or bump: `--match <id>` bumps
 recurrence and appends evidence; no match creates a new finding with a fresh
-id), `promote --min-recurrence N` (list chronic/high-confidence candidates),
+id), `promote --min-recurrence N` (move chronic/high-confidence candidates
+to `proposed`; `--dry-run` lists without writing),
 `set-status`, `stats`, `status` (the human-readable "where was I?" view:
 runs, latest brief, findings awaiting decision with P1–P3 priorities,
 accepted-awaiting-verification, top watching items), `ingest-note` (verbatim
@@ -286,15 +287,32 @@ the headline). Proposals are issue-shaped, ready to paste into
 one-line under "watching", **sorted and prefixed with their P1–P3 priority**.
 A "delta this run" line-set states what's new vs bumped. Lesson-shaped
 conclusions are listed under "lesson candidates (for the den)" as proposals
-for the user's knowledge hub. Ledger status of promoted findings moves to `proposed`.
+for the user's knowledge hub. Ledger status of promoted findings moves to
+`proposed` — `promote` itself performs the transition; no separate
+`set-status` step is part of promotion.
 
 **The decision pass (the human gate is part of the run, not homework).**
 A run does not end with a report. After presenting the brief in-session, the
 command walks the promoted proposals (top-down, small batches) and asks for a
 disposition per item: **accept** (optionally file the issue right then —
-still explicitly confirmed), **dismiss**, or **defer** (stays `proposed`).
-Dispositions are written back via `set-status`. `tanuki-ledger status` shows
-anything left undecided, so a deferred decision is never lost, only visible.
+still explicitly confirmed), **dismiss**, or **defer** (stays `proposed`) —
+never with a pre-selected default. Watching (below-bar) findings are offered
+at the same gate: the bar gates surfacing, not permission. Dispositions are
+written back via `set-status` — by the command, never typed by the user.
+`tanuki-ledger status` shows anything left undecided, so a deferred decision
+is never lost, only visible.
+
+**The command layer completes every workflow (acceptance rule).** The
+`tools/tanuki-*` executables are the deterministic, fully-optioned machine
+substrate; the JSON they emit is a machine contract, not an operator surface.
+Every view a human workflow needs — the brief, the decision pass, status,
+history — is rendered by the command layer, and every required input is
+resolved by configuration, persisted state, or an interactive question. A
+workflow step that forces an operator to hand-type a `tanuki-ledger`
+invocation or read raw ledger JSON is a defect of the same class as a
+missing feature: file it as a finding, don't work around it. (The one
+exception is `tanuki-loop`'s unattended mode, which has no human to ask and
+keeps its explicit flags + config contract.)
 
 **Issue labels — the downstream boundary.** A filed issue carries exactly one
 label, created in the target repo if absent: the kind `<prefix>:<kind>` where
