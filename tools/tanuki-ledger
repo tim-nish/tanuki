@@ -302,22 +302,23 @@ def cmd_promote(args, ledger):
            (f["recurrence"] >= min_rec or
             len(f["scenarios"]) >= min_scen)]
     out.sort(key=lambda f: (-f["recurrence"], -len(f["scenarios"])))
-    # Name the thresholds that were applied so an empty result is unambiguous
-    # between "nothing qualifies" and "you forgot to pass thresholds" (F68).
+    # Name the applied thresholds on EVERY result (issue #49), not only the
+    # empty one (F68) — each output is self-describing regardless of whether
+    # the values came from flags or config.
+    bar = f"recurrence >= {min_rec} OR scenarios >= {min_scen}"
     if not out:
-        print(f"note: no open finding met the promotion bar "
-              f"(recurrence >= {min_rec} OR scenarios >= {min_scen}); pass "
+        print(f"note: no open finding met the promotion bar ({bar}); pass "
               f"--min-recurrence/--min-scenarios to widen it", file=sys.stderr)
     elif args.dry_run:
-        print(f"dry-run: {len(out)} finding(s) would move to proposed "
+        print(f"dry-run ({bar}): {len(out)} finding(s) would move to proposed "
               f"({', '.join(f['id'] for f in out)}); ledger unchanged",
               file=sys.stderr)
     else:
         for f in out:
             f["status"] = "proposed"
         save(args.target, ledger)
-        print(f"promoted -> proposed: {', '.join(f['id'] for f in out)}",
-              file=sys.stderr)
+        print(f"promoted -> proposed ({bar}): "
+              f"{', '.join(f['id'] for f in out)}", file=sys.stderr)
     print(json.dumps(with_priority(out), indent=2, ensure_ascii=False))
 
 
