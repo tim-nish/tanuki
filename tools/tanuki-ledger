@@ -32,7 +32,12 @@ Usage:
 
 `findings` and `promote` emit each finding with a computed `priority`
 (P1/P2/P3) so the brief's ordering mirrors `status` without the caller
-recomputing it.
+recomputing it. The scale is deterministic, not a judgment (F83):
+  P1  recurrence >= 3 OR seen in >= 2 distinct scenarios   (chronic or broad)
+  P2  recurrence == 2, OR kind == "gap"                    (repeat or a gap)
+  P3  everything else                                      (seen once)
+P1 uses the same bar `promote` defaults to, so a P1 open finding is exactly
+one that a default `promote` would move to `proposed`.
 
 Ledger growth policy (docs/tanuki-spec.md "Ledger growth policy").
 `ledger.json` may grow indefinitely on disk, bounded by three invariants:
@@ -76,8 +81,16 @@ EVIDENCE_CAP = 5
 # dismissed: human said no; kept for dedupe so it never resurfaces as new
 
 
+#: The P1/P2/P3 rule in one line, so every surface that shows a priority can
+#: also show what it means instead of leaving the operator to infer the scale
+#: by watching it change (F83).
+PRIORITY_LEGEND = ("P1 = recurrence >= 3 or seen in >= 2 scenarios (the "
+                   "default promote bar); P2 = recurrence 2, or kind 'gap'; "
+                   "P3 = seen once")
+
+
 def priority(f):
-    """P1/P2/P3 for display. Deterministic, no judgment."""
+    """P1/P2/P3 for display. Deterministic, no judgment; see PRIORITY_LEGEND."""
     if f["recurrence"] >= 3 or len(f["scenarios"]) >= 2:
         return "P1"
     if f["recurrence"] == 2 or f["kind"] == "gap":
