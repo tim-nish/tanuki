@@ -542,11 +542,26 @@ def cmd_init(args):
         audit(state, f"host fixture pinned @ {host_base_sha[:12]} from {host} "
                      f"-> {host_fixture_path}"
                      + (f" ({host_note})" if host_note else ""))
+    # Name the cap (F78) and the artifact paths (F79) on the way in: the
+    # morning gate is told to present audit.md/state.json/queue.md, and the
+    # ~/.tanuki/<target>/loop/<run>/ convention is otherwise undocumented —
+    # operators had to find(1) them. The cap is echoed because rolled-back
+    # iterations consume it, which is only discoverable by tripping the breaker.
+    _ld = loop_dir(args.target, run)
     out({"run": run, "integration_branch": integration, "worktree": worktree,
          "base_sha": base_sha, "base_upstream": upstream,
          "base_behind": n_behind, "branch_cleanup": cleaned,
          "host_fixture_path": host_fixture_path, "host_base_sha": host_base_sha,
-         "host_freshness": host_note})
+         "host_freshness": host_note,
+         "cap": cap,
+         "cap_note": ("%d iteration(s) max; rolled-back iterations count "
+                      "toward the cap" % cap),
+         "artifacts": {
+             "dir": _ld,
+             "state": os.path.join(_ld, "state.json"),
+             "audit": os.path.join(_ld, "audit.md"),
+             "queue": os.path.join(_ld, "queue.md"),
+         }})
 
 
 def _doctor_policy(args):
@@ -1350,8 +1365,17 @@ def cmd_finish(args):
                      f"{cleaned['deleted'] or 'none'}; kept (unmerged): "
                      f"{cleaned['kept'] or 'none'}; skipped: "
                      f"{cleaned['skipped_reasons'] or 'none'}")
+    _ld = loop_dir(state["target"], state["run"])
     payload = {"ok": True, "reason": args.reason, "branch_cleanup": cleaned,
-               "host_drift": host_drift}
+               "host_drift": host_drift,
+               # The morning gate is told to present these three; point at them
+               # instead of making the operator find(1) the run dir (F79).
+               "artifacts": {
+                   "dir": _ld,
+                   "state": os.path.join(_ld, "state.json"),
+                   "audit": os.path.join(_ld, "audit.md"),
+                   "queue": os.path.join(_ld, "queue.md"),
+               }}
     if prev_finished:
         payload["previously_finished"] = prev_finished
         audit(state, f"note: run was already finished as "
