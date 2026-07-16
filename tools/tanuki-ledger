@@ -174,14 +174,20 @@ def cmd_init(args, ledger):
     print(f"ledger ready: {ledger_path(args.target)}")
 
 
+def event_fingerprint(e):
+    """The exact-duplicate identity key: scenario+type+detail ONLY — run and
+    seq are excluded, so the same detail seen in two runs collapses."""
+    return hashlib.sha1(
+        f"{e.get('scenario')}|{e.get('type')}|{e.get('detail')}"
+        .encode()).hexdigest()[:16]
+
+
 def ingest_event(ledger, e):
     """Record one event into the ledger; exact duplicates (same
     scenario+type+detail) collapse to a count. Returns 'new' or 'dup'. Raw
     events are facts — nothing here is a finding yet."""
     today = date.today().isoformat()
-    fp = hashlib.sha1(
-        f"{e.get('scenario')}|{e.get('type')}|{e.get('detail')}"
-        .encode()).hexdigest()[:16]
+    fp = event_fingerprint(e)
     if fp in ledger["events"]:
         rec = ledger["events"][fp]
         rec["count"] += 1
@@ -196,21 +202,42 @@ def ingest_event(ledger, e):
     return "new"
 
 
+# Duplicate-collapse listing cap (issue #51 / F70): name what merged, but keep
+# a large re-ingest readable — at most this many identities, then "and K more".
+COLLAPSE_LIST_CAP = 10
+
+
 def cmd_ingest(args, ledger):
-    """Record events; exact duplicates collapse to a count."""
+    """Record events; exact duplicates collapse to a count — and the collapse
+    names what merged into what (issue #51 / F70): each collapsed identity
+    (scenario/type + truncated detail) is listed once with the record's new
+    occurrence count, capped at COLLAPSE_LIST_CAP lines."""
     new, dup = 0, 0
+    collapsed = {}  # fingerprint -> event dict (identity listed once)
     for path in args.files:
         with open(path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
-                if ingest_event(ledger, json.loads(line)) == "new":
+                e = json.loads(line)
+                if ingest_event(ledger, e) == "new":
                     new += 1
                 else:
                     dup += 1
+                    fp = event_fingerprint(e)
+                    collapsed.setdefault(fp, ledger["events"][fp])
     save(args.target, ledger)
     print(f"ingested: {new} new event(s), {dup} exact duplicate(s) collapsed")
+    for rec in list(collapsed.values())[:COLLAPSE_LIST_CAP]:
+        detail = (rec.get("detail") or "")
+        if len(detail) > 60:
+            detail = detail[:57] + "…"
+        print(f"  collapsed: {rec.get('scenario')}/{rec.get('type')} "
+              f"\"{detail}\" -> count={rec['count']}", file=sys.stderr)
+    if len(collapsed) > COLLAPSE_LIST_CAP:
+        print(f"  … and {len(collapsed) - COLLAPSE_LIST_CAP} more collapsed "
+              f"identit(ies)", file=sys.stderr)
 
 
 def cmd_ingest_note(args, ledger):
