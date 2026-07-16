@@ -77,7 +77,7 @@ exists — Tanuki runs with zero configuration.
 | `est_cost_per_scenario_usd` | `1.5` | drive `--estimate` | fallback when no run history exists |
 | `min_recurrence` | `3` | ledger promote | chronic threshold |
 | `min_scenarios` | `2` | ledger promote | breadth threshold |
-| `compaction_unseen_runs` | `3` | ledger compact | driven-and-absent runs (runs that replayed the finding's scenario without it recurring — spec-tanuki-scenario-lifecycle) before a dismissed / verified-fixed finding tombstones |
+| `compaction_unseen_runs` | `3` | ledger compact | runs before a finding tombstones — for verified-fixed (`accepted`): driven-and-absent runs (runs that replayed the finding's scenario without it recurring — spec-tanuki-scenario-lifecycle); for `dismissed`: elapsed runs (deadness is not scenario-conditional) |
 | `demote_after` | `2` | scheduler | consecutive low-yield runs before a scenario demotes to the regression pool (hysteresis) |
 | `regression_every` | `3` | scheduler | undriven runs before a regression-pool scenario is due again (never deleted) |
 | `exploration_quota` | `1` | scheduler | unexplored scenarios each plan must include while any exist |
@@ -118,7 +118,9 @@ orchestrated by `commands/tanuki.md`.
 Deterministic lint of the plugin repo. Checks (v0): every `skills/*/SKILL.md`
 exists and has parseable frontmatter with `name` + `description`; relative
 links in README/skills resolve; `scripts/*.sh` are executable and LF-only;
-config examples exist where README references them. Output: pass/fail lines,
+a `config/` dir, when present, contains at least one `*.example.*` file
+(README cross-referencing is aspirational, not yet implemented). Output:
+pass/fail lines,
 non-zero exit on failure. **The pipeline refuses to drive scenarios while
 preflight fails** — dogfooding time is never spent rediscovering lint facts.
 
@@ -156,8 +158,12 @@ scenario, it:
    (`events/<run>/<scenario>.events.jsonl`): one JSON object per event —
    `{run, scenario, seq, type, detail, evidence}` where `type ∈ {tool_error,
    permission_block, retry, user_choice, skill_start, skill_end, result,
-   budget, note}`. Normalization is mechanical (parsed from the stream), never
-   judged.
+   budget, note}`. Of these, the normalizer currently emits `tool_error`,
+   `permission_block`, `skill_start`, `result`, and `note`; `retry`,
+   `user_choice`, `skill_end`, and `budget` are reserved vocabulary not yet
+   produced (`user_choice` gains structured fields and an emitter in
+   spec-tanuki-trajectory). Normalization is mechanical (parsed from the
+   stream), never judged.
 5. Verifies isolation: `git -C <clone> status --porcelain` on both clones is
    recorded into the run manifest; unexpected dirt in the plugin clone is
    itself an event (`type: note, detail: pollution`).
@@ -247,12 +253,16 @@ evidence. Indefinite growth is acceptable *only* under three invariants:
    remain the complete archive; the ledger stores enough to *find* evidence,
    not to *be* it.
 3. **Compaction of the dead tail:** records tied only to `dismissed` or
-   verified-fixed findings and absent for N **driven-and-absent** runs (runs
-   that actually replayed the finding's scenario without it recurring —
-   spec-tanuki-scenario-lifecycle's verify semantics; mere elapsed runs don't
-   count) compact to one-line tombstones (id, resolution, count) — kept for
-   dedupe so nothing resurfaces as new, but stripped of per-run detail.
-   Regression analysis over compacted history goes to `raw.jsonl`.
+   verified-fixed findings compact to one-line tombstones (id, resolution,
+   count) — kept for dedupe so nothing resurfaces as new, but stripped of
+   per-run detail. Verified-fixed (`accepted`) findings require N
+   **driven-and-absent** runs (runs that actually replayed the finding's
+   scenario without it recurring — spec-tanuki-scenario-lifecycle's verify
+   semantics; mere elapsed runs don't count). `dismissed` findings require
+   only N elapsed runs — a dismissal is dead regardless of replay, so
+   deadness is not scenario-conditional (spec-tanuki-scenario-lifecycle,
+   Verify / cap interaction). Regression analysis over compacted history
+   goes to `raw.jsonl`.
 
 After dedupe, the Miner reports the **run delta** to the user: which findings
 were bumped (id, recurrence before→after) and which are new — the human never
