@@ -257,21 +257,103 @@ def host_source_escape_check(raw_path, host_setup, host_source_abs):
     return offending
 
 
+# Trajectory marker grammar (spec-tanuki-trajectory §1). The driver is told
+# to emit these lines by the drive-injected preamble; normalize lifts them
+# mechanically — string match only, no judgment, no LLM.
+MARKER_CHOICE = "TANUKI-CHOICE"
+MARKER_OUTCOME = "TANUKI-OUTCOME"
+OUTCOME_DISPOSITIONS = ("success", "gave_up", "partial")
+
+
+def parse_marker_fields(text):
+    """Split a marker payload into key=value fields and a free-text tail.
+    Field parsing stops at the first token without '=': the outcome grammar
+    puts free text after the fields, and a value never contains whitespace."""
+    fields, tail = {}, []
+    for tok in text.split():
+        if not tail and "=" in tok:
+            k, v = tok.split("=", 1)
+            fields[k] = v
+        else:
+            tail.append(tok)
+    return fields, " ".join(tail)
+
+
+def recovery_key(name, tool_input):
+    """The identity recovery binding matches on: a Bash call is named by its
+    command's basename, any other tool by the tool name. Deliberately narrow
+    (spec-tanuki-trajectory §1) — no fuzzy matching, ever."""
+    if name == "Bash":
+        toks = str((tool_input or {}).get("command", "")).split()
+        if toks:
+            return os.path.basename(toks[0])
+    return name
+
+
 def normalize(raw_path, run, scenario):
     """Mechanically map the claude stream-json transcript to Tanuki Events.
-    Never judges — extraction of UX findings is the Miner's job."""
+    Never judges — extraction of UX findings is the Miner's job.
+    Returns (events, markers_dropped): typed trajectory events
+    (spec-tanuki-trajectory §1) are lifted from the marker grammar; malformed
+    markers are counted, never fatal. Typed events carry a raw-line evidence
+    pointer (raw.jsonl#L<n>); legacy events keep the event-seq pointer."""
     events, seq = [], 0
+    markers_dropped = 0
+    outcome_seen = False
+    pending_errors = []  # [(error seq, recovery key)] awaiting a continuation
 
-    def emit(etype, detail, evidence=None):
+    def emit(etype, detail, evidence=None, **fields):
         nonlocal seq
         seq += 1
-        events.append({"run": run, "scenario": scenario, "seq": seq,
-                       "type": etype, "detail": detail[:2000],
-                       "evidence": evidence or f"{scenario}.raw.jsonl#{seq}"})
+        e = {"run": run, "scenario": scenario, "seq": seq,
+             "type": etype, "detail": detail[:2000],
+             "evidence": evidence or f"{scenario}.raw.jsonl#{seq}"}
+        e.update(fields)
+        events.append(e)
+        return seq
+
+    def raw_pointer(lineno):
+        return f"{scenario}.raw.jsonl#L{lineno}"
+
+    def bind_recovery(err_index, lineno, key):
+        err_seq, _ = pending_errors.pop(err_index)
+        emit("recovery", f"of #{err_seq} — {key} continued successfully",
+             evidence=raw_pointer(lineno), of_seq=err_seq)
+
+    def lift_markers(txt, lineno):
+        nonlocal markers_dropped, outcome_seen
+        for mline in txt.splitlines():
+            mline = mline.strip()
+            if mline.startswith(MARKER_CHOICE + " "):
+                fields, _ = parse_marker_fields(mline[len(MARKER_CHOICE) + 1:])
+                point, selected = fields.get("point"), fields.get("selected")
+                if not point or not selected:
+                    markers_dropped += 1
+                    continue
+                extra = {"point": point, "selected": selected}
+                if fields.get("alternatives"):
+                    extra["alternatives"] = fields["alternatives"].split("|")
+                emit("user_choice", mline, evidence=raw_pointer(lineno), **extra)
+                # A marker naming the failed command is a valid continuation.
+                for i, (_, key) in enumerate(pending_errors):
+                    if key and key in mline:
+                        bind_recovery(i, lineno, key)
+                        break
+            elif mline.startswith(MARKER_OUTCOME + " "):
+                fields, tail = parse_marker_fields(
+                    mline[len(MARKER_OUTCOME) + 1:])
+                disposition = fields.get("disposition")
+                if disposition not in OUTCOME_DISPOSITIONS:
+                    markers_dropped += 1
+                    continue
+                emit("outcome", tail or mline, evidence=raw_pointer(lineno),
+                     disposition=disposition)
+                outcome_seen = True
 
     tool_names = {}  # tool_use id -> name
+    tool_keys = {}   # tool_use id -> recovery key
     with open(raw_path, encoding="utf-8", errors="replace") as f:
-        for line in f:
+        for lineno, line in enumerate(f, 1):
             line = line.strip()
             if not line:
                 continue
@@ -285,6 +367,8 @@ def normalize(raw_path, run, scenario):
                     if block.get("type") == "tool_use":
                         name = block.get("name", "?")
                         tool_names[block.get("id")] = name
+                        tool_keys[block.get("id")] = recovery_key(
+                            name, block.get("input"))
                         if name == "Skill" or name.startswith("mcp__"):
                             emit("skill_start",
                                  f"{name}: {json.dumps(block.get('input', {}))[:500]}")
@@ -292,6 +376,7 @@ def normalize(raw_path, run, scenario):
                         txt = block["text"]
                         if "FRICTION" in txt.upper():
                             emit("note", txt)
+                        lift_markers(txt, lineno)
             elif t == "user":
                 for block in obj.get("message", {}).get("content", []):
                     if block.get("type") != "tool_result":
@@ -302,12 +387,23 @@ def normalize(raw_path, run, scenario):
                                            if isinstance(c, dict))
                     content = str(content or "")
                     name = tool_names.get(block.get("tool_use_id"), "?")
+                    key = tool_keys.get(block.get("tool_use_id"))
                     if block.get("is_error"):
                         lowered = content.lower()
                         etype = ("permission_block"
                                  if "permission" in lowered or "denied" in lowered
                                  else "tool_error")
-                        emit(etype, f"{name}: {content[:800]}")
+                        err_seq = emit(etype, f"{name}: {content[:800]}")
+                        if etype == "tool_error":
+                            pending_errors.append((err_seq, key))
+                    else:
+                        # A success of the same command/subcommand recovers
+                        # the earliest matching error; unmatched errors simply
+                        # have no recovery event.
+                        for i, (_, pkey) in enumerate(pending_errors):
+                            if pkey and pkey == key:
+                                bind_recovery(i, lineno, key)
+                                break
             elif t == "result":
                 emit("result", json.dumps({
                     "subtype": obj.get("subtype"),
@@ -319,7 +415,14 @@ def normalize(raw_path, run, scenario):
                 final = obj.get("result")
                 if isinstance(final, str) and final.strip():
                     emit("note", f"final message: {final[:2000]}")
-    return events
+                if not outcome_seen:
+                    # Guarantee: every completed scenario run yields ≥1
+                    # outcome event (spec-tanuki-trajectory §1.4).
+                    emit("outcome",
+                         f"synthesized from result: {obj.get('subtype')}",
+                         disposition="partial", synthesized=True)
+                    outcome_seen = True
+    return events, markers_dropped
 
 
 def resolve_model(scenario, cfg, cli_model):
@@ -465,6 +568,18 @@ def drive_scenario(args, scenario, run_dir, cfg, prog=None):
         f"{scenario['prompt']}\n\n"
         f"{pin_block}"
         f"{sandbox}"
+        # Trajectory markers (spec-tanuki-trajectory §1): drive's own
+        # boilerplate, never per-scenario prose. Normalize lifts these lines
+        # mechanically into typed events — the grammar here and the lift in
+        # normalize() must stay in sync.
+        "TRAJECTORY MARKERS: every time you choose between alternatives (a "
+        "prompt, a fork in the flow, an offered option), emit one line by "
+        "itself, exactly:\n"
+        "TANUKI-CHOICE point=<decision-name> selected=<value> "
+        "[alternatives=<v1|v2|...>]\n"
+        "and just before the FRICTION LOG emit exactly one terminal line:\n"
+        "TANUKI-OUTCOME disposition=<success|gave_up|partial> <one-line "
+        "summary>\n\n"
         "Work only inside this workspace. When you are done (or stuck), end "
         "your final message with a section titled 'FRICTION LOG' listing every "
         "point of friction you hit as a user: confusing instructions, missing "
@@ -513,7 +628,7 @@ def drive_scenario(args, scenario, run_dir, cfg, prog=None):
 
     print(f"  [{sid}] stage: normalize + verify isolation", flush=True)
     stage("normalize + verify isolation")
-    events = normalize(raw_path, args.run, sid)
+    events, markers_dropped = normalize(raw_path, args.run, sid)
     # Isolation verification: the plugin clone must stay clean;
     # host-clone writes are expected (that's the product working) but recorded.
     plugin_dirt = pollution_check(plugin_clone)
@@ -563,6 +678,7 @@ def drive_scenario(args, scenario, run_dir, cfg, prog=None):
             # of one scenario down different internal branches
             # (specs/spec-tanuki-scenario-lifecycle, History & coverage).
             "decision_points": scenario.get("decision_points") or [],
+            "trajectory_markers_dropped": markers_dropped,
             "host_clone_changes": len(pollution_check(host_clone)),
             "plugin_clone_dirty": bool(plugin_dirt),
             "execution_escape": bool(escapes),
