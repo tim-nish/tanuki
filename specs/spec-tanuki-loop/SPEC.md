@@ -1,7 +1,8 @@
 # Spec: /tanuki-loop — unattended cumulative dogfooding on an integration branch
 
-Status: PROPOSED 2026-07-13. Implemented in
-`commands/tanuki-loop.md`. Depends on the Tanuki pipeline
+Status: RATIFIED 2026-07-16 (header sync — proposed 2026-07-13, since
+implemented and amended through 2026-07-15; the PROPOSED header had gone
+stale). Implemented in `commands/tanuki-loop.md`. Depends on the Tanuki pipeline
 (`docs/tanuki-spec.md`) and the shared executables (`tanuki-loop`,
 `tanuki-drive`, `tanuki-ledger`). Its classification and implementation
 **judgment is an intentional fork** of `/triage-gh` and `/implement-story`:
@@ -111,6 +112,10 @@ per-finding attempt counting and freezing (`attempt`), the two-quiet
 convergence counter (`record-cycle`), the post-merge reachability check
 (`gate-check`), and the materialization idempotency map (`issue-get`/
 `issue-put`). Breakers are `tanuki-loop` exit code 3 with `{"breaker": …}`.
+(`gate-check`/`gate-push` also exit 3 on their enumerated stop conditions
+but emit their own payloads — `{"reachable": false}` / `{"pushed": false,
+…}` — not a `breaker` key; scripted callers must not key on `.breaker` for
+the gate commands.)
 
 The tool also owns the operator surface: `doctor` (the read-only Phase 2/3
 headless-readiness validator — see "Headless readiness" below), `policy`

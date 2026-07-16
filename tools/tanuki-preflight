@@ -121,7 +121,8 @@ def check_scripts(repo):
 
 
 def check_config_examples(repo):
-    """Every config/*.example.* referenced from README exists, and vice versa."""
+    """A config/ dir, when present, has at least one *.example.* file.
+    (README cross-referencing is aspirational — not implemented yet.)"""
     cfg = os.path.join(repo, "config")
     if not os.path.isdir(cfg):
         record("config-examples", True, "no config/ (nothing to check)")

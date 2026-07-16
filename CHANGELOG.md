@@ -7,6 +7,19 @@ All notable changes to Tanuki are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `tanuki-loop recover` — attended recovery from the external-modification
+  breaker once the last iteration is closed: `--restore` resets the loop
+  worktree to `head_expected` (discarded range audited), `--adopt`
+  re-baselines `head_expected` onto the current worktree HEAD (adopted range
+  audited, non-ancestor rewrites warned). No default mode; any other state is
+  refused with the breaker convention, and closed iterations are never
+  mutated. (#33)
+- Host-snapshot fixture: `tanuki-loop init` pins a run-scoped clone of the
+  live host (`<run-dir>/host-base`, `host_base_sha`/`host_fixture_path` in
+  `state.json`, fail-closed on clone failure); every drive receives the
+  fixture, `doctor` gains a fifth host-cloneable check (fatal for hosted
+  targets), and `finish` reports live-host drift as an informational note.
+  After init the live host is out of scope by construction. (#15, #17, #18)
 - `tanuki-loop doctor` — a read-only Phase 2/3 headless-readiness validator:
   required loop ceilings (`test_cmd`, `wall_time_s`, `token_budget`,
   `attempt_cap`, `iterations`), the base-freshness guard, a baseline
@@ -23,6 +36,15 @@ All notable changes to Tanuki are documented here. The format follows
   remote is refused (reconcile + re-run), never force-pushed. (#5)
 
 ### Fixed
+- Hostless self-dogfood scenarios now run the disposable plugin clone, never
+  the operator's real checkout: the driver's sandbox preamble pins the clone
+  path, and a post-run execution-escape check asserts nothing outside the
+  workspace/clone was run (assert what *ran*, not just what was left dirty).
+  Cumulative fixes are actually dogfooded again. (#13)
+- The `tanuki-loop` dashboard always renders its six fixed sections (header/
+  health, latest drive, this run, scheduler decisions, convergence, why
+  stopped/NEXT), each degrading to a stated reason instead of disappearing;
+  the no-mode breaker path recovers instead of crashing the dashboard. (#36)
 - `tanuki-loop init` no longer dogfoods stale code: it fetches the base
   branch's remote and **fails closed** when the local base is behind its
   upstream (`--allow-stale-base` overrides; the base is never silently moved to

@@ -1,7 +1,9 @@
 # Spec: Tanuki trajectory — typed path events, coverage diff, and the trajectory view
 
-Status: PROPOSED 2026-07-15, awaiting operator ratification. The *concept* is
-already ratified operator policy (2026-07-15 rulings on the operator's policy
+Status: RATIFIED 2026-07-16 (operator, after the 2026-07-16 consistency
+review amended build-order labels, the mixed pre/post-marker coverage note,
+and the recovery/evidence acceptance criteria). The *concept* was already
+ratified operator policy (2026-07-15 rulings on the operator's policy
 surface); this spec is its executable design. Extends `docs/tanuki-spec.md`
 (the Event vocabulary — mechanical enrichment only) and
 `specs/spec-tanuki-scenario-lifecycle/SPEC.md` (consumes its `axes`/`covers`
@@ -80,7 +82,7 @@ no LLM in the loop):
 The existing exact-dupe collapse, capped-exemplar evidence, and one-way flow
 apply to the new types unchanged — they are Events like any other.
 
-## 2. Coverage diff — observed vs declared (build first)
+## 2. Coverage diff — observed vs declared (build step 2 — first consumer)
 
 The payoff piece, and deterministic set arithmetic end to end:
 
@@ -107,7 +109,13 @@ coverage diff (observed vs declared):
 - The **declared-but-never-observed** side defers to the lifecycle spec's
   existing per-value coverage states — it is the union of `authored`
   (covered by a never-executed scenario) and `uncovered` (no scenario covers
-  it) — rendered as one pointer line, no duplication.
+  it) — rendered as one pointer line, no duplication. Note the deliberate
+  approximation: "never observed" here means *never executed* in the
+  lifecycle sense; an `explored` value whose runs all predate the marker
+  grammar is excluded even though no trajectory ever recorded it. When a
+  scenario has executed runs but none carry typed events, the block appends
+  `(<k> scenario(s) executed before trajectory capture — observations
+  incomplete)` so the mixed pre/post-marker case is visible.
 - Degradation: no `axes` declared → the block prints the observed-point list
   only, with the lifecycle spec's existing "no axes declared" pointer; no
   typed events yet → one line: `no trajectory events recorded — coverage
@@ -115,7 +123,7 @@ coverage diff (observed vs declared):
 
 ## 3. Trajectory view — `tanuki-scheduler history --scenario <id> --trajectory`
 
-The Q-by-Q rendering (second build step). `--trajectory` is a boolean mode
+The Q-by-Q rendering (build step 3 — second consumer). `--trajectory` is a boolean mode
 flag composing with `history`'s existing `--scenario <id>` selector (no
 second scenario-valued flag is introduced):
 
@@ -132,8 +140,9 @@ tanuki-scheduler --target <t> history --scenario <id> --trajectory [--run <run>]
     #6 recovery of #5 — re-ran with --loop-repo
     #9 outcome  success — ready report understood
   ```
-- Reads only the per-run `events.jsonl` files (plus `raw.jsonl` seq pointers
-  for evidence); prints and exits. It writes nothing, judges nothing, scores
+- Reads only the per-run event files
+  (`~/.tanuki/<target>/events/<run>/<scenario>.events.jsonl`, plus their
+  `raw.jsonl` evidence pointers); prints and exits. It writes nothing, judges nothing, scores
   nothing, and loads no ledger.
 - Runs that predate typed events degrade to the `tool_error`/`result` chain
   with a `(pre-trajectory run — choices not recorded)` note.
@@ -175,8 +184,18 @@ tanuki-scheduler --target <t> history --scenario <id> --trajectory [--run <run>]
 ## Acceptance
 
 - A fresh drive of one scenario yields `user_choice` (with `point`/`selected`)/`outcome` events in its
-  `events.jsonl` matching markers in `raw.jsonl` one-to-one; a run whose
-  driver emits no outcome marker still gets a synthesized `outcome`.
+  `events.jsonl` matching well-formed markers in `raw.jsonl` one-to-one; a
+  run whose driver emits no outcome marker still gets a synthesized
+  `outcome`.
+- A scenario whose raw stream contains a `tool_error` followed by a
+  successful retry of the same command yields a `recovery` event whose
+  `of_seq` is that `tool_error`'s `seq`; an error with no matching
+  continuation yields none.
+- Evidence pointers on the new events resolve: `run/scenario#seq` names an
+  event in that scenario's `events.jsonl`, and the implementation must make
+  the `raw.jsonl` pointer index the actual marker line (today's
+  `<scenario>.raw.jsonl#<event-seq>` format counts events, not raw lines —
+  fix or replace it for typed events rather than inheriting it).
 - `history` prints the coverage-diff block; introducing a marker with a
   `point` absent from `axes` surfaces it as a charter seed with correct
   evidence pointers; ratifying it via the plan gate removes it from the

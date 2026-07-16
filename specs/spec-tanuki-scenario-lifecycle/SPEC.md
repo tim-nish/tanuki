@@ -1,6 +1,8 @@
 # Spec: Tanuki scenario lifecycle — init onboarding, ad-hoc scenarios, adaptive exploration
 
-Status: PROPOSED 2026-07-14, awaiting operator ratification. Extends
+Status: RATIFIED 2026-07-16 (header sync — the revisions in this file were
+already treated as ratified by the 2026-07-15 umbrella reconcile, d17e6fa,
+and are implemented in the tools). Extends
 `docs/tanuki-spec.md` — originally with Driver/Miner contracts unchanged;
 later revisions in this file also amend the Miner's compaction semantics
 (driven-absence, "Verify/cap" revision) and add Driver manifest fields
@@ -117,21 +119,26 @@ default 0). Works retroactively on existing ledgers — evidence has always
 carried scenario ids.
 
 ### Selection (`tanuki-scheduler plan`)
-Each run's scenario set, in priority order, capped by `max_scenarios`:
-1. **Verify set** — scenarios evidencing findings currently
+Each run's scenario set, in priority order, capped by `max_scenarios`
+(order REVISED by the Verify/cap revision below — exploration is reserved
+*before* verify fills):
+1. **Exploration quota (reserved)** — at least `exploration_quota` (default
+   1) `unexplored` scenario or unwalked decision-point branch, whenever any
+   exist; `plan` reserves these slots before filling verify. This is the
+   anti-Goodhart guard: the loop cannot manufacture convergence by only
+   re-driving quiet ground.
+2. **Verify set** — scenarios evidencing findings currently
    accepted/attempted and awaiting verification-by-absence (replay to
-   confirm convergence).
-2. **Exploration quota** — at least `exploration_quota` (default 1)
-   `unexplored` scenario or unwalked decision-point branch, whenever any
-   exist. This is the anti-Goodhart guard: the loop cannot manufacture
-   convergence by only re-driving quiet ground.
+   confirm convergence), capped per the Verify/cap revision.
 3. **Active rotation** — remaining active scenarios, least-recently-driven
    first.
 4. **Regression pool** — members due per `regression_every`.
 After mining, `tanuki-scheduler record-run --run <id>` folds the run's
 `scenario-yield` into streaks and applies the state machine. `status` emits
-machine-readable state; the tanuki-loop **dashboard gains a scenario
-section** (state + recent yield per scenario).
+machine-readable state; per-scenario state and yield live in the
+**history view** (`tanuki-scheduler history`) — the tanuki-loop dashboard
+keeps its fixed skeleton (spec-tanuki-loop "Fixed skeleton") and points at
+history for the long view.
 
 ### Loop amendment (spec-tanuki-loop)
 A drive→mine cycle counts toward the loop's quiet streak **only if its plan
