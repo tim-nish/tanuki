@@ -47,8 +47,12 @@ Subcommands (JSON out):
                                    With --scenarios (a matrix declaring axes/
                                    covers): per-axis exploration coverage
                                    (explored / authored / uncovered), the
-                                   exploration-debt summary, and <=3 advisory
-                                   next-charter recommendations — never
+                                   exploration-debt summary, <=3 advisory
+                                   next-charter recommendations, and the
+                                   coverage-diff block (observed decision
+                                   points from typed trajectory events vs
+                                   declared axes; undeclared points surface
+                                   as plan-gated charter seeds) — never
                                    modifies the matrix
   status                           machine-readable scheduler state
 
@@ -319,6 +323,84 @@ def all_manifests(target):
     return outp
 
 
+def observed_decision_points(target):
+    """Distinct `user_choice.point` values in the execution record's per-run
+    event files (spec-tanuki-trajectory §2). Reads only
+    events/<run>/<scenario>.events.jsonl — never the ledger (growth policy).
+    Returns (points, typed_scenarios): points maps each observed point to
+    {values, scenarios, runs, evidence}; typed_scenarios is every scenario
+    with at least one typed trajectory event of any kind."""
+    events_dir = os.path.join(TANUKI_ROOT, target, "events")
+    points, typed_scenarios = {}, set()
+    if not os.path.isdir(events_dir):
+        return points, typed_scenarios
+    for run in sorted(os.listdir(events_dir)):
+        run_dir = os.path.join(events_dir, run)
+        if not os.path.isdir(run_dir):
+            continue
+        for fn in sorted(os.listdir(run_dir)):
+            if not fn.endswith(".events.jsonl"):
+                continue
+            sid = fn[:-len(".events.jsonl")]
+            with open(os.path.join(run_dir, fn), encoding="utf-8",
+                      errors="replace") as f:
+                for line in f:
+                    try:
+                        e = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    etype = e.get("type")
+                    if etype == "user_choice" and e.get("point"):
+                        typed_scenarios.add(sid)
+                        p = points.setdefault(e["point"], {
+                            "values": set(), "scenarios": set(),
+                            "runs": set(), "evidence": []})
+                        p["values"].add(str(e.get("selected")))
+                        p["scenarios"].add(sid)
+                        p["runs"].add(run)
+                        if len(p["evidence"]) < 3:  # capped exemplars
+                            p["evidence"].append(f"{run}/{sid}#{e.get('seq')}")
+                    elif etype in ("outcome", "recovery"):
+                        typed_scenarios.add(sid)
+    return points, typed_scenarios
+
+
+def render_coverage_diff(cd, no_axes=False):
+    """The coverage-diff block (spec-tanuki-trajectory §2), rendered after
+    the existing coverage/debt section. Advisory only: undeclared points are
+    charter seeds whose sole exit is the plan gate — nothing here writes."""
+    print("\n  coverage diff (observed vs declared):")
+    if cd["no_typed_events"]:
+        print("    no trajectory events recorded — coverage diff needs runs "
+              "made after the marker grammar landed")
+        return
+    if no_axes:
+        for p, d in sorted(cd["observed_points"].items()):
+            print(f"    observed: {p} — seen in {len(d['scenarios'])} "
+                  f"scenario(s) ({', '.join(d['scenarios'])}), "
+                  f"{d['runs']} run(s); values seen: {', '.join(d['values'])}")
+        return
+    if cd["undeclared"]:
+        print("    undeclared decision points (observed in trajectories, "
+              "absent from axes):")
+        for p, d in sorted(cd["undeclared"].items()):
+            print(f"      {p} — seen in {len(d['scenarios'])} scenario(s) "
+                  f"({', '.join(d['scenarios'])}), {d['runs']} run(s); "
+                  f"values seen: {', '.join(d['values'])}")
+            print(f"        -> charter seed (plan-gated)  evidence: "
+                  f"{', '.join(d['evidence'])}")
+    else:
+        print("    undeclared decision points: none")
+    if cd["declared_never_observed"]:
+        print("    declared but never observed: "
+              + ", ".join(cd["declared_never_observed"])
+              + "   (lifecycle states: authored | uncovered — see "
+                "exploration coverage above)")
+    if cd["pre_capture_scenarios"]:
+        print(f"    ({len(cd['pre_capture_scenarios'])} scenario(s) executed "
+              "before trajectory capture — observations incomplete)")
+
+
 def cmd_history(args):
     """Cross-run scenario monitoring from persisted artifacts only
     (History & coverage revision). Default: repo-wide coverage. --scenario:
@@ -407,15 +489,15 @@ def cmd_history(args):
     # Axis coverage + exploration debt (Exploration axes revision): declared
     # space (axes/covers in the scenarios file) x execution record. Advisory
     # only — never modifies the matrix.
-    axes_cov, debt, recs = None, None, []
+    axes_cov, debt, recs, coverage_diff = None, None, [], None
     if args.scenarios:
         with open_scenarios(args.scenarios, args.target) as fh:
             matrix = json.load(fh)
         axes = matrix.get("axes") or {}
+        executed_ids = {s for s, ex in executions.items() if ex}
+        claims = {s["id"]: s.get("covers", {})
+                  for s in matrix.get("scenarios", [])}
         if axes:
-            executed_ids = {s for s, ex in executions.items() if ex}
-            claims = {s["id"]: s.get("covers", {})
-                      for s in matrix.get("scenarios", [])}
             axes_cov = {}
             for axis, spec in axes.items():
                 axes_cov[axis] = {}
@@ -460,6 +542,33 @@ def cmd_history(args):
                 recs.append(f"author a charter covering {a}: {', '.join(vs)}")
             recs = recs[:3]
 
+        # Coverage diff — observed vs declared (spec-tanuki-trajectory §2):
+        # deterministic set arithmetic over per-run event files.
+        observed, typed_scenarios = observed_decision_points(args.target)
+        declared = set(axes.keys())
+        for cv in claims.values():
+            declared |= set(cv.keys())
+        never_observed = []
+        if axes_cov:
+            for axis, vals in axes_cov.items():
+                for v, d in sorted(vals.items()):
+                    if d["status"] != "explored":
+                        never_observed.append(f"{axis}={v}")
+
+        def point_view(d):
+            return {"values": sorted(d["values"]),
+                    "scenarios": sorted(d["scenarios"]),
+                    "runs": len(d["runs"]), "evidence": d["evidence"]}
+
+        coverage_diff = {
+            "observed_points": {p: point_view(d) for p, d in observed.items()},
+            "undeclared": {p: point_view(d) for p, d in observed.items()
+                           if p not in declared},
+            "declared_never_observed": never_observed,
+            "pre_capture_scenarios": sorted(executed_ids - typed_scenarios),
+            "no_typed_events": not typed_scenarios,
+        }
+
     # Repo-wide coverage.
     recorded = sched.get("runs_recorded", [])
     rows, cover = [], {"unexplored": [], "long_unrun": [], "productive": []}
@@ -488,6 +597,7 @@ def cmd_history(args):
             "debt": ({**(debt or {}), "stale_scenarios": cover["long_unrun"]}
                      if debt is not None else None),
             "recommendations": recs,
+            "coverage_diff": coverage_diff,
             "selection_history": sched.get("plans", [])[-args.plans:]}
     if args.json:
         out(data)
@@ -514,6 +624,7 @@ def cmd_history(args):
         if args.scenarios:
             print("  (no axes declared — run a generation pass to declare "
                   "the exploration space)")
+            render_coverage_diff(coverage_diff, no_axes=True)
         return
     marks = {"explored": "+", "authored": "~", "uncovered": "!"}
     print("\n  exploration coverage (+ explored · ~ authored, never run · "
@@ -537,6 +648,7 @@ def cmd_history(args):
         print("    none — the declared space is fully exercised")
     for i, r in enumerate(recs, 1):
         print(f"  next: {i}. {r}")
+    render_coverage_diff(coverage_diff)
 
 
 def cmd_status(args):
