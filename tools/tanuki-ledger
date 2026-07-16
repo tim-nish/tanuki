@@ -1118,24 +1118,29 @@ def main():
     cfg = load_config()  # promote's default thresholds, named in --help (F68)
     sp = sub.add_parser(
         "promote",
-        help="move open findings meeting the recurrence/scenario thresholds "
+        help="move open findings meeting the recurrence OR scenario threshold "
              "to `proposed` (--dry-run for a read-only preview)",
         description=(
-            "Promote findings that qualify by recurrence and scenario-spread "
-            "thresholds: each qualifying `open` finding's status moves to "
-            "`proposed`, awaiting the human gate's accept/dismiss decision "
-            "(dispositions still go through `set-status`). Findings already "
-            "proposed/accepted/dismissed are never touched. With --dry-run "
-            "the same listing is printed and nothing is written. Defaults: "
-            "--min-recurrence %(mr)s, --min-scenarios %(ms)s (from config); "
-            "the applied thresholds are always named in the output."
+            "Promote findings that qualify by recurrence or scenario-spread: "
+            "the two thresholds are combined with OR, not AND — a finding "
+            "qualifies when `recurrence >= --min-recurrence` OR it was seen "
+            "in `>= --min-scenarios` distinct scenarios, so clearing either "
+            "bar alone is enough. Each qualifying `open` finding's status "
+            "moves to `proposed`, awaiting the human gate's accept/dismiss "
+            "decision (dispositions still go through `set-status`). Findings "
+            "already proposed/accepted/dismissed are never touched. With "
+            "--dry-run the same listing is printed and nothing is written. "
+            "Defaults: --min-recurrence %(mr)s, --min-scenarios %(ms)s (from "
+            "config); the applied bar is always named in the output."
             % {"mr": cfg["min_recurrence"], "ms": cfg["min_scenarios"]}))
+    # Keep "(default: N)" early in each help string: argparse wraps this column
+    # at ~56 chars, and a trailing default can split across lines mid-token.
     sp.add_argument("--min-recurrence", type=int, default=None,
-                    help="chronic threshold (default: %s)"
-                         % cfg["min_recurrence"])
+                    help="chronic threshold (default: %s); OR'd with "
+                         "--min-scenarios" % cfg["min_recurrence"])
     sp.add_argument("--min-scenarios", type=int, default=None,
-                    help="breadth threshold (default: %s)"
-                         % cfg["min_scenarios"])
+                    help="breadth threshold (default: %s); OR'd with "
+                         "--min-recurrence" % cfg["min_scenarios"])
     sp.add_argument("--dry-run", action="store_true",
                     help="preview only: list qualifying findings without "
                          "changing any status")
