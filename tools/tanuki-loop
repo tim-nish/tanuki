@@ -747,6 +747,27 @@ def cmd_doctor(args):
                                "the test breaker on inherited state, not a "
                                f"regression: …{tail}"),
                 })
+                # We just ran test_cmd in a pristine checkout, so anything
+                # untracked here is something test_cmd sheds (__pycache__,
+                # .pyc, coverage data). Mid-run that trips iter-verify's
+                # clean-worktree breaker far from its cause, and recovering
+                # from it burns the scenario's turn budget (F64, F89). Say so
+                # now, while it is one .gitignore line. Informational, never
+                # fatal: the run is still correct, just noisier.
+                rc_s, dirty = git(wt, "status", "--porcelain", "--untracked-files=all")
+                shed = sorted({ln[3:].split("/")[0] for ln in dirty.splitlines()
+                               if ln.startswith("?? ")}) if rc_s == 0 else []
+                checks.append({
+                    "check": "test-cmd-artifacts", "ok": True,
+                    "artifacts": shed,
+                    "detail": ("test_cmd leaves no untracked artifacts"
+                               if not shed else
+                               "test_cmd leaves untracked artifact(s) in a "
+                               "pristine checkout: %s — .gitignore them, or "
+                               "iter-verify's clean-worktree breaker will fire "
+                               "mid-run after a commit, far from this cause"
+                               % ", ".join(shed)),
+                })
             finally:
                 git(repo, "worktree", "remove", "--force", wt)
                 git(repo, "worktree", "prune")
