@@ -20,8 +20,11 @@ This is a working vertical slice, not a framework.
   violation surfacing *during* a run proposes a new preflight rule, not a UX
   finding.
 - **Proposals-only**: nothing merges, nothing writes to the
-  target repo, findings never auto-update specs. The output is a capped ranked
-  brief plus proposal drafts for human review.
+  target repo during the attended pipeline, findings never auto-update specs.
+  The output is a capped ranked brief plus proposal drafts for human review.
+  `/tanuki-loop` writes only to its own integration branch inside a dedicated
+  worktree, never `main`, never the operator's working tree — merge happens
+  only at the attended morning gate (spec-tanuki-loop).
 - **Isolation = run against clones, never the real repos**; verify
   pollution after every run (snapshot-diff-discard).
 - **Model routing** (refined after early prototype runs): route

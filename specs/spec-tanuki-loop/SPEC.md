@@ -2,15 +2,21 @@
 
 Status: RATIFIED 2026-07-16 (header sync — proposed 2026-07-13, since
 implemented and amended through 2026-07-15; the PROPOSED header had gone
-stale). Implemented in `commands/tanuki-loop.md`. Depends on the Tanuki pipeline
+stale). Supersedes the blanket never-automate reading of the operator's
+2026-07-11 decision record for mechanical (non-spec, non-outward) work
+executed against snapshot-isolated state (integration worktree, host
+fixture); the relocated morning gate is the surviving human gate
+(owner decision record 2026-07-16, loop-automation supersession). Implemented in `commands/tanuki-loop.md`. Depends on the Tanuki pipeline
 (`docs/tanuki-spec.md`) and the shared executables (`tanuki-loop`,
 `tanuki-drive`, `tanuki-ledger`). Its classification and implementation
-**judgment is an intentional fork** of `/triage-gh` and `/implement-story`:
-the rules are copied into this command and allowed to diverge — the judgment
-layer is not reused. Only the tools and the (issue-free) ledger are shared.
+**judgment is an intentional fork** of the operator's attended triage and
+implementation commands (rules copied here, allowed to diverge; owner
+decision record 2026-07-13, loop fork) — the judgment layer is not reused.
+Only the tools and the (issue-free) ledger are shared.
 
-Origin: the attended cycle `tanuki → triage-gh → publish-issues →
-implement-direct → implement-story → merge → commit-groups → tanuki` was
+Origin: the attended cycle — tanuki, then the operator's attended triage /
+publishing / implementation / commit-grouping commands, then merge, then
+tanuki again — was
 approved-at-every-gate for two days straight. The gates that mattered were the
 few requiring judgment (a spec alternative, a missing project config, a botched
 stacked merge); the rest were rubber-stamps on mechanical work. This command
@@ -84,7 +90,8 @@ The overnight loop is a **fork**: the classification and implementation rules
 are copied from the attended commands into this command (see "One iteration",
 steps 3–4/6) and run over the **ledger**, never their GitHub-issue plumbing.
 The tool layer and the ledger are genuinely shared; the judgment layer is
-copied and may diverge — a change to `/triage-gh` does not propagate here.
+copied and may diverge — a change to the attended commands does not
+propagate here.
 - Classification (direct / story / spec) runs against ledger findings — no
   `triage:*` labels, no story files, no issues.
 - Implementation runs from the finding text directly onto the integration
@@ -309,7 +316,8 @@ prior successful iterations are untouched.
    it repeats the internal path — and here it does, so vary it).
 2. **Mine.** Extraction + frontier dedupe → findings in the ledger, recurrence
    updated (`docs/tanuki-spec.md` §2, unchanged).
-3. **Classify (internal — forked rules, copied from `/triage-gh`).** For each
+3. **Classify (internal — forked rules, copied from the operator's attended
+   triage command).** For each
    new actionable finding apply the altitude test copied here: **spec** =
    changes an invariant other components depend on; **story** = a plan across
    files; **direct** = small and self-evident. Bias is **toward
@@ -325,7 +333,7 @@ prior successful iterations are untouched.
    (configured at init) deterministically in the worktree; a failure is an
    immediate-stop breaker. Unconfigured, it reports skipped and the model
    verifies manually — unattended runs must configure one.
-6. **Commit.** Intent-scoped commits (forked commit-groups rules) onto the
+6. **Commit.** Intent-scoped commits (forked commit-grouping rules) onto the
    integration branch, then `tanuki-loop iter-verify` — the **integration
    invariant**, all four or an immediate-stop breaker: (a) HEAD attached to the
    expected integration branch; (b) the iteration start SHA is an ancestor of

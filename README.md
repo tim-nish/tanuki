@@ -36,8 +36,10 @@ exactly which buttons to press — Tanuki answers the questions you can't
 answer yourself: what happens to everyone else?
 
 **You stay in control.** Tanuki never merges anything, never files issues on
-its own, and never writes into the repo under test. Its output is a brief of
-proposals; every decision after that is yours.
+its own, and never writes into the repo under test — the overnight loop's
+only write surface is its own integration branch, and only you merge it (see
+Unattended overnight mode). Its output is a brief of proposals; every
+decision after that is yours.
 
 Full technical contract: [docs/tanuki-spec.md](docs/tanuki-spec.md).
 
@@ -137,9 +139,9 @@ collapsed to a pointer line you'll rarely need — and records one disposition
 each:
 
 - **accept** — optionally file the prepared GitHub issue right then (its own
-  explicit confirmation; nothing is ever auto-filed). Filed issues carry a
-  `tanuki` label plus `tanuki:<kind>` — the only machine-readable trace
-  Tanuki leaves.
+  explicit confirmation; nothing is ever auto-filed). A filed issue carries
+  exactly one label, `tanuki:<kind>` — the only machine-readable trace Tanuki
+  leaves; the prefix inside the kind label is the provenance marker.
 - **dismiss** — it never resurfaces as new (but stays deduplicated against).
 - **defer** — stays pending; `--status` keeps it visible until you decide.
 

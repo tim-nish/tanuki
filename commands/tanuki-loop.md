@@ -4,9 +4,10 @@ integration branch, in an isolated worktree, until it converges or hits a
 fixed iteration cap — then hand one batch to the operator's morning review.
 The Human Gate is relocated, not removed: the loop **prepares**, the operator
 **ratifies**. Contract: `${CLAUDE_PLUGIN_ROOT}/specs/spec-tanuki-loop/SPEC.md`. Reuses the Tanuki
-pipeline (`${CLAUDE_PLUGIN_ROOT}/docs/tanuki-spec.md`) and the *logic* of /triage-gh,
-/implement-direct, /implement-story, /commit-groups — never their GitHub-issue
-substrate.
+pipeline (`${CLAUDE_PLUGIN_ROOT}/docs/tanuki-spec.md`) and the *logic* of the
+operator's attended triage / implementation / commit-grouping commands (rules
+copied here, allowed to diverge; owner decision record 2026-07-13, loop
+fork) — never their GitHub-issue substrate.
 
 Every `tanuki-drive` / `tanuki-ledger` here is the executable under
 `${CLAUDE_PLUGIN_ROOT}/tools/` (not on PATH — invoke by full path).
@@ -143,7 +144,8 @@ breakers, records the start SHA, and snapshots the ledger (exit 3 +
    audit trail.
 2. **Mine.** Ingest events; run extraction + frontier dedupe into the ledger
    (`${CLAUDE_PLUGIN_ROOT}/docs/tanuki-spec.md` §2). Recurrence updates as normal.
-3. **Classify (internal — forked rules copied from /triage-gh; no GitHub).**
+3. **Classify (internal — forked rules copied from the operator's attended
+   triage command; no GitHub).**
    Altitude test: **spec** = alters an invariant others depend on; **story** =
    a plan across files; **direct** = small, self-evident. Bias **toward
    implementation** — `direct`/`story` → work list. **Defer only** when a fix
@@ -163,7 +165,7 @@ breakers, records the start SHA, and snapshots the ledger (exit 3 +
    the worktree; failure → immediate-stop breaker. If none is configured it
    reports skipped and the model verifies manually (always configure one for
    an unattended run).
-6. **Commit** with forked commit-groups logic — intent-scoped commits on the
+6. **Commit** with forked commit-grouping logic — intent-scoped commits on the
    integration branch (no push, no PR). Then `tanuki-loop iter-verify`
    (`--no-patch` when no change was expected) — the four-part integration
    invariant; it records the end SHA and breaks on any violation.

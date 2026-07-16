@@ -7,7 +7,8 @@ freshness). Touches `tools/tanuki-loop` (init, doctor, state),
 `commands/tanuki-loop.md` (the out-of-scope rule). Depends on
 spec-tanuki-loop; refines the host side of tanuki-drive's isolation contract.
 
-Origin: during loop-20260715-121003 (writing-assistant, Phase 2) the operator
+Origin: during loop-20260715-121003 (a private repo of the operator's,
+Phase 2) the operator
 deleted three tracked files in the live host — a repo of their own they were
 concurrently working in — while the loop was running: intentional, normal
 work. The orchestrating session read the live host tree, classified the

@@ -5,5 +5,4 @@ __pycache__/
 .DS_Store
 
 # Owner-personal workflow config (untracked in 3054493) — never re-track.
-.claude/story-sync.json
-.claude/triage-gh.json
+.claude/*.json
