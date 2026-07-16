@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Fixture for the new-target-namespace announcement (issue #50 / F18):
+#   - the first write to a target whose ~/.tanuki/<slug>/ does not exist yet
+#     prints one "creating new target namespace" note (stderr, no prompt);
+#   - writes to an existing target stay silent;
+#   - read commands never announce and never create the namespace.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
+export TANUKI_ROOT="$root"
+
+# --- read command on a missing target: silent, nothing created ----------------
+out="$("$here/tanuki-ledger" --target ghost findings 2>&1)"
+echo "$out" | grep -q "creating new target namespace" \
+  && fail "read command announced creation: [$out]"
+[ -d "$root/ghost" ] && fail "read command created the namespace"
+pass "read command: no announcement, no namespace"
+
+# --- first write to a fresh slug announces once --------------------------------
+out="$("$here/tanuki-ledger" --target fresh upsert-finding \
+  --title "First" --kind papercut --evidence "r001/s#1" 2>&1)"
+echo "$out" | grep -q "creating new target namespace $root/fresh/" \
+  || fail "first write did not announce: [$out]"
+[ "$(echo "$out" | grep -c 'creating new target namespace')" = 1 ] \
+  || fail "announcement printed more than once: [$out]"
+pass "first write announces the new namespace once"
+
+# --- ingest-note as the creating write also announces ---------------------------
+out="$("$here/tanuki-ledger" --target fresh2 ingest-note --text "hi" 2>&1)"
+echo "$out" | grep -q "creating new target namespace $root/fresh2/" \
+  || fail "ingest-note creation not announced: [$out]"
+pass "ingest-note announces when it creates the namespace"
+
+# --- writes to an existing target stay silent -----------------------------------
+out="$("$here/tanuki-ledger" --target fresh upsert-finding \
+  --match F1 --evidence "r002/s#1" 2>&1)"
+echo "$out" | grep -q "creating new target namespace" \
+  && fail "write to existing target announced: [$out]"
+pass "existing target: silent"
+
+echo "ALL OK"
