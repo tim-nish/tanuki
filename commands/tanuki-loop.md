@@ -237,11 +237,19 @@ one.
 
 Do not end at "here is what ran." Present, for one review:
 - the **integration branch diff** (the relocated Human Gate — `git diff
-  <base SHA>..<integration HEAD>`),
+  <base SHA>..<integration HEAD>`). Run it from **either the loop worktree or
+  the operator's normal checkout** — both share one object store and ref
+  namespace, so the integration branch resolves identically from each; reading
+  the diff from the normal checkout is safe and intended, and does **not**
+  touch the worktree. (`git diff` here is read-only — the "never touch the
+  operator's working tree" rule bars *writes*, not reads.)
 - the **morning review queue** (deferred spec / judgment items, each with its
   reason), and
 - the **audit artifact** (per-iteration SHAs, auto-decisions, convergence or
   breaker reason).
+`init` and `finish` both print an `artifacts` block with the absolute paths to
+`state.json` / `audit.md` / `queue.md` (under `~/.tanuki/<target>/loop/<run>/`)
+— take them from there rather than hunting the run dir.
 
 Then, behind the operator's single approval, run **merge-first and idempotent**
 — nothing outward-facing until the merge is a fact:
