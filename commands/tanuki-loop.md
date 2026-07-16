@@ -265,7 +265,18 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
    configured `test_cmd` each iteration runs); abort the gate on failure.
 2. **Merge `integration → main`** — a plain `git merge --no-ff
    <integration-branch>` on `main` (there is no `tanuki-loop merge` subcommand;
-   this one gate step is a hand-run git operation). Use `--no-ff` so the batch
+   this one gate step is a hand-run git operation).
+   **Check out the base branch first, and use its real name.** The merge runs
+   in the operator's normal checkout and lands on whatever branch is currently
+   checked out — `git checkout <base>` before merging, or the batch lands
+   somewhere unintended. The base is **not** assumed to be `main`: take the
+   actual name from `init`'s `base` / `base_upstream` output (it may be
+   `master` or anything else); the `main` in these snippets is a placeholder
+   (F100, F103).
+   **Look at `status`'s `warning` field before approving.** If the loop's
+   commits swept build artifacts (`__pycache__`, `*.pyc`) onto the integration
+   branch, `iter-verify` recorded them and `status` names them — they reach the
+   remote at step 4 unless removed now (F102). Use `--no-ff` so the batch
    lands as one reviewable merge commit that `gate-check` can then confirm is
    reachable; executed by the gate only after approval, never unattended (F12).
 3. **Verify** with `tanuki-loop gate-check` (integration HEAD reachable from
