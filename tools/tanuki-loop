@@ -32,8 +32,10 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
        state written. Checks: required loop config (test_cmd, wall_time_s,
        token_budget, attempt_cap, iterations), base freshness (same guard
        init fails closed on), test_cmd on the base tip (throwaway detached
-       worktree, removed afterward), and policy coverage (which actionable
-       findings have no policy answer and would DEFER — informational).
+       worktree, removed afterward), policy coverage (which actionable
+       findings have no policy answer and would DEFER — informational), and
+       host cloneability (throwaway clone, removed afterward; fatal for
+       hosted targets, a passing note for hostless — spec-host-snapshot).
        Not-ready follows the breaker convention ({"breaker": …} + exit 3)
        but persists nothing — there is no run state to write.
   iter-start                     cap / wall-time / external-modification breakers;
