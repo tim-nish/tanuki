@@ -32,10 +32,15 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
        state written. Checks: required loop config (test_cmd, wall_time_s,
        token_budget, attempt_cap, iterations), base freshness (same guard
        init fails closed on), test_cmd on the base tip (throwaway detached
-       worktree, removed afterward), policy coverage (which actionable
-       findings have no policy answer and would DEFER — informational), and
-       host cloneability (throwaway clone, removed afterward; fatal for
-       hosted targets, a passing note for hostless — spec-host-snapshot).
+       worktree, removed afterward), test-cmd-artifacts (what test_cmd sheds
+       into a pristine checkout — informational; unignored artifacts trip
+       iter-verify's clean-worktree breaker mid-run), policy coverage (which
+       actionable findings have no policy answer and would DEFER —
+       informational), and host cloneability (throwaway clone, removed
+       afterward; fatal for hosted targets, a passing note for hostless —
+       spec-host-snapshot). Every check is reported in EVERY report, ready or
+       not: a check that appears only on success reads as one that materialized
+       out of nowhere (F91).
        Not-ready follows the breaker convention ({"breaker": …} + exit 3)
        but persists nothing — there is no run state to write.
   iter-start                     cap / wall-time / external-modification breakers;
@@ -742,12 +747,23 @@ def cmd_doctor(args):
                        "detail": "no test_cmd to check — configure one first "
                                  "(the loop's test breaker is the headless "
                                  "run's only regression gate)"})
+        # Report the artifact check even when it cannot run. A check that shows
+        # up only in the ready report looks like it appeared from nowhere
+        # between two runs (F91) — the fixed skeleton the dashboard already
+        # follows: degrade to an explicit reason, never a silent omission.
+        checks.append({"check": "test-cmd-artifacts", "ok": True,
+                       "artifacts": None,
+                       "detail": "not checked — needs a test_cmd to run"})
     else:
         tmpdir = tempfile.mkdtemp(prefix="tanuki-doctor-")
         wt = os.path.join(tmpdir, "base")
         rc, err = git(repo, "worktree", "add", "--detach", wt, base_sha)
         if rc != 0:
             shutil.rmtree(tmpdir, ignore_errors=True)
+            checks.append({"check": "test-cmd-artifacts", "ok": True,
+                           "artifacts": None,
+                           "detail": "not checked — the throwaway worktree "
+                                     "could not be created"})
             checks.append({"check": "baseline-test", "ok": False,
                            "detail": "could not create the throwaway "
                                      f"worktree for the baseline run: {err}"})
