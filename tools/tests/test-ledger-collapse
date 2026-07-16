@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Fixture for the named duplicate-collapse message (issue #51 / F70):
+#   - each collapsed identity is listed once — scenario/type, truncated
+#     detail, and the record's new occurrence count;
+#   - the listing is capped with an "and K more" tail;
+#   - an ingest with no duplicates prints no collapse lines.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
+export TANUKI_ROOT="$root"
+L=("$here/tanuki-ledger" --target t)
+
+"${L[@]}" init >/dev/null 2>&1
+
+ev() { printf '{"run":"%s","scenario":"%s","seq":%d,"type":"%s","detail":"%s"}\n' "$@"; }
+
+# --- no duplicates: no collapse lines ------------------------------------------
+ev r001 scenA 1 tool_error "boom A" > "$root/a.jsonl"
+out="$("${L[@]}" ingest "$root/a.jsonl" 2>&1)"
+echo "$out" | grep -q "collapsed:" && fail "collapse line without duplicates: [$out]"
+pass "no duplicates: no collapse lines"
+
+# --- a duplicate is named once, with identity and new count --------------------
+{ ev r002 scenA 1 tool_error "boom A"; ev r003 scenA 7 tool_error "boom A"; } \
+  > "$root/b.jsonl"
+out="$("${L[@]}" ingest "$root/b.jsonl" 2>&1)"
+echo "$out" | grep -q "2 exact duplicate(s) collapsed" \
+  || fail "summary count wrong: [$out]"
+echo "$out" | grep -q 'collapsed: scenA/tool_error "boom A" -> count=3' \
+  || fail "collapsed identity not named with count: [$out]"
+[ "$(echo "$out" | grep -c 'collapsed: scenA/tool_error')" = 1 ] \
+  || fail "same identity listed more than once: [$out]"
+pass "duplicate named once: scenario/type, detail, new count"
+
+# --- long detail is truncated ---------------------------------------------------
+long="$(printf 'x%.0s' $(seq 1 80))"
+{ ev r001 scenB 1 note "$long"; ev r002 scenB 2 note "$long"; } > "$root/c.jsonl"
+out="$("${L[@]}" ingest "$root/c.jsonl" 2>&1)"
+echo "$out" | grep -q "…" || fail "long detail not truncated: [$out]"
+pass "long detail truncated"
+
+# --- cap: at most 10 identities listed, then 'and K more' ----------------------
+: > "$root/d.jsonl"
+for i in $(seq 1 12); do
+  ev r001 "scen$i" 1 note "dup $i" >> "$root/d.jsonl"
+  ev r002 "scen$i" 2 note "dup $i" >> "$root/d.jsonl"
+done
+out="$("${L[@]}" ingest "$root/d.jsonl" 2>&1)"
+[ "$(echo "$out" | grep -c 'collapsed: ')" = 10 ] \
+  || fail "cap not applied (want 10 lines): [$out]"
+echo "$out" | grep -q "and 2 more collapsed" || fail "no 'and K more' tail: [$out]"
+pass "listing capped at 10 with 'and 2 more' tail"
+
+echo "ALL OK"
