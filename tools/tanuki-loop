@@ -201,6 +201,23 @@ def breaker_hint(reason):
                 "(discard the external change, reset to the last verified HEAD) "
                 "or --adopt (accept the current HEAD as the new baseline)")
     if "sequencing violation" in r:
+        # Four distinct violations used to share one hint, which was wrong for
+        # half of them: told to "close the open iteration" when there is no
+        # open iteration, the operator reaches for `rollback`, and THAT failure
+        # overwrites last_breaker and disarms `recover` (F82, and the trigger
+        # for F17). Discriminate on the reason each site already records.
+        if "rollback without an open iteration" in r:
+            return ("nothing to roll back — no iteration is open. If you are "
+                    "trying to clear an external-modification breaker, "
+                    "`rollback` is the wrong tool and running it here "
+                    "overwrites the breaker `recover` needs: use "
+                    "`tanuki-loop --target <t> recover --restore|--adopt`")
+        if "iter-verify without an open iteration" in r:
+            return ("no iteration is open to verify — start one with "
+                    "`iter-start`, or the previous one is already closed")
+        if "record-cycle" in r:
+            return ("close the open iteration with `iter-verify` (or "
+                    "`rollback`) before recording the cycle")
         return "close the open iteration with `iter-verify` or `rollback` first"
     if "iteration cap reached" in r or "wall-time" in r:
         return "the run hit its ceiling — proceed to the morning gate; no more iterations run"
@@ -223,11 +240,33 @@ def breaker(state, reason):
     entry = {"reason": reason, "at": time.strftime("%Y-%m-%d %H:%M:%S")}
     if hint:
         entry["hint"] = hint
-    state["last_breaker"] = entry
+    # A failed remedy attempt must never erase the diagnosis it was aimed at.
+    # `rollback` is the reflex for "undo the bad thing", but on an
+    # external-modification breaker it raises a sequencing violation (no
+    # iteration is open), and overwriting last_breaker with THAT disarmed
+    # `recover`, whose precondition is an external-modification breaker — the
+    # operator had to re-trigger the original breaker to get unstuck (F17).
+    # Keep the original diagnosis; record the attempt alongside it.
+    prev = state.get("last_breaker") or {}
+    guard = ("external modification" in prev.get("reason", "")
+             and not prev.get("recovered")
+             and "sequencing violation" in reason.lower())
+    payload = {"breaker": reason}
+    if guard:
+        state.setdefault("failed_remedies", []).append(entry)
+        note = ("the external-modification breaker from %s is still the "
+                "active one and `recover` remains armed — this attempt did "
+                "not clear it and has not overwritten it"
+                % prev.get("at", "earlier"))
+        payload["preserved_breaker"] = prev.get("reason")
+        payload["note"] = note
+    else:
+        state["last_breaker"] = entry
     save_state(state)
     audit(state, f"BREAKER (immediate stop): {reason}"
-                 + (f" | hint: {hint}" if hint else ""))
-    payload = {"breaker": reason}
+                 + (f" | hint: {hint}" if hint else "")
+                 + (" | last_breaker preserved (external modification still "
+                    "active; recover still armed)" if guard else ""))
     if hint:
         payload["hint"] = hint
     out(payload)
