@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# Fixture for tanuki-ledger's promote transition semantics (story 4.1, F23):
+#   - promote moves each qualifying `open` finding to `proposed` and names
+#     exactly which ids transitioned; non-open findings are never touched;
+#   - promote --dry-run prints the same qualifying listing (with priority)
+#     and leaves ledger.json byte-identical;
+#   - with no qualifiers, the output names the active thresholds and the
+#     ledger is unchanged (with or without --dry-run).
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
+export TANUKI_ROOT="$root"
+L=("$here/tanuki-ledger" --target t)
+ledger="$root/t/ledger.json"
+
+"${L[@]}" init >/dev/null
+
+# F1: chronic (recurrence 3) -> qualifies. F2: single-hit -> stays open.
+# F3: qualifies on breadth but is already accepted -> must never be touched.
+"${L[@]}" upsert-finding --title "Chronic friction" --kind friction \
+  --evidence "r001/scenA#1" >/dev/null
+"${L[@]}" upsert-finding --match F1 --evidence "r002/scenA#2" >/dev/null
+"${L[@]}" upsert-finding --match F1 --evidence "r003/scenA#3" >/dev/null
+"${L[@]}" upsert-finding --title "One-off papercut" --kind papercut \
+  --evidence "r001/scenB#1" >/dev/null
+"${L[@]}" upsert-finding --title "Already accepted" --kind gap \
+  --evidence "r001/scenC#1" >/dev/null
+"${L[@]}" upsert-finding --match F3 --evidence "r002/scenD#1" >/dev/null
+"${L[@]}" set-status --id F3 --status accepted >/dev/null
+
+# --- dry-run: listing with priority, byte-identical ledger --------------------
+before="$(sha256sum "$ledger")"
+dry="$("${L[@]}" promote --min-recurrence 3 --min-scenarios 2 --dry-run 2>&1)"
+after="$(sha256sum "$ledger")"
+[ "$before" = "$after" ] || fail "--dry-run changed ledger.json"
+echo "$dry" | grep -q "dry-run" || fail "--dry-run not announced: [$dry]"
+echo "$dry" | grep -q '"id": "F1"' || fail "--dry-run listing misses F1"
+echo "$dry" | grep -q '"priority"' || fail "--dry-run listing lacks priority"
+echo "$dry" | grep -q '"id": "F3"' && fail "--dry-run listed non-open F3"
+pass "--dry-run lists qualifiers with priority, ledger byte-identical"
+
+# --- promote: open qualifiers transition, ids named, others untouched ---------
+out="$("${L[@]}" promote --min-recurrence 3 --min-scenarios 2 2>&1)"
+echo "$out" | grep -q "promoted -> proposed: F1" \
+  || fail "transitioned ids not named: [$out]"
+st="$("${L[@]}" findings | python3 -c '
+import json,sys
+fs = {f["id"]: f["status"] for f in json.load(sys.stdin)}
+print(fs["F1"], fs["F2"], fs["F3"])
+')"
+[ "$st" = "proposed open accepted" ] \
+  || fail "statuses after promote wrong: [$st]"
+pass "promote: F1 -> proposed, F2 stays open, accepted F3 untouched"
+
+# --- idempotence: a proposed finding does not re-qualify ----------------------
+again="$("${L[@]}" promote --min-recurrence 3 --min-scenarios 2 2>&1)"
+echo "$again" | grep -q "no open finding met the promotion bar" \
+  || fail "re-promote should find no open qualifier: [$again]"
+pass "re-promote is a no-op (proposed findings are not re-promoted)"
+
+# --- no qualifiers: thresholds named, ledger unchanged -------------------------
+before="$(sha256sum "$ledger")"
+none="$("${L[@]}" promote --min-recurrence 99 --min-scenarios 99 2>&1)"
+after="$(sha256sum "$ledger")"
+[ "$before" = "$after" ] || fail "no-qualifier promote changed ledger.json"
+echo "$none" | grep -q "recurrence >= 99 OR scenarios >= 99" \
+  || fail "active thresholds not named on empty result: [$none]"
+pass "no qualifiers: thresholds named, ledger unchanged"
+
+# --- --help carries the contract (F68 + transition wording) --------------------
+help="$("${L[@]}" promote --help 2>&1)"
+echo "$help" | grep -qi "dry-run" || fail "--help misses --dry-run"
+echo "$help" | grep -q "default: 3" || fail "--help misses default thresholds"
+echo "$help" | grep -qi "never mutates" && fail "--help still claims preview-only"
+pass "--help documents transition semantics, --dry-run, and defaults"
+
+echo "ALL OK"
