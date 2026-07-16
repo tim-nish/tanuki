@@ -2016,7 +2016,16 @@ def slug_target(value):
 
 
 def main():
-    p = argparse.ArgumentParser()
+    # description=__doc__ is load-bearing, not decoration: the subcommand
+    # table, the breaker triggers and their remedies, the sequencing rules and
+    # the recovery modes all live in the module docstring. Without this, none
+    # of it reached --help and the only way to read any of it was to grep the
+    # file — so every "documented in the docstring" fix was unreachable to the
+    # operator it was written for (F98). Raw formatter: the docstring is a
+    # hand-aligned table and argparse would otherwise reflow it to mush.
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     # --target is a global option and must precede the subcommand, e.g.
     # `tanuki-loop --target foo iter-start` (F40); it is a namespace slug, not a
     # path (F52) — state lives under $TANUKI_ROOT/<target>/.

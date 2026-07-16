@@ -320,7 +320,21 @@ def status_filter(value):
 def cmd_findings(args, ledger):
     rows = ledger["findings"]
     if args.status:
-        rows = [f for f in rows if f["status"] == args.status]
+        # `compacted` is a DERIVED bucket, not a stored status: a tombstoned
+        # finding keeps its terminal status (usually `accepted`) and carries
+        # tombstone:true. The status view names that bucket on screen, so it is
+        # the word an operator naturally reaches for here — and it used to
+        # return [] silently, teaching a vocabulary its sibling rejected (F99).
+        if args.status == "compacted":
+            rows = [f for f in rows if f.get("tombstone")]
+        elif args.status in STATUSES:
+            rows = [f for f in rows if f["status"] == args.status
+                    and not f.get("tombstone")]
+        else:
+            print("unknown --status %r; valid: %s"
+                  % (args.status, " | ".join(STATUSES + ("compacted",))),
+                  file=sys.stderr)
+            sys.exit(2)
     print(json.dumps(with_priority(rows), indent=2, ensure_ascii=False))
 
 
