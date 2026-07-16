@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# Fixture for the coverage-diff block (spec-tanuki-trajectory §2):
+# `tanuki-scheduler history --scenarios F` diffs decision points observed in
+# typed trajectory events against the matrix's declared axes/covers.
+#
+# Asserts:
+#   1. an observed point absent from axes surfaces as a charter seed with
+#      scenario/run counts, values seen, and run/scenario#seq evidence;
+#   2. declared-but-never-observed values render as one pointer line deferring
+#      to the lifecycle states, and scenarios executed with no typed events
+#      get the pre-capture visibility note;
+#   3. degradations: no axes -> observed-point list only (after the existing
+#      no-axes pointer); no typed events -> the single explanatory line;
+#   4. plain history (no --scenarios) is unchanged — no coverage-diff block;
+#   5. the tool never writes: the matrix and the events files are byte-
+#      identical after rendering.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+sched="$here/tanuki-scheduler"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+jget() { python3 -c "import json,sys;print(json.load(sys.stdin)$1)"; }
+S=("$sched" --target t)
+
+# --- fixture: matrix with axes, one typed run, one pre-capture scenario -------
+cat > "$tmp/m.json" <<'EOF'
+{"axes": {"framework": {"values": ["F1", "F2"]}},
+ "scenarios": [
+   {"id": "s1", "charter": "c", "prompt": "p", "covers": {"framework": ["F1"]}},
+   {"id": "s2", "charter": "c", "prompt": "p", "covers": {"framework": ["F2"]}},
+   {"id": "s3", "charter": "c", "prompt": "p"}]}
+EOF
+run="$TANUKI_ROOT/t/events/20260716-000000"
+mkdir -p "$run"
+cat > "$run/manifest.json" <<'EOF'
+{"run": "20260716-000000", "completed_at": "2026-07-16",
+ "results": [{"scenario": "s1", "events": 4, "status": "ok"},
+             {"scenario": "s3", "events": 1, "status": "ok"}]}
+EOF
+cat > "$run/s1.events.jsonl" <<'EOF'
+{"run": "20260716-000000", "scenario": "s1", "seq": 1, "type": "user_choice", "detail": "TANUKI-CHOICE point=framework selected=F1", "evidence": "s1.raw.jsonl#L1", "point": "framework", "selected": "F1"}
+{"run": "20260716-000000", "scenario": "s1", "seq": 2, "type": "user_choice", "detail": "TANUKI-CHOICE point=doctor-entry selected=--help", "evidence": "s1.raw.jsonl#L2", "point": "doctor-entry", "selected": "--help"}
+{"run": "20260716-000000", "scenario": "s1", "seq": 3, "type": "result", "detail": "{}", "evidence": "s1.raw.jsonl#3"}
+{"run": "20260716-000000", "scenario": "s1", "seq": 4, "type": "outcome", "detail": "done", "evidence": "s1.raw.jsonl#L4", "disposition": "success"}
+EOF
+cat > "$run/s3.events.jsonl" <<'EOF'
+{"run": "20260716-000000", "scenario": "s3", "seq": 1, "type": "result", "detail": "{}", "evidence": "s3.raw.jsonl#1"}
+EOF
+m_sum="$(md5sum "$tmp/m.json" | cut -d' ' -f1)"
+e_sum="$(md5sum "$run/s1.events.jsonl" | cut -d' ' -f1)"
+
+# --- 1+2: seed, pointer line, pre-capture note (JSON + text) -------------------
+out_json="$("${S[@]}" history --scenarios "$tmp/m.json" --json)"
+[ "$(echo "$out_json" | jget '["coverage_diff"]["undeclared"]["doctor-entry"]["runs"]')" = "1" ] \
+  || fail "undeclared point doctor-entry must appear with 1 run"
+echo "$out_json" | jget '["coverage_diff"]["undeclared"]["doctor-entry"]["evidence"]' \
+  | grep -q "20260716-000000/s1#2" || fail "evidence must be run/scenario#seq"
+echo "$out_json" | jget '["coverage_diff"]["undeclared"]' \
+  | grep -q "framework" && fail "declared axis must not be a seed" || true
+echo "$out_json" | jget '["coverage_diff"]["declared_never_observed"]' \
+  | grep -q "framework=F2" || fail "authored F2 must be declared-never-observed"
+[ "$(echo "$out_json" | jget '["coverage_diff"]["pre_capture_scenarios"]')" = "['s3']" ] \
+  || fail "s3 executed without typed events must be pre-capture"
+pass "JSON: seed for undeclared point, lifecycle deferral, pre-capture list"
+
+out_txt="$("${S[@]}" history --scenarios "$tmp/m.json")"
+echo "$out_txt" | grep -q "coverage diff (observed vs declared):" || fail "block header"
+echo "$out_txt" | grep -q "doctor-entry — seen in 1 scenario(s) (s1), 1 run(s); values seen: --help" \
+  || fail "seed line shape"
+echo "$out_txt" | grep -q -- "-> charter seed (plan-gated)" || fail "plan-gate marker"
+echo "$out_txt" | grep -q "declared but never observed: framework=F2" || fail "pointer line"
+echo "$out_txt" | grep -q "(1 scenario(s) executed before trajectory capture — observations incomplete)" \
+  || fail "pre-capture note"
+pass "text: block renders after coverage/debt with seed + pointer + note"
+
+# --- 3a: no axes -> observed list after the existing pointer -------------------
+cat > "$tmp/noaxes.json" <<'EOF'
+{"scenarios": [{"id": "s1", "charter": "c", "prompt": "p"}]}
+EOF
+out_na="$("${S[@]}" history --scenarios "$tmp/noaxes.json")"
+echo "$out_na" | grep -q "(no axes declared" || fail "existing no-axes pointer must stay"
+echo "$out_na" | grep -q "observed: doctor-entry" || fail "no-axes observed list"
+echo "$out_na" | grep -q "charter seed" && fail "no-axes mode must not print seeds" || true
+pass "degradation: no axes -> observed-point list only"
+
+# --- 3b: no typed events -> single explanatory line ---------------------------
+rm "$run/s1.events.jsonl"
+out_nt="$("${S[@]}" history --scenarios "$tmp/m.json")"
+echo "$out_nt" | grep -q "no trajectory events recorded — coverage diff needs runs made after the marker grammar landed" \
+  || fail "no-typed-events line"
+pass "degradation: no typed events -> one line"
+cat > "$run/s1.events.jsonl" <<'EOF'
+{"run": "20260716-000000", "scenario": "s1", "seq": 2, "type": "user_choice", "detail": "TANUKI-CHOICE point=doctor-entry selected=--help", "evidence": "s1.raw.jsonl#L2", "point": "doctor-entry", "selected": "--help"}
+EOF
+
+# --- 4: plain history untouched -------------------------------------------------
+"${S[@]}" history | grep -q "coverage diff" && fail "plain history must not carry the block" || true
+pass "plain history unchanged without --scenarios"
+
+# --- 5: renderer writes nothing --------------------------------------------------
+"${S[@]}" history --scenarios "$tmp/m.json" >/dev/null
+[ "$(md5sum "$tmp/m.json" | cut -d' ' -f1)" = "$m_sum" ] || fail "matrix modified"
+pass "renderer writes nothing (matrix byte-identical)"
+
+echo "all checks passed"
