@@ -248,8 +248,10 @@ scenario whose status is not `ok`, and any `plugin_clone_dirty: true`
 
 ## 3. Consolidate (Consolidator — you, then the human gate)
 
-1. `tanuki-ledger --target <target> promote` lists findings past the bar
-   (chronic ≥3 recurrences, or breadth ≥2 scenarios).
+1. `tanuki-ledger --target <target> promote` moves findings past the bar
+   (chronic ≥3 recurrences, or breadth ≥2 scenarios) to `proposed` and lists
+   them; use `--dry-run` when you only need the listing. No separate
+   `set-status` call is part of promotion.
 2. **Policy advisory (opt-in — specs/spec-policy-advisory).** Run
    `tanuki-ledger --target <target> policy-surface`. `{"configured": false}`
    or `"available": false` → skip this step entirely. Otherwise judge each
@@ -283,7 +285,6 @@ scenario whose status is not `ok`, and any `plugin_clone_dirty: true`
    - **consulted** (only when the brief carries any `policy: tension` line):
      one closing line naming which allowlisted policy files/lines were read
      and which applied — the audit trail for the advisory pass.
-4. Mark the promoted findings `set-status --id … --status proposed`.
 
 ## 4. Decide (the human gate — part of the run, not homework)
 
@@ -292,7 +293,9 @@ Do not end at "here is the report." Present the brief's proposals in-session
 `policy: tension` line as context when step 3.2 produced one — the flag never
 pre-selects a disposition, and a policy-motivated dismissal is recorded like
 any other), then walk them top-down with AskUserQuestion, up to 4 per round,
-one disposition each:
+one disposition each — **never with a pre-selected default**: a disposition
+is a multi-outcome decision, and every `set-status` write and `gh` call in
+this pass is run by the command, never typed by the user:
 - **accept** → `set-status --id … --status accepted`; then offer — as a
   separate, explicit confirmation — to run the prepared `gh issue create` in
   the target repo. Accepted findings keep their recurrence tracking: the next
@@ -320,8 +323,16 @@ one disposition each:
 - **defer** → stays `proposed`; `tanuki-ledger status` and `/tanuki <target>
   --status` keep it visible until decided.
 
-Close with: the run delta, dispositions taken, what remains `proposed`, the
-brief path, and total duration/turns (never dollars).
+After the proposals, offer the brief's **Watching** list the same way: the
+promotion bar gates surfacing, not permission, so the user may **accept any
+below-bar finding right there** (same accept path — `set-status`, then the
+separately-confirmed filing offer). Don't walk every watching item one by
+one; present the list once and act only on the ones the user picks.
+
+Close with: the run delta, dispositions taken per finding (with the issue
+URL for each one filed), what remains `proposed`, the brief path, and total
+duration/turns (never dollars). The pass is complete only if the user never
+had to type a `tanuki-ledger` or `gh` command themselves.
 
 ## Ingest mode (`--ingest "<feedback>"`) — human feedback is one more event source
 
