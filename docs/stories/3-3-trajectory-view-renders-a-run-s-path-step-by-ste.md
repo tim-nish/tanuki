@@ -2,8 +2,9 @@
 story: 3.3
 epic: 3
 title: "Story 3.3: Trajectory view renders a run's path step by step"
-status: ready
+status: published
 depends_on: ["3.1"]
+issue: 42
 ---
 
 # Story 3.3: Trajectory view renders a run's path step by step

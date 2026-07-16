@@ -2,7 +2,8 @@
 story: 3.1
 epic: 3
 title: "Story 3.1: Typed trajectory events captured from every drive"
-status: ready
+status: published
+issue: 40
 ---
 
 # Story 3.1: Typed trajectory events captured from every drive

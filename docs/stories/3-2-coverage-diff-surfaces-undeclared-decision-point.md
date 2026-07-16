@@ -2,8 +2,9 @@
 story: 3.2
 epic: 3
 title: "Story 3.2: Coverage diff surfaces undeclared decision points as charter seeds"
-status: ready
+status: published
 depends_on: ["3.1"]
+issue: 41
 ---
 
 # Story 3.2: Coverage diff surfaces undeclared decision points as charter seeds
