@@ -236,13 +236,21 @@ one.
 ## 2. Morning gate (attended — invariant in every phase)
 
 Do not end at "here is what ran." Present, for one review:
-- the **integration branch diff** (the relocated Human Gate — `git diff
-  <base SHA>..<integration HEAD>`). Run it from **either the loop worktree or
-  the operator's normal checkout** — both share one object store and ref
-  namespace, so the integration branch resolves identically from each; reading
-  the diff from the normal checkout is safe and intended, and does **not**
-  touch the worktree. (`git diff` here is read-only — the "never touch the
-  operator's working tree" rule bars *writes*, not reads.)
+- the **integration branch diff** (the relocated Human Gate). Copy-pasteable,
+  using the `base_sha` and `integration_branch` that `init` printed:
+  ```
+  git diff <base_sha>..<integration_branch>        # two dots — what the loop wrote
+  git log --oneline <base_sha>..<integration_branch>
+  ```
+  Use **two dots**, not three: `A..B` is "what B has that A doesn't" — exactly
+  the loop's work. `A...B` diffs against the merge-base instead, which silently
+  hides anything that landed on `main` since the run started (F95).
+  Run it from **either the loop worktree or the operator's normal checkout** —
+  both share one object store and ref namespace, so the integration branch
+  resolves identically from each; reading the diff from the normal checkout is
+  safe and intended, and does **not** touch the worktree. (`git diff` here is
+  read-only — the "never touch the operator's working tree" rule bars *writes*,
+  not reads.)
 - the **morning review queue** (deferred spec / judgment items, each with its
   reason), and
 - the **audit artifact** (per-iteration SHAs, auto-decisions, convergence or
@@ -298,6 +306,13 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
    and `skipped` (e.g. a branch still checked out in a worktree — "remove it
    first"). The next `init` for the target is the backstop. No branch is left
    to accumulate until an unrelated tool collects it.
+   **Order matters, and this is the call that actually deletes the branch.**
+   The run's *first* `finish` (the overnight close, `--reason cap` or
+   `converged`) always reports the integration branch under `skipped` — the
+   worktree is still checked out, because you need it to read the diff in step
+   1. That is expected, not a fault. Removing the worktree first and running
+   `finish` again here is what performs that deferred deletion; you can see it
+   land in `branch_cleanup.deleted` (F96, F9).
 
 ## Monitoring (the operator's window)
 
