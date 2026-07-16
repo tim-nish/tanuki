@@ -272,8 +272,16 @@ def cleanup_merged_integration_branches(repo, base, target):
     branches = [b for b in refs.splitlines()
                 if b.startswith(prefix)] if rc == 0 else []
     rc_w, wt = git(repo, "worktree", "list", "--porcelain")
-    checked_out = {ln[len("branch "):].replace("refs/heads/", "")
-                   for ln in wt.splitlines() if ln.startswith("branch ")}
+    # Track which worktree holds each branch, so the skip reason can name the
+    # exact `git worktree remove` command instead of leaving the operator to
+    # infer it (F9) — the porcelain lists `worktree <path>` before its `branch`.
+    checked_out = {}
+    _wt_path = None
+    for ln in wt.splitlines():
+        if ln.startswith("worktree "):
+            _wt_path = ln[len("worktree "):]
+        elif ln.startswith("branch "):
+            checked_out[ln[len("branch "):].replace("refs/heads/", "")] = _wt_path
     deleted, kept, skipped = [], [], []
     # Why each branch was skipped, so the status isn't opaque on-screen (F9):
     # a live worktree can't be deleted, and a merged branch whose delete failed
@@ -282,7 +290,12 @@ def cleanup_merged_integration_branches(repo, base, target):
     for b in branches:
         if b in checked_out:
             skipped.append(b)                       # can't delete a live branch
-            skipped_reasons[b] = "checked out in a worktree — remove it first"
+            _p = checked_out[b]
+            skipped_reasons[b] = (
+                "checked out in a worktree — remove it first: "
+                "`git worktree remove %s`, then re-run `tanuki-loop --target "
+                "%s finish --reason <reason>` (or the next `init` will collect "
+                "it)" % (_p or "<path>", target))
         elif git(repo, "merge-base", "--is-ancestor", b, base)[0] == 0:
             if git(repo, "branch", "-D", b)[0] == 0:
                 deleted.append(b)
