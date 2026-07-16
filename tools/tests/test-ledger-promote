@@ -37,16 +37,17 @@ before="$(sha256sum "$ledger")"
 dry="$("${L[@]}" promote --min-recurrence 3 --min-scenarios 2 --dry-run 2>&1)"
 after="$(sha256sum "$ledger")"
 [ "$before" = "$after" ] || fail "--dry-run changed ledger.json"
-echo "$dry" | grep -q "dry-run" || fail "--dry-run not announced: [$dry]"
+echo "$dry" | grep -q "dry-run (recurrence >= 3 OR scenarios >= 2)" \
+  || fail "--dry-run missing announcement or active thresholds: [$dry]"
 echo "$dry" | grep -q '"id": "F1"' || fail "--dry-run listing misses F1"
 echo "$dry" | grep -q '"priority"' || fail "--dry-run listing lacks priority"
 echo "$dry" | grep -q '"id": "F3"' && fail "--dry-run listed non-open F3"
 pass "--dry-run lists qualifiers with priority, ledger byte-identical"
 
-# --- promote: open qualifiers transition, ids named, others untouched ---------
+# --- promote: open qualifiers transition, ids + thresholds named --------------
 out="$("${L[@]}" promote --min-recurrence 3 --min-scenarios 2 2>&1)"
-echo "$out" | grep -q "promoted -> proposed: F1" \
-  || fail "transitioned ids not named: [$out]"
+echo "$out" | grep -q "promoted -> proposed (recurrence >= 3 OR scenarios >= 2): F1" \
+  || fail "transitioned ids / active thresholds not named: [$out]"
 st="$("${L[@]}" findings | python3 -c '
 import json,sys
 fs = {f["id"]: f["status"] for f in json.load(sys.stdin)}
