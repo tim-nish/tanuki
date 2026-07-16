@@ -725,6 +725,15 @@ def cmd_compact(args, ledger):
             "status": status, "recurrence": f.get("recurrence", 1),
             "scenarios": [], "evidence": [],
             "resolution": resolution, "tombstone": True,
+            # Empty scenarios/evidence is the POINT of a tombstone (the ledger
+            # growth policy's bounded frontier), but a reader seeing the arrays
+            # cleared assumes data loss (F85). Say it in the record itself.
+            "tombstone_note": ("compacted to a one-line tombstone: evidence "
+                               "and scenarios are intentionally dropped to "
+                               "bound ledger growth — the id/title/resolution "
+                               "are kept so this finding can never resurface "
+                               "as new. Original detail remains in the run's "
+                               "events under ~/.tanuki/<target>/events/."),
         }
         compacted.append((f["id"], resolution))
 
@@ -732,7 +741,10 @@ def cmd_compact(args, ledger):
     if compacted:
         for fid, res in compacted:
             print(f"tombstoned {fid} ({res})")
-        print(f"compacted {len(compacted)} finding(s) unseen for >= {n} run(s)")
+        print(f"compacted {len(compacted)} finding(s) unseen for >= {n} run(s); "
+              f"each collapsed to a one-line tombstone — evidence/scenarios "
+              f"intentionally dropped (bounded growth), id/title/resolution "
+              f"kept so they never resurface")
     else:
         print(f"nothing to compact (threshold: unseen for >= {n} run(s))")
 
