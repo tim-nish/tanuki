@@ -119,7 +119,10 @@ propagate here.
 GitHub artifacts exist only *after* the morning approval (see "Morning gate").
 This honors the "ledger-only overnight" decision: the ledger is authoritative
 during the run; the outward-facing record is written once, describing what
-actually landed.
+actually landed. One scoped exception: on a PR-protected target the run's
+close delivers a **Draft PR** (see "PR-protected targets") — review material
+awaiting the approval, not a record asserting its outcome; issues and the
+merge itself still exist only after the operator ratifies.
 
 ## Deterministic substrate (`tools/tanuki-loop`) vs. judgment
 
@@ -568,6 +571,57 @@ If the gate dies after the push, re-running resumes at step 5 and creates only
 the missing issues. The GitHub history is a clean record of resolved problems,
 not a transcript of the overnight search.
 
+## PR-protected targets (`gate: "pr"`)
+
+Some base branches refuse direct pushes (a required-check branch protection);
+there the local-merge + `gate-push` sequence above cannot run at all. For such
+a target the scenarios `loop` block sets `"gate": "pr"` (default `"merge"` —
+everything above unchanged), and the gate reshapes around the forge:
+
+**Delivery, then ratification — two separated facts.** After a successful
+unattended run closes (`finish --reason cap|converged`) and the final tests
+pass on the integration HEAD, `tanuki-loop gate-pr` pushes the **integration
+branch** (never the base, never forced) and opens **one Draft PR**
+`integration → base`. Opening that Draft PR is the **delivery of review
+material** — the mechanical act of placing the diff, commit groups, and run
+summary where the operator reviews. It is **not ratification**, exactly as
+`finish --reason cap` is not: the Human Gate relocates once more, from a
+terminal approval to **PR approval + merge on the forge**. The loop **never
+auto-merges** — `gate-pr` contains no merge call, and no phase adds one.
+
+Because the Draft PR is review material rather than a decision, opening it
+does not violate "no outward-facing artifacts overnight": that rule's target
+was always *records that assert conclusions* (issues stating what landed,
+merges into `main`). A draft marked as awaiting review asserts nothing.
+
+Mechanics, each mechanically enforced by the tool (exit 3 + remedy, nothing
+mutated, on violation):
+- **Preconditions.** `gate-pr` refuses unless the run is finished
+  (`cap`/`converged`) and `tanuki-loop test` recorded a pass against the
+  *current* integration HEAD (the recorded SHA must match — call order is not
+  trusted). `doctor` validates `gh` availability up front for `pr`-mode
+  targets (`gate-pr-tooling` check).
+- **Idempotent.** An existing PR for the head branch — recorded in
+  `state.json` or found on the forge (covering a crash between create and
+  record) — is reused and reported, never duplicated.
+- **Failure leaves everything intact.** A failed push (never forced) or a
+  failed PR create exits 3 with the local integration branch, worktree, and
+  run state untouched; re-running `gate-pr` resumes.
+- **Ratification is verified, not assumed.** `finish --reason gate-ratified`
+  refuses until (a) the PR's forge state is MERGED and (b) the local base
+  contains the merge commit (falling back to the delivered head when the
+  forge omits it). Cleanup — worktree removal, integration-branch deletion —
+  therefore cannot run while an open PR still points at the branch, and
+  cannot run against a local base that has not synchronized the merge.
+- **Merge method.** The intended method is a merge commit, so the loop's
+  intent-scoped commit groups stay visible in the base's history; the PR body
+  states this. (The verification above tolerates squash/rebase via the forge's
+  merge-commit oid, but the grouped history is then lost — an operator choice,
+  not a loop one.)
+
+Issue materialization (steps 5–6) is unchanged where a tracker is configured;
+the PR replaces only the merge/push steps (2–4).
+
 **Branch cleanup has an owner.** Gate step 7 removes the worktree; the deferred
 "delete the integration branch once the merge is confirmed" is then executed by
 `tanuki-loop finish` (with the next `init` for the target as backstop): it
@@ -607,7 +661,12 @@ and removing supervision is the only change between phases. The morning
 - `integration → main` runs only after explicit approval, merge-first and
   idempotent; the base is **pushed to its remote before any issue is
   materialized** (`gate-push`, never force over a diverged remote); deferred
-  judgment waits for the morning, never auto-decided.
+  judgment waits for the morning, never auto-decided. On a PR-protected
+  target (`gate: "pr"`) the approval takes the form of **PR approval + merge
+  on the forge**: the run's close delivers one Draft PR (`gate-pr` — review
+  material, not ratification), the loop **never auto-merges**, and
+  `finish --reason gate-ratified` refuses until the PR is merged and the
+  local base contains the merge.
 - Merged integration branches are cleaned up by `finish` (backstop: the next
   `init`); an unmerged tip is never deleted. An unmerged tip is therefore a
   **debt with an owner**: `unresolved` makes it visible and `reconcile` pays
