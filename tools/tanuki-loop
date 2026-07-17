@@ -62,6 +62,15 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
   gate-push                      push the base branch to its remote (after gate-check,
                                  before materializing issues); refuses a diverged
                                  remote rather than force-pushing
+  gate-pr [--title T] [--body-file F]   PR-protected targets: push the
+                                 INTEGRATION branch and open one Draft PR
+                                 against the base — the delivery of review
+                                 material, not ratification. Idempotent (an
+                                 existing PR is reused); never merges; any
+                                 failure leaves the local branch intact.
+                                 `finish --reason gate-ratified` then refuses
+                                 until the PR is merged and the local base
+                                 contains the merge
   issue-get --key K              print the issue already materialized for a problem key
   issue-put --key K --issue N    record a materialized issue (idempotency)
   policy --finding F --decision "…"   record an iteration-1 judgment answer as
@@ -670,7 +679,27 @@ def resolve_loop_config(args):
         else loopcfg.get("token_budget"),
         "attempt_cap": args.attempt_cap if args.attempt_cap is not None
         else loopcfg.get("attempt_cap"),
+        # "merge" (default): the operator merges locally and gate-push pushes
+        # the base. "pr": the base branch is push-protected, so the run's close
+        # delivers a Draft PR instead (gate-pr) and the Human Gate moves to PR
+        # approval + merge on the forge (spec-tanuki-loop "PR-protected
+        # targets").
+        "gate": getattr(args, "gate", None) or loopcfg.get("gate") or "merge",
     }
+
+
+def gh(repo, *args):
+    """Run the GitHub CLI in repo. Returns (rc, text): stdout on success,
+    stderr (falling back to stdout) on failure; rc 127 when gh is absent —
+    callers refuse with a remedy rather than tracebacking on a host without
+    the forge tooling."""
+    try:
+        r = subprocess.run(["gh", *args], cwd=repo,
+                           capture_output=True, text=True)
+    except FileNotFoundError:
+        return 127, "`gh` (GitHub CLI) not found on PATH"
+    text = r.stdout if r.returncode == 0 else (r.stderr or r.stdout)
+    return r.returncode, (text or "").strip()
 
 
 def resolve_base(repo, base):
@@ -783,6 +812,8 @@ def cmd_init(args):
     wall = cfg["wall_time_s"]
     tokens = cfg["token_budget"]
     attempt_cap = cfg["attempt_cap"] if cfg["attempt_cap"] is not None else 4
+    if cfg["gate"] not in ("merge", "pr"):
+        die(f"unknown gate mode '{cfg['gate']}' — one of: merge, pr")
     base, base_sha = resolve_base(repo, args.base)
     # Staleness guard (issue #2): never silently dogfood code older than the
     # remote. Best-effort fetch, then FAIL CLOSED if <base> is behind its
@@ -856,6 +887,7 @@ def cmd_init(args):
         "base": base, "base_sha": base_sha,
         "integration_branch": integration, "worktree": worktree,
         "phase": args.phase, "cap": cap, "attempt_cap": attempt_cap,
+        "gate_mode": cfg["gate"],
         "wall_start": time.time(), "wall_limit_s": wall,
         "token_budget": tokens, "test_cmd": test_cmd,
         "iterations": [], "attempts": {}, "frozen": [], "deferred": [],
@@ -1160,6 +1192,26 @@ def cmd_doctor(args):
                            "detail": str(e)})
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+    # PR-gate tooling (spec-tanuki-loop "PR-protected targets"): a target whose
+    # gate mode is "pr" delivers its review material via `gh` — validate that
+    # up front rather than discovering it at gate-pr time, after a whole
+    # unattended run. Merge-mode targets skip this with a note (the fixed
+    # skeleton: degrade to an explicit reason, never a silent omission).
+    if cfg["gate"] == "pr":
+        gh_path = shutil.which("gh")
+        checks.append({"check": "gate-pr-tooling", "ok": bool(gh_path),
+                       "detail": (f"gate mode 'pr': `gh` found at {gh_path}"
+                                  if gh_path else
+                                  "gate mode 'pr' but `gh` (GitHub CLI) is "
+                                  "not on PATH — gate-pr cannot deliver the "
+                                  "Draft PR; install/auth gh or switch the "
+                                  "loop block's \"gate\" to \"merge\"")})
+    else:
+        checks.append({"check": "gate-pr-tooling", "ok": True,
+                       "detail": "gate mode 'merge' — no forge tooling "
+                                 "needed; the morning gate merges locally "
+                                 "and gate-push pushes the base"})
 
     failed = [c["check"] for c in checks if not c["ok"]]
     report = {"phase": args.phase, "target": args.target, "base": base,
@@ -1491,6 +1543,13 @@ def cmd_test(args):
         breaker(state, f"test failure (exit {r.returncode}) running `{cmd}`"
                        + (f": …{tail}" if tail else ""))
     audit(state, "test: passed")
+    # Record the pass against the exact SHA it validated, so gate-pr can
+    # require "final tests passed on the CURRENT integration HEAD" as a
+    # mechanical precondition rather than trusting call order.
+    rc_h, head = git(state["worktree"], "rev-parse", "HEAD")
+    state["last_test"] = {"ok": True, "sha": head if rc_h == 0 else None,
+                          "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    save_state(state)
     # Echo the command that passed (F67).
     out({"ok": True, "cmd": cmd})
 
@@ -1685,6 +1744,135 @@ def cmd_gate_push(args):
     out({"pushed": True, "remote": remote, "ref": upstream, "base_sha": head})
 
 
+def cmd_gate_pr(args):
+    """Deliver a finished run's review material as ONE Draft PR
+    (spec-tanuki-loop "PR-protected targets"). For a base branch that refuses
+    direct pushes, the local-merge + gate-push gate cannot run; instead the
+    run's close pushes the INTEGRATION branch and opens a single Draft PR
+    integration -> base.
+
+    The Draft PR is the DELIVERY OF REVIEW MATERIAL, not ratification: the
+    Human Gate relocates to PR approval + merge on the forge, and this tool
+    NEVER merges — there is deliberately no merge call anywhere in it.
+
+    Preconditions (all mechanical, all refuse with exit 3 and a remedy):
+      - the run is finished (cap | converged) — a live run has no reviewed
+        batch to deliver;
+      - final tests passed on the CURRENT integration HEAD (`tanuki-loop test`
+        records the SHA it validated; a stale or missing pass refuses);
+      - `gh` is available.
+    Failure ANYWHERE leaves the local integration branch and run state
+    intact: the push is never forced, and a failed `gh pr create` after a
+    successful push is re-runnable — the whole command is idempotent (an
+    existing PR for the head branch, recorded in state or found on the forge,
+    is reused and reported, never duplicated)."""
+    state = load_state(args.target, args.run)
+    repo, base, integ = state["loop_repo"], state["base"], \
+        state["integration_branch"]
+    fin = state.get("finished")
+    if not fin or fin.get("reason") not in ("cap", "converged"):
+        out({"created": False,
+             "hint": "gate-pr delivers a FINISHED run's review material — "
+                     "close the run first (`finish --reason cap|converged`); "
+                     "a run already gate-ratified has nothing left to "
+                     "deliver"})
+        sys.exit(3)
+    rc, head = git(repo, "rev-parse", integ)
+    if rc != 0:
+        die(f"integration branch '{integ}' does not resolve — was it deleted "
+            "outside the loop?")
+    lt = state.get("last_test") or {}
+    if not (lt.get("ok") and lt.get("sha") == head):
+        out({"created": False, "last_test": lt or None,
+             "integration_head": head,
+             "hint": "final tests have not passed on the current integration "
+                     "HEAD — run `tanuki-loop test` (it records the SHA it "
+                     "validated), then re-run gate-pr"})
+        sys.exit(3)
+    if shutil.which("gh") is None:
+        out({"created": False,
+             "hint": "`gh` (GitHub CLI) not found on PATH — install/auth it, "
+                     "or use the merge gate (gate-push) on a direct-push "
+                     "target"})
+        sys.exit(3)
+    rc_r, remote = git(repo, "config", "--get", f"branch.{base}.remote")
+    remote = remote if rc_r == 0 and remote else "origin"
+    # Never force: a rejected push (remote branch moved — someone else touched
+    # the loop's namespace) refuses and reports; local state is untouched.
+    rc_p, err = git(repo, "push", remote, integ)
+    if rc_p != 0:
+        audit(state, f"gate-pr: push of '{integ}' to '{remote}' failed "
+                     f"(not forced): {err}")
+        out({"created": False, "pushed": False,
+             "hint": f"push of '{integ}' to '{remote}' failed (not forced; "
+                     "the local branch is intact): " + err})
+        sys.exit(3)
+    # Idempotency, two layers: the PR this run recorded, else the forge's own
+    # answer for this head branch (covers a crash between create and record).
+    pr, created = state.get("gate_pr"), False
+    if not pr:
+        rc_l, o = gh(repo, "pr", "list", "--head", integ, "--state", "all",
+                     "--json", "number,url,state,isDraft")
+        if rc_l == 0 and o:
+            try:
+                found = json.loads(o)
+            except ValueError:
+                found = []
+            if found:
+                pr = {"number": found[0].get("number"),
+                      "url": found[0].get("url")}
+                audit(state, f"gate-pr: reusing existing PR #{pr['number']} "
+                             f"for head '{integ}'")
+    if not pr:
+        title = args.title or (f"tanuki-loop: batch from {state['run']} "
+                               f"({len(state['iterations'])} iteration(s))")
+        if args.body_file:
+            with open(os.path.expanduser(args.body_file),
+                      encoding="utf-8") as f:
+                body = f.read()
+        else:
+            _ld = loop_dir(state["target"], state["run"])
+            body = (
+                f"Unattended tanuki-loop run `{state['run']}` "
+                f"(reason: {fin['reason']}) — "
+                f"{len(state['iterations'])} iteration(s) on "
+                f"`{integ}`, base `{base}` @ {state['base_sha'][:12]}.\n\n"
+                "This Draft PR is the **delivery of review material, not "
+                "ratification**. The Human Gate is your approval + merge; "
+                "the loop never merges. Intended merge method: **create a "
+                "merge commit**, so the intent-scoped commits stay visible "
+                "in the base branch's history.\n\n"
+                f"Audit trail: `{os.path.join(_ld, 'audit.md')}` — "
+                f"morning queue: `{os.path.join(_ld, 'queue.md')}`.")
+        rc_c, o = gh(repo, "pr", "create", "--draft", "--base", base,
+                     "--head", integ, "--title", title, "--body", body)
+        if rc_c != 0:
+            audit(state, f"gate-pr: `gh pr create` failed: {o}")
+            out({"created": False, "pushed": True,
+                 "hint": "the branch is pushed but `gh pr create` failed — "
+                         "local state is intact and gate-pr is idempotent; "
+                         "fix the cause and re-run: " + o})
+            sys.exit(3)
+        url = o.splitlines()[-1].strip() if o else ""
+        tail = url.rstrip("/").rsplit("/", 1)[-1]
+        pr = {"number": int(tail) if tail.isdigit() else None, "url": url}
+        created = True
+    pr.update({"head_sha": head, "base": base, "draft": True,
+               "at": time.strftime("%Y-%m-%d %H:%M:%S")})
+    state["gate_pr"] = pr
+    save_state(state)
+    audit(state, ("gate-pr: opened Draft PR " if created else
+                  "gate-pr: reusing PR ")
+                 + f"#{pr.get('number')} ({pr.get('url')}) — head "
+                 f"{head[:12]}; review material delivered, NOT ratified")
+    out({"created": created, "reused": not created, "pushed": True,
+         "pr": pr,
+         "note": "delivery of review material, not ratification — the Human "
+                 "Gate is PR approval + merge on the forge; the loop never "
+                 "merges. `finish --reason gate-ratified` will refuse until "
+                 "the PR is merged and the local base contains it."})
+
+
 def cmd_issue_get(args):
     state = load_state(args.target, args.run)
     print(state["materialized"].get(args.key, ""))
@@ -1723,6 +1911,52 @@ def cmd_finish(args):
     """Mark the run terminal, machine-readably: converged | cap |
     gate-ratified | aborted. The dashboard's answer to 'why did it stop?'."""
     state = load_state(args.target, args.run)
+    # PR-gate guard (spec-tanuki-loop "PR-protected targets"): once a run has
+    # delivered a gate PR, "ratified" has a mechanical meaning — the PR is
+    # MERGED on the forge and the local base contains the merge. Cleanup
+    # (worktree removal, branch deletion) before that point would destroy the
+    # very branch the open PR points at, so this refuses (exit 3, nothing
+    # mutated) until both facts hold.
+    if args.reason == "gate-ratified" and state.get("gate_pr"):
+        pr = state["gate_pr"]
+        ref = str(pr.get("number") or pr.get("url") or "")
+        rc_v, o = gh(state["loop_repo"], "pr", "view", ref,
+                     "--json", "state,mergeCommit")
+        if rc_v != 0:
+            out({"ok": False, "pr": pr,
+                 "hint": "cannot verify the gate PR merged (`gh pr view` "
+                         "failed: " + o + ") — gate-ratified requires a "
+                         "merged PR; fix gh/auth and re-run"})
+            sys.exit(3)
+        try:
+            v = json.loads(o)
+        except ValueError:
+            v = {}
+        if v.get("state") != "MERGED":
+            out({"ok": False, "pr": pr, "pr_state": v.get("state"),
+                 "hint": "the gate PR is not merged — the Human Gate is PR "
+                         "approval + merge on the forge; finish "
+                         "--reason gate-ratified runs only after it lands "
+                         "(the loop never merges it for you)"})
+            sys.exit(3)
+        # Local synchronization: prefer the merge commit (correct for every
+        # merge method); fall back to the delivered head (merge-commit method
+        # only) when the forge omits it.
+        target_sha = (v.get("mergeCommit") or {}).get("oid") \
+            or pr.get("head_sha") or state.get("head_expected")
+        rc_a, _ = git(state["loop_repo"], "merge-base", "--is-ancestor",
+                      target_sha, state["base"])
+        if rc_a != 0:
+            out({"ok": False, "pr": pr, "merged_sha": target_sha,
+                 "hint": f"the PR is merged on the remote but local "
+                         f"'{state['base']}' does not contain "
+                         f"{target_sha[:12]} — sync it first (git -C "
+                         f"{state['loop_repo']} pull --ff-only), then re-run "
+                         "finish"})
+            sys.exit(3)
+        audit(state, f"gate-pr verified: PR #{pr.get('number')} merged "
+                     f"({target_sha[:12]}) and local '{state['base']}' "
+                     "contains it — ratification confirmed")
     # A run can be finished twice by design (e.g. `cap` at the end of the
     # unattended run, then `gate-ratified` after the morning gate). Surface the
     # prior close rather than overwriting it silently, so a double-close is
@@ -2387,6 +2621,12 @@ def main():
     sp.add_argument("--policy", default=None)
     sp.add_argument("--attempt-cap", type=int, default=None)
     sp.add_argument("--test-cmd", default=None)
+    sp.add_argument("--gate", choices=("merge", "pr"), default=None,
+                    help="how the morning gate lands the batch: 'merge' "
+                         "(default) = local merge + gate-push; 'pr' = the "
+                         "base refuses direct pushes, so the close delivers "
+                         "a Draft PR via gate-pr (spec-tanuki-loop "
+                         "\"PR-protected targets\")")
     sp.add_argument("--allow-stale-base", action="store_true")
 
     sp = sub.add_parser(
@@ -2406,6 +2646,12 @@ def main():
     sp.add_argument("--policy", default=None)
     sp.add_argument("--attempt-cap", type=int, default=None)
     sp.add_argument("--test-cmd", default=None)
+    sp.add_argument("--gate", choices=("merge", "pr"), default=None,
+                    help="how the morning gate lands the batch: 'merge' "
+                         "(default) = local merge + gate-push; 'pr' = the "
+                         "base refuses direct pushes, so the close delivers "
+                         "a Draft PR via gate-pr (spec-tanuki-loop "
+                         "\"PR-protected targets\")")
     sp.add_argument("--allow-stale-base", action="store_true")
 
     sub.add_parser("iter-start")
@@ -2488,6 +2734,29 @@ def main():
     sp.add_argument("--allow-artifacts", action="store_true",
                     help="push even though the merged diff adds build "
                          "artifacts (deliberate override)")
+    sp = sub.add_parser(
+        "gate-pr",
+        help="PR-protected targets: push the integration branch and open ONE "
+             "Draft PR against the base (idempotent; never merges)",
+        description=(
+            "Deliver a finished run's review material as a single Draft PR "
+            "integration -> base (spec-tanuki-loop \"PR-protected targets\"). "
+            "The Draft PR is the delivery of review material, NOT "
+            "ratification: the Human Gate is PR approval + merge on the "
+            "forge, and this command never merges. Preconditions (exit 3 "
+            "with a remedy when unmet): the run is finished (cap|converged), "
+            "final tests passed on the current integration HEAD, and `gh` is "
+            "available. Idempotent — an existing PR for the head branch is "
+            "reused, never duplicated; any failure leaves the local "
+            "integration branch and run state intact. After the operator "
+            "merges the PR, `finish --reason gate-ratified` verifies the "
+            "merge landed and local base contains it before cleanup."))
+    sp.add_argument("--title", default=None,
+                    help="PR title (default: run id + iteration count)")
+    sp.add_argument("--body-file", default=None,
+                    help="file whose contents become the PR body (default: a "
+                         "mechanical summary naming the run, the audit trail, "
+                         "and the intended merge-commit method)")
     sp = sub.add_parser("issue-get"); sp.add_argument("--key", required=True)
     sp = sub.add_parser("issue-put")
     sp.add_argument("--key", required=True); sp.add_argument("--issue", required=True)
@@ -2529,7 +2798,7 @@ def main():
      "test": cmd_test, "attempt": cmd_attempt,
      "record-cycle": cmd_record_cycle, "defer": cmd_defer, "log": cmd_log,
      "gate-check": cmd_gate_check, "gate-push": cmd_gate_push,
-     "issue-get": cmd_issue_get,
+     "gate-pr": cmd_gate_pr, "issue-get": cmd_issue_get,
      "issue-put": cmd_issue_put, "policy": cmd_policy, "finish": cmd_finish,
      "dashboard": cmd_dashboard, "status": cmd_status,
      "unresolved": cmd_unresolved}[args.cmd](args)

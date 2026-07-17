@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# Fixture for the PR-protected-target gate flow (spec-tanuki-loop
+# "PR-protected targets"). The contract under test:
+#   - gate-pr refuses (exit 3, nothing pushed) before the run is finished,
+#     and when final tests have not passed on the CURRENT integration HEAD;
+#   - on a finished+tested run it pushes the integration branch and opens ONE
+#     Draft PR — the delivery of review material, not ratification;
+#   - it is idempotent: a re-run reuses the recorded PR, never duplicates;
+#   - a push failure leaves the local integration branch intact;
+#   - it NEVER merges (the fake gh records every invocation; no merge call
+#     may appear);
+#   - finish --reason gate-ratified refuses while the PR is unmerged, refuses
+#     when the PR merged but local base does not contain the merge, and
+#     passes only when both hold;
+#   - doctor's gate-pr-tooling check is ok for merge mode, and fails in pr
+#     mode when gh is absent.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
+export TANUKI_ROOT="$root"
+L=("$here/tanuki-loop" --target t)
+jget() { python3 -c "import json,sys; d=json.load(sys.stdin); print(d$1)"; }
+
+# --- fake gh: scripted by files, records every call --------------------------
+# $root/gh-state/pr_state   -> what `pr view` reports (OPEN | MERGED)
+# $root/gh-state/calls.log  -> every gh invocation, one per line
+mkdir -p "$root/bin" "$root/gh-state"
+echo "OPEN" > "$root/gh-state/pr_state"
+cat > "$root/bin/gh" <<SHIM
+#!/usr/bin/env bash
+state_dir="$root/gh-state"
+echo "\$*" >> "\$state_dir/calls.log"
+case "\$1 \$2" in
+  "pr list")   echo "[]" ;;
+  "pr create") echo "https://example.invalid/owner/repo/pull/7" ;;
+  "pr view")
+    st="\$(cat "\$state_dir/pr_state")"
+    if [ "\$st" = "MERGED" ]; then
+      oid="\$(cat "\$state_dir/merge_oid" 2>/dev/null || echo "")"
+      echo "{\"state\": \"MERGED\", \"mergeCommit\": {\"oid\": \"\$oid\"}}"
+    else
+      echo "{\"state\": \"\$st\", \"mergeCommit\": null}"
+    fi ;;
+  *) echo "fake gh: unscripted call: \$*" >&2; exit 1 ;;
+esac
+SHIM
+chmod +x "$root/bin/gh"
+export PATH="$root/bin:$PATH"
+
+# --- repo with a bare origin --------------------------------------------------
+repo="$root/repo"; mkdir -p "$repo"
+git init -q "$repo"; git -C "$repo" config user.email a@b.c
+git -C "$repo" config user.name t
+echo x > "$repo/f.txt"; git -C "$repo" add -A; git -C "$repo" commit -qm init
+base="$(git -C "$repo" rev-parse --abbrev-ref HEAD)"
+bare="$root/remote.git"; git init -q --bare "$bare"
+git -C "$repo" remote add origin "$bare"
+git -C "$repo" push -q -u origin "$base"
+
+# --- doctor: gate-pr-tooling check -------------------------------------------
+scen="$root/scen.json"
+cat > "$scen" <<JSON
+{"target": "t", "loop": {"test_cmd": "true", "iterations": 3,
+ "wall_time_s": 600, "token_budget": 1000, "attempt_cap": 2, "gate": "pr"}}
+JSON
+"${L[@]}" doctor --loop-repo "$repo" --scenarios "$scen" \
+  | jget '["checks"]' | grep -q "gate mode 'pr': \`gh\` found" \
+  || fail "doctor must report gh found for a pr-gate target"
+pass "doctor: gate-pr-tooling ok when gh present (pr mode)"
+
+# A PATH with git but genuinely no gh (the host may have gh installed).
+mkdir -p "$root/nogh"
+ln -s "$(command -v git)" "$root/nogh/git"
+# The REAL interpreter, not a version-manager shim (a pyenv shim re-resolves
+# through PATH and dies inside the restricted environment).
+ln -s "$(python3 -c 'import sys; print(sys.executable)')" "$root/nogh/python3"
+ln -s "$(command -v bash)" "$root/nogh/bash"
+ln -s "$(command -v sh)" "$root/nogh/sh"
+out="$(PATH="$root/nogh" "$here/tanuki-loop" --target t doctor \
+       --loop-repo "$repo" --scenarios "$scen" || true)"
+echo "$out" | grep -q "gate-pr-tooling" \
+  && echo "$out" | grep -q "not on PATH" \
+  || fail "doctor must fail gate-pr-tooling when gh is absent in pr mode"
+pass "doctor: gate-pr-tooling fails when gh absent (pr mode)"
+
+"${L[@]}" doctor --loop-repo "$repo" --scenarios "$scen" --gate merge \
+  | jget '["checks"]' | grep -q "gate mode 'merge'" \
+  || fail "doctor must note merge mode needs no forge tooling"
+pass "doctor: gate-pr-tooling explicit skip note in merge mode"
+
+# --- init (pr mode) + one verified iteration ---------------------------------
+wt="$("${L[@]}" init --loop-repo "$repo" --scenarios "$scen" \
+      | jget '["worktree"]')"
+integ="$(cat "$root/t/loop/$(cat "$root/t/loop/current")/state.json" \
+         | jget '["integration_branch"]')"
+"${L[@]}" iter-start >/dev/null
+echo work >> "$wt/f.txt"; git -C "$wt" commit -qam "loop work"
+"${L[@]}" test >/dev/null
+"${L[@]}" iter-verify >/dev/null
+
+# --- gate-pr refuses on an unfinished run ------------------------------------
+if "${L[@]}" gate-pr >/dev/null 2>&1; then
+  fail "gate-pr must refuse while the run is not finished"
+fi
+pass "gate-pr refuses before finish (run not closed)"
+
+"${L[@]}" finish --reason cap >/dev/null
+
+# --- gate-pr refuses on a stale test pass ------------------------------------
+# The recorded pass predates this new commit, so the SHA no longer matches.
+echo more >> "$wt/f.txt"; git -C "$wt" commit -qam "post-test drift"
+if "${L[@]}" gate-pr >/dev/null 2>&1; then
+  fail "gate-pr must refuse when last_test.sha != integration HEAD"
+fi
+pass "gate-pr refuses a stale final-test pass (SHA mismatch)"
+"${L[@]}" test >/dev/null   # re-validate the current HEAD
+
+# --- push failure leaves the local branch intact ------------------------------
+git -C "$repo" remote set-url origin "$root/nonexistent.git"
+if "${L[@]}" gate-pr >/dev/null 2>&1; then
+  fail "gate-pr must fail when the push fails"
+fi
+git -C "$repo" rev-parse --verify -q "$integ" >/dev/null \
+  || fail "a failed push must leave the local integration branch intact"
+pass "push failure: exit 3, local integration branch intact"
+git -C "$repo" remote set-url origin "$bare"
+
+# --- happy path: push + ONE Draft PR ------------------------------------------
+res="$("${L[@]}" gate-pr)"
+[ "$(echo "$res" | jget '["created"]')" = "True" ] \
+  || fail "gate-pr must create the Draft PR on first success"
+[ "$(echo "$res" | jget '["pr"]["number"]')" = "7" ] \
+  || fail "gate-pr must record the PR number"
+git -C "$repo" rev-parse --verify -q "refs/remotes/origin/${integ#refs/heads/}" \
+  >/dev/null 2>&1 || git -C "$bare" rev-parse --verify -q "$integ" >/dev/null \
+  || fail "the integration branch must be on the remote"
+grep -q "pr create --draft" "$root/gh-state/calls.log" \
+  || fail "the PR must be created as a DRAFT"
+pass "finished+tested run: branch pushed, one Draft PR opened"
+
+# --- idempotency: re-run reuses, never duplicates -----------------------------
+res2="$("${L[@]}" gate-pr)"
+[ "$(echo "$res2" | jget '["reused"]')" = "True" ] \
+  || fail "a second gate-pr must reuse the recorded PR"
+[ "$(grep -c "pr create" "$root/gh-state/calls.log")" = "1" ] \
+  || fail "gate-pr must never create a second PR for the same head"
+pass "idempotent: re-run reuses PR #7, no duplicate create"
+
+# --- finish gate-ratified refuses while the PR is open ------------------------
+if "${L[@]}" finish --reason gate-ratified >/dev/null 2>&1; then
+  fail "finish gate-ratified must refuse while the gate PR is unmerged"
+fi
+pass "finish gate-ratified refuses: PR still open (loop never merges)"
+
+# --- merged on the forge but local base not synchronized ----------------------
+# Simulate the operator's merge: merge integration into base ON THE REMOTE
+# only (clone, merge, push), so local base lacks the merge commit.
+clone="$root/clone"; git clone -q "$bare" "$clone"
+git -C "$clone" config user.email a@b.c; git -C "$clone" config user.name t
+git -C "$clone" checkout -q "$base"
+git -C "$clone" merge -q --no-ff -m "operator merges the PR" "origin/$integ"
+git -C "$clone" push -q origin "$base"
+git -C "$clone" rev-parse HEAD > "$root/gh-state/merge_oid"
+echo "MERGED" > "$root/gh-state/pr_state"
+if "${L[@]}" finish --reason gate-ratified >/dev/null 2>&1; then
+  fail "finish gate-ratified must refuse until local base contains the merge"
+fi
+pass "finish gate-ratified refuses: merged remotely, local base not synced"
+
+# --- synchronized: finish passes ----------------------------------------------
+git -C "$repo" pull -q --ff-only origin "$base"
+"${L[@]}" finish --reason gate-ratified >/dev/null \
+  || fail "finish gate-ratified must pass once merged + synchronized"
+pass "finish gate-ratified passes after merge + local sync"
+
+# --- the loop never merges ----------------------------------------------------
+# Match the gh SUBCOMMAND (line start), not the whole argv — the PR body
+# legitimately contains the word "merge".
+if grep -qE "^(pr merge|merge)" "$root/gh-state/calls.log"; then
+  fail "gate-pr/finish must never invoke a merge via gh"
+fi
+pass "no gh merge call anywhere in the flow"
+
+echo "all gate-pr fixtures passed"
