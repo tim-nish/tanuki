@@ -794,7 +794,20 @@ def cmd_iter_start(args):
         breaker(state, "sequencing violation: previous iteration was never "
                        "closed by iter-verify or rollback")
     if len(state["iterations"]) >= state["cap"]:
-        breaker(state, "iteration cap reached (rolled-back iterations count toward the cap)")
+        # F3 / issue #64: state the CAUSE, not just the ceiling. "cap reached"
+        # alone reads like a sequencing complaint when a retry trips it, and
+        # gives no way to see that rolled-back work consumed the allowance.
+        # The breakdown is what distinguishes "the run did its iterations" from
+        # "the run burned them undoing things". Keep the "iteration cap
+        # reached" prefix: breaker_hint() matches it to name the next action.
+        n = len(state["iterations"])
+        verified = sum(1 for i in state["iterations"]
+                       if i.get("phase") == "verified")
+        rolled = sum(1 for i in state["iterations"]
+                     if i.get("phase") == "rolled_back")
+        breaker(state, f"iteration cap reached: {n}/{state['cap']} consumed "
+                       f"({verified} verified, {rolled} rolled back) — "
+                       f"rolled-back iterations count toward the cap")
     if state["wall_limit_s"] and \
             time.time() - state["wall_start"] >= state["wall_limit_s"]:
         breaker(state, "wall-time limit exceeded")
