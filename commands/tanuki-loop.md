@@ -341,6 +341,35 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
    `finish` again here is what performs that deferred deletion; you can see it
    land in `branch_cleanup.deleted` (F96, F9).
 
+### PR-protected targets (`"gate": "pr"` in the loop block)
+
+When the base branch refuses direct pushes (required-check protection),
+steps 2–4 above cannot run: there is no local merge to push. Set
+`"gate": "pr"` in the scenarios `loop` block (`doctor` then validates `gh`
+availability up front) and the gate reshapes:
+
+- **Overnight close delivers the review material.** After the run finishes
+  (`cap`/`converged`) and `tanuki-loop test` passes on the integration HEAD,
+  run `tanuki-loop gate-pr`: it pushes the **integration branch** (never
+  forced) and opens **one Draft PR** `integration → base`. That Draft PR *is*
+  the morning-gate presentation — diff, grouped commits, run summary — moved
+  onto the forge. It is delivery, **not ratification**; the loop never
+  merges, in any phase.
+- **The Human Gate is PR approval + merge.** Review the PR as you would the
+  step-1 diff; the intended merge method is **"Create a merge commit"**, so
+  the loop's intent-scoped commit groups stay visible in the base's history —
+  don't squash.
+- **`gate-pr` is idempotent and failure-safe.** A re-run reuses the existing
+  PR (recorded in state, or found on the forge after a crash) and never
+  duplicates; a failed push or PR create exits 3 with the local integration
+  branch and run state intact — fix the cause and re-run.
+- **Cleanup waits for the merge to be real.** `finish --reason gate-ratified`
+  refuses until the PR's forge state is MERGED **and** the local base
+  contains the merge commit (`git pull --ff-only` first) — so the worktree
+  and branch can never be deleted from under an open PR. Then steps 5–7
+  proceed as documented (issues where a tracker is configured; worktree
+  removal; the second `finish` performs the deferred branch deletion).
+
 ## Monitoring (the operator's window)
 
 `${CLAUDE_PLUGIN_ROOT}/tools/tanuki-loop --target <target> dashboard` renders one screen
@@ -536,7 +565,12 @@ Per-hunk verdicts (closed set):
 - `integration → main` runs only after explicit approval, merge-first and
   idempotent, and is **pushed to the remote before any issue is materialized**
   (`gate-push`, refusing a diverged remote rather than force-pushing) — a
-  local-only merge leaves dangling issue links and a diverged remote. Phases
+  local-only merge leaves dangling issue links and a diverged remote. On a
+  PR-protected target (`"gate": "pr"`) the approval takes the form of PR
+  approval + merge on the forge: `gate-pr` delivers one Draft PR (review
+  material, never ratification), the loop never auto-merges, and
+  `finish --reason gate-ratified` refuses until the PR is merged and local
+  base contains it. Phases
   differ only in supervision and cap — one code path, Phase-3-ready from the
   first run.
 - Merged integration branches are deleted by `tanuki-loop finish` (backstop:
