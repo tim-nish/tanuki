@@ -299,7 +299,19 @@ can answer: is the loop healthy, did anything unexpected happen, what did
 this run change, is the scheduler behaving as intended, and what decision
 comes next. Sections, in order — **always rendered** (a section whose
 substrate is missing degrades to an explicit one-line reason, never a silent
-omission; spec-tanuki-loop "Fixed skeleton"):
+omission; spec-tanuki-loop "Fixed skeleton").
+
+**Empty states are enumerated, not written** (`specs/spec-tanuki-view/SPEC.md`
+D3; issue #66). A section that renders empty resolves to exactly one member of
+a closed set in `tools/tanuki-loop` (`EMPTY_STATES`), each carrying whether
+the emptiness is **expected** for this target's state or a **GAP** the
+operator should close, plus the command that changes it — and each with its
+own fixture in `tools/tests/test-loop-empty-states`. The same absent
+substrate can be either: no scenario matrix is *expected* on a fresh target
+and a *GAP* once iterations have run. Adding an empty state means adding a
+member (an unenumerated one raises); never write a new reason at a call site.
+
+Sections:
 - **health** — one OK / ATTENTION / DONE verdict with the reason (breaker,
   unmatched anomaly, cap-without-convergence, pending gate decisions).
 - **latest drive** — live progress plus per-scenario results, every

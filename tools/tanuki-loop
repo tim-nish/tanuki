@@ -1391,6 +1391,85 @@ def _health(state, driving, unmatched):
     return f"OK — between iterations ({n_done}/{state['cap']} done){gate_note}"
 
 
+# --- D3 empty-state enumeration (specs/spec-tanuki-view D3; OPEN-1 resolved
+# 2026-07-17) -----------------------------------------------------------------
+# Every dashboard section that can render empty resolves to exactly ONE member
+# of this closed set. Each member states whether the emptiness is EXPECTED for
+# this target's state or a GAP the operator should close, and names the command
+# that changes it. One test fixture per member (tools/tests/
+# test-loop-empty-states), so a new state or a regression fails visibly.
+#
+# This is spec-short-command-surface D2's rule applied to the same disease: the
+# `next:` hint "has been fixed twice and regressed twice because it is patched
+# string logic", and the empty-state class has now been reported three times —
+# F5 (sections omitted with no note), F47/#66 (scheduler decisions naming an
+# unmet command with no expected-vs-gap signal), F46/#65 (latest drive reading
+# "none yet" after an iteration had run). Prose no test can check is what
+# regressed each time.
+#
+# Rules for a member: reason is ONE line; any command it names is explained
+# where it is named (an operator meeting `tanuki-scheduler sync` for the first
+# time in an error string learns nothing from the name alone — F47).
+
+# "drive" is tanuki-drive, an internal term a cold reader has never met (F46 /
+# issue #65). Defined once, appended wherever a drive empty state renders.
+_DRIVE_IS = "A drive is one tanuki-drive pipeline run over the scenarios"
+EMPTY_STATES = {
+    # -- latest drive ---------------------------------------------------------
+    "drive:no-iteration-started": dict(
+        expected=True,
+        reason="no iteration has started yet — expected for a run that has "
+               "only just been initialized",
+        next="tanuki-loop --target {t} iter-start"),
+    "drive:iteration-open-not-driven": dict(
+        expected=True,
+        reason="iteration {n} started but its drive has not begun yet "
+               "(no progress.json) — expected mid-bracket",
+        next=None),
+    "drive:iterations-ran-none-drove": dict(
+        expected=False,
+        reason="{n} iteration(s) ran and none recorded a drive; an "
+               "iteration should drive the scenarios before it is verified",
+        next=None),
+    # -- this run -------------------------------------------------------------
+    "run:no-iteration-started": dict(
+        expected=True,
+        reason="no ledger movement yet — no iteration has started, so nothing "
+               "could have moved",
+        next="tanuki-loop --target {t} iter-start"),
+    # -- scheduler decisions (F47 / issue #66) --------------------------------
+    "scheduler:never-synced-fresh": dict(
+        expected=True,
+        reason="no scenario matrix recorded for this target yet — expected on "
+               "a fresh target. Recording it (`tanuki-scheduler sync`, which "
+               "reads the scenarios file and registers which scenarios exist) "
+               "is part of `/tanuki <target> init`; you do not run it by hand",
+        next="tanuki <target> init"),
+    "scheduler:never-synced-after-runs": dict(
+        expected=False,
+        reason="{n} iteration(s) ran with no scenario matrix recorded, so "
+               "the scheduler cannot have chosen anything — these runs "
+               "drove an unmanaged set",
+        next="tanuki <target> init"),
+}
+
+
+def empty_state(key, target, **fmt):
+    """Render one enumerated empty state as (line_body, typed_dict).
+
+    KeyError here is the point: an unenumerated empty state is a bug, not a
+    string to invent at the call site.
+    """
+    m = EMPTY_STATES[key]
+    reason = m["reason"].format(t=target, **fmt)
+    nxt = m["next"].format(t=target, **fmt) if m["next"] else None
+    body = reason if m["expected"] else f"GAP — {reason}"
+    if nxt:
+        body += f" · next: `{nxt}`"
+    return body, {"state": key, "expected": m["expected"], "reason": reason,
+                  "next": nxt}
+
+
 def cmd_dashboard(args):
     """Operational status (plain text, one screen). Within seconds the
     operator can answer: is the loop healthy, did anything unexpected happen,
@@ -1454,25 +1533,23 @@ def cmd_dashboard(args):
                     unmatched += 0 if known else 1
                     line += f"  <- {tag}"
                 drive_lines.append(line)
+        # F46 / issue #65's three cases, now enumerated members rather than
+        # three hand-written strings (D3). The term stays defined inline for a
+        # cold reader (F46) — the enumeration governs the reason, not the
+        # glossary.
         elif cur and cur["phase"] == "started":
             driving = True
-            drive_lines.append(
-                f"  latest drive (iter {cur['n']}): none yet — iteration "
-                "started, drive not begun (no progress.json). A drive is one "
-                "tanuki-drive pipeline run over the scenarios")
+            body, _ = empty_state("drive:iteration-open-not-driven",
+                                  state["target"], n=cur["n"])
+            drive_lines.append(f"  latest drive: {body}. {_DRIVE_IS}")
         elif state["iterations"]:
-            # F46 / issue #65: iterations HAVE run, so "no iteration has
-            # started a drive" was simply false here. Say what is actually
-            # true: they ran and none recorded a drive.
-            n = len(state["iterations"])
-            drive_lines.append(
-                f"  latest drive: none recorded — {n} iteration(s) ran without "
-                "a drive (no progress.json). A drive is one tanuki-drive "
-                "pipeline run over the scenarios")
+            body, _ = empty_state("drive:iterations-ran-none-drove",
+                                  state["target"], n=len(state["iterations"]))
+            drive_lines.append(f"  latest drive: {body}. {_DRIVE_IS}")
         else:
-            drive_lines.append(
-                "  latest drive: none yet — no iteration has started. A drive "
-                "is one tanuki-drive pipeline run over the scenarios")
+            body, _ = empty_state("drive:no-iteration-started",
+                                  state["target"])
+            drive_lines.append(f"  latest drive: {body}. {_DRIVE_IS}")
 
         lines = [f"tanuki-loop — {state['target']} / {state['run']}",
                  f"  health: {_health(state, driving, unmatched)}",
@@ -1516,8 +1593,8 @@ def cmd_dashboard(args):
                 lines.append(f"    frozen {fid} (attempt cap): "
                              f"{_short(reasons.get(fid, 'see queue.md'), pointer='queue.md')}")
         else:
-            lines.append("  this run: no ledger movement yet — no iteration "
-                         "has started")
+            body, _ = empty_state("run:no-iteration-started", state["target"])
+            lines.append(f"  this run: {body}")
         if findings:
             by = {}
             for fd in findings:
@@ -1539,8 +1616,16 @@ def cmd_dashboard(args):
         #    for pre-revision runs; a stated reason when there is no state.
         spath = os.path.join(TANUKI_ROOT, state["target"], "scheduler.json")
         if not os.path.exists(spath):
-            lines.append("  scheduler decisions: no scheduler state for this "
-                         "target — run `tanuki-scheduler sync` first")
+            # F47 / issue #66: "run `tanuki-scheduler sync` first" named a
+            # command the operator had never met and gave no signal whether
+            # this was normal. Enumerated now, and the two cases differ: on a
+            # fresh target it is expected; once iterations have run it is a
+            # gap, because the scheduler cannot have chosen anything.
+            key = ("scheduler:never-synced-after-runs" if state["iterations"]
+                   else "scheduler:never-synced-fresh")
+            body, _ = empty_state(key, state["target"],
+                                  n=len(state["iterations"]))
+            lines.append(f"  scheduler decisions: {body}")
         else:
             with open(spath, encoding="utf-8") as f:
                 sched = json.load(f)
