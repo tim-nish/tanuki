@@ -308,14 +308,83 @@ scenario whose status is not `ok`, and any `plugin_clone_dirty: true`
 
 ## 4. Decide (the human gate — part of the run, not homework)
 
-Do not end at "here is the report." Present the brief's proposals in-session
+This pass is reached two ways, and they are **one contract, not two
+behaviors**: at the end of a normal run (below), and as `/tanuki <target>
+decide` (alias `--brief`) with no run at all. Entry is **ledger-anchored**:
+`decide` orients off `tanuki-ledger status` / `next` and decides whatever the
+ledger holds decidable — a brief is reprinted as context when one exists,
+never a precondition. If `next` reports accepted fixes awaiting
+re-verification, say so and continue with what IS decidable now; this pass
+decides and files, it never drives.
+
+### 4.0a Promote (when entered directly)
+
+A normal run has already promoted in step 3.1. Entered as `decide` there was
+no step 3, so the pass promotes for itself — `tanuki-ledger --target <t>
+promote` moves qualifying open findings past the bar to `proposed` and lists
+them. This is the pass's own contract ("promotion moves status to `proposed`;
+the command layer performs the transition — no separate unhinted `set-status`
+call", spec-short-command-surface D1), and without it a `decide` sitting with
+no recent run would present nothing and the ledger-anchored entry would be a
+promise the pass doesn't keep.
+
+### 4.0b Consolidate — before anything is presented
+
+No finding reaches the approval screen unanalyzed. Filing an issue whose
+conflict with another filed issue was detectable from the ledger is a defect
+of this command, not of the operator's attention. Contract:
+`${CLAUDE_PLUGIN_ROOT}/specs/spec-tanuki-solve/SPEC.md` D1/D3 (the normative
+taxonomy) over D2's substrate.
+
+**Skip when there is nothing to consolidate:** with fewer than two candidate
+items (proposals + watching), go straight to 4.1 — a one-finding sitting
+never runs a clustering stage it cannot need.
+
+a. `tanuki-ledger --target <t> consolidate` — read-only deterministic
+   candidate groups with a mechanical reason each. It proposes, never
+   decides.
+b. Judge each candidate group — confirm or discard, classify the confirmed
+   ones, and **add any group the clustering missed** (semantic contradiction
+   is not reliably mechanical; the tool proposes, this layer decides):
+   - **merge** — same defect, different sightings. ONE presentation item:
+     combined problem statement, union of evidence pointers and finding ids.
+   - **conflict** — proposals that cannot both hold. ONE multi-outcome
+     question naming each branch explicitly ("A: …; B: …; defer group") —
+     **never split back into independent yes/no gates**.
+   - **dependency** — one disposition reframes another. The reframing item
+     is asked first; the dependent item's presentation states the dependency
+     ("given the choice on F63, this proposal now reads…").
+c. Build the presentation plan: conflict/dependency groups first (most
+   recontextualizing first), then merges, then independents, each lane by the
+   ledger's computed priority.
+
+Consolidation is a **presentation and filing act only**: ledger entries are
+never rewritten, merged, or deleted — groups are recorded through the
+existing status vocabulary plus shared issue URLs, never history surgery.
+
+### 4.1 Walk the plan
+
+Do not end at "here is the report." Present each plan item in-session
 (Problem → Proposal, evidence collapsed to a pointer line; include the item's
 `policy: tension` line as context when step 3.2 produced one — the flag never
 pre-selects a disposition, and a policy-motivated dismissal is recorded like
-any other), then walk them top-down with AskUserQuestion, up to 4 per round,
-one disposition each — **never with a pre-selected default**: a disposition
-is a multi-outcome decision, and every `set-status` write and `gh` call in
-this pass is run by the command, never typed by the user:
+any other), walking **the consolidated plan, not the raw finding list**, with
+AskUserQuestion, up to 4 per round, one disposition each — **never with a
+pre-selected default**: a disposition is a multi-outcome decision, and every
+`set-status` write and `gh` call in this pass is run by the command, never
+typed by the user.
+
+Per group kind:
+- **merge group** → one disposition; on accept, every constituent finding id
+  gets it (`set-status` per id) and the same issue URL.
+- **conflict group** → one question, options = the branches (+ defer). The
+  winning branch's finding is accepted; the loser dismissed, noting the
+  arbitration via `upsert-finding --match <id> --note "superseded by
+  <winner>: <branch>"` — or, if the human says both should be absorbed into
+  one issue, treat as a merge with the winning proposal text.
+- **independent** → accept / dismiss / defer as today.
+
+Dispositions:
 - **accept** → `set-status --id … --status accepted`; then offer — as a
   separate, explicit confirmation — to run the prepared `gh issue create` in
   the target repo. Accepted findings keep their recurrence tracking: the next
@@ -337,22 +406,33 @@ this pass is run by the command, never typed by the user:
   markers: provenance and kind already live in the labels, and a prefix a
   human can't act on is noise in every issue list. The finding id goes in
   the body footer instead ("Tanuki finding: F2 — ledger cross-reference"),
-  informational only, never parsed by anything.
+  informational only, never parsed by anything. For a **merge group** the
+  footer lists EVERY constituent finding id.
+  **Conflict evidence survives into the issue (spec-tanuki-solve D3).** For a
+  resolved conflict group, the body also records the arbitration: the
+  branches considered, the branch chosen, and the rejected alternative(s)
+  with their finding ids — so a reader of the single filed issue sees that an
+  alternative existed and was rejected, with no downstream tooling awareness.
 - **dismiss** → `set-status --id … --status dismissed` (never resurfaces as
   new; still deduped against).
 - **defer** → stays `proposed`; `tanuki-ledger status` and `/tanuki <target>
-  --status` keep it visible until decided.
+  status` keep it visible until decided.
 
-After the proposals, offer the brief's **Watching** list the same way: the
-promotion bar gates surfacing, not permission, so the user may **accept any
-below-bar finding right there** (same accept path — `set-status`, then the
+After the proposals, offer the **Watching** list the same way: the promotion
+bar gates surfacing, not permission, so the user may **accept any below-bar
+finding right there** (same accept path — `set-status`, then the
 separately-confirmed filing offer). Don't walk every watching item one by
-one; present the list once and act only on the ones the user picks.
+one; present the list once and act only on the ones the user picks. A
+watching item already inside a confirmed group was presented **with its
+group** in 4.1, not here.
 
-Close with: the run delta, dispositions taken per finding (with the issue
-URL for each one filed), what remains `proposed`, the brief path, and total
-duration/turns (never dollars). The pass is complete only if the user never
-had to type a `tanuki-ledger` or `gh` command themselves.
+Close with: the run delta (when a run happened), dispositions taken per
+finding (with the issue URL for each one filed), **groups reported as
+groups** — merged ids together, conflict branches with the chosen one marked
+— what remains `proposed`/`open`, the brief path when one exists, the derived
+next step (`tanuki-ledger next`), and total duration/turns (never dollars).
+The pass is complete only if the user never had to type a `tanuki-ledger` or
+`gh` command themselves.
 
 ## Ingest mode (`ingest "<feedback>"`, alias `--ingest`) — human feedback is one more event source
 
