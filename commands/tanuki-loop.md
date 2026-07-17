@@ -48,6 +48,13 @@ live in the scenarios file's `"loop"` block, stored once, never retyped:
   unmerged integration branches and produce a landing plan (see
   "Reconcile" below). A bare word because it does not drive
   (spec-short-command-surface D6). Read-only until an explicit gate.
+- `<target> unresolved`: **no driving, read-only** — the reconcile pass's
+  discovery, on its own: which integration branches never merged, how stale
+  they are, and the mechanical signals about each commit. Run
+  `${CLAUDE_PLUGIN_ROOT}/tools/tanuki-loop --target <target> unresolved
+  [--json]` and show it. It emits **signals, never verdicts** — see
+  "Reconcile". Also rewrites `~/.tanuki/<target>/unresolved.md`, the
+  stable-path brief to open cold.
 
 ## 0. Preflight (once)
 
@@ -437,10 +444,17 @@ Per-hunk verdicts (closed set):
 
 ### Steps
 
-1. **Collect** (read-only). Loop integration branches (`tanuki-loop/<target>/
-   *`) with unique commits and no merged PR. Explicit `branch…` arguments
-   override the sweep. For each: commits ahead/behind — the behind-count is
-   the staleness signal and belongs in the report.
+1. **Collect** (read-only) — **`tanuki-loop --target <t> unresolved --json`**,
+   never re-derived by hand. It returns the branches with unique commits and
+   no merged tip, their staleness (ahead / behind / days since last commit),
+   and per commit: files touched, whether it **cherry-picks cleanly**, and the
+   ledger findings its message cites **paired with their current status**.
+   Explicit `branch…` arguments narrow the set.
+   Those are **signals**. `cherry_picks_cleanly` is a fact about git and is
+   **not** a synonym for applicable — `8f4d556` applied perfectly and carried
+   a rejected design. A cited finding that is now accepted-and-tombstoned is a
+   superseded *candidate*, not a verdict. The tool refuses to emit a verdict
+   field precisely so this step cannot outsource step 2.
 2. **Classify** every hunk of every commit against **current `main`**, into
    the verdicts above. This is judgment and stays at the command layer (the
    routing principle: deterministic work → tools, judgment → here). Cite the

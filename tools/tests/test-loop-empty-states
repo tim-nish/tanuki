@@ -41,11 +41,16 @@ drive:iterations-ran-none-drove
 drive:no-iteration-started
 run:no-iteration-started
 scheduler:never-synced-after-runs
-scheduler:never-synced-fresh"
+scheduler:never-synced-fresh
+unresolved:no-loop-repo
+unresolved:none"
 [ "$members" = "$covered" ] || fail "EMPTY_STATES membership changed — add a case below.
 tool:    $(echo "$members" | tr '\n' ' ')
 fixture: $(echo "$covered" | tr '\n' ' ')"
 pass "the enumeration is closed and every member has a case in this fixture"
+# The unresolved:* members are exercised in tools/tests/test-loop-unresolved
+# (they need loop branches to reason about, which this fixture has no use for).
+# Named here so the membership guard above stays the single registry.
 
 # --- fresh target: three EXPECTED members ------------------------------------
 out="$("${L[@]}" dashboard)"

@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# Fixture for `tanuki-loop unresolved` + the drift notification
+# (spec-tanuki-loop "Reconcile substrate + drift notification").
+#
+# The load-bearing rule is SIGNALS, NEVER VERDICTS. On 2026-07-17 two branches
+# held 25 unmerged commits; `git cherry` called all 25 unmerged while several
+# were already landed, and a commit subjected "render the module docstrings in
+# --help" carried a REJECTED design in another hunk. A tool that guessed a
+# verdict from patch identity or a subject line would be confidently wrong,
+# which is worse than silent. So this fixture asserts what the tool must NOT
+# say as hard as what it must.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
+export TANUKI_ROOT="$root"
+L=("$here/tanuki-loop" --target t)
+jget() { python3 -c "import json,sys;print(json.load(sys.stdin)$1)"; }
+
+repo="$root/repo"; git init -q "$repo"
+git -C "$repo" checkout -qb main
+git -C "$repo" config user.email a@b.c; git -C "$repo" config user.name t
+printf 'l1\nl2\nl3\n' > "$repo/f.py"; git -C "$repo" add -A
+git -C "$repo" commit -qm base
+
+# --- empty state: no loop repo yet (enumerated, D3) --------------------------
+o="$("${L[@]}" unresolved --json)"
+[ "$(echo "$o" | jget '["empty_state"]["state"]')" = "unresolved:no-loop-repo" ] \
+  || fail "before init, the empty state must be enumerated: $o"
+[ "$(echo "$o" | jget '["empty_state"]["expected"]')" = "True" ] \
+  || fail "no loop repo yet is EXPECTED, not a gap"
+pass "empty state: no loop repo — enumerated and expected"
+
+"${L[@]}" init --loop-repo "$repo" --cap 2 >/dev/null
+
+# --- empty state: none unresolved --------------------------------------------
+o="$("${L[@]}" unresolved --json)"
+[ "$(echo "$o" | jget '["empty_state"]["state"]')" = "unresolved:none" ] \
+  || fail "a clean repo must report the enumerated empty state, not silence: $o"
+[ "$(echo "$o" | jget '["branches"]')" = "[]" ] || fail "no branches expected"
+[ -f "$root/t/unresolved.md" ] \
+  || fail "the brief must exist even when clean — silence is what let 25 commits rot"
+grep -q "no unresolved loop branches" "$root/t/unresolved.md" \
+  || fail "the clean brief must say so"
+pass "empty state: none unresolved — enumerated, and the brief still written"
+
+# --- an unresolved branch: two commits with KNOWN mechanical answers ----------
+git -C "$repo" branch tanuki-loop/t/20260101-aaa main
+git -C "$repo" checkout -q tanuki-loop/t/20260101-aaa
+mkdir -p "$repo/pkg"; echo y > "$repo/pkg/g.py"
+git -C "$repo" add -A; git -C "$repo" commit -qm "docs: new file only (F2)"
+printf 'l1\nBRANCH\nl3\n' > "$repo/f.py"
+git -C "$repo" commit -qam "fix: edits line 2 (F1)"
+git -C "$repo" checkout -q main
+printf 'l1\nMAIN\nl3\n' > "$repo/f.py"
+git -C "$repo" commit -qam "main edits the same line"
+
+"$here/tanuki-ledger" --target t init >/dev/null 2>&1
+"$here/tanuki-ledger" --target t upsert-finding --title "cited" --kind gap \
+  --evidence "r1/s#1" >/dev/null 2>&1
+"$here/tanuki-ledger" --target t set-status --id F1 --status accepted >/dev/null 2>&1
+
+o="$("${L[@]}" unresolved --json)"
+[ "$(echo "$o" | jget '["branches"][0]["ahead"]')" = "2" ] || fail "ahead wrong"
+[ "$(echo "$o" | jget '["branches"][0]["behind"]')" = "1" ] || fail "behind wrong"
+pass "staleness measured (2 ahead / 1 behind)"
+
+# cherry_picks_cleanly is MEASURED, not fabricated. This is the regression that
+# actually happened: the newer `merge-tree --write-tree --merge-base=` spelling
+# is git >= 2.38 and returns a usage error on older gits — tested with `rc==0`
+# it reported EVERY commit as conflicting. A signal that is always the same
+# value is not a signal.
+picks="$(echo "$o" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+c={x["subject"][:4]: x["cherry_picks_cleanly"] for x in d["branches"][0]["commits"]}
+print(c.get("docs"), c.get("fix:"))')"
+[ "$picks" = "True False" ] \
+  || fail "cherry_picks_cleanly must discriminate: new-file=clean, same-line=conflict, got [$picks]"
+pass "cherry_picks_cleanly discriminates (new file clean; same-line edit conflicts)"
+
+# A cited finding is paired with its CURRENT status — the citation alone is a
+# claim, exactly like a subject line.
+cited="$(echo "$o" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+for c in d["branches"][0]["commits"]:
+    for f in c["cites_findings"]:
+        if f["id"]=="F1": print(f["status"])')"
+[ "$cited" = "accepted" ] \
+  || fail "a cited finding must carry its live ledger status, got [$cited]"
+pass "cited findings are paired with their current ledger status"
+
+# --- THE RULE: signals, never verdicts ---------------------------------------
+# A future contributor's instinct is to add "applicable": true here. The spec
+# forbids it and the tool enforces it; this asserts the enforcement is real.
+echo "$o" | python3 -c '
+import json,sys
+banned = ("landed","applicable","superseded","conflicting","conflict",
+          "verdict","recommend","should_land","safe")
+def walk(o, path=""):
+    if isinstance(o, dict):
+        for k,v in o.items():
+            for w in banned:
+                assert w not in str(k).lower(), f"verdict-shaped key {path}{k!r}"
+            walk(v, f"{path}{k}.")
+    elif isinstance(o, list):
+        for i in o: walk(i, path)
+walk(json.load(sys.stdin))
+' || fail "the --json payload contains a verdict-shaped field"
+pass "the payload carries NO verdict field (signals only)"
+
+# And the enforcement fires rather than being decorative.
+python3 - "$here/tanuki-loop" <<'EOF'
+import re, sys
+src = open(sys.argv[1]).read()
+ns = {}
+exec(re.search(r"_VERDICT_WORDS = \(.*?\)\n", src, re.S).group(0), ns)
+exec(re.search(r"def _assert_no_verdicts\(payload\):.*?\n    return payload\n",
+                src, re.S).group(0), ns)
+try:
+    ns["_assert_no_verdicts"]({"branches": [{"applicable": True}]})
+except AssertionError:
+    sys.exit(0)
+sys.exit("_assert_no_verdicts accepted a verdict-shaped field")
+EOF
+[ "$?" = "0" ] || fail "the no-verdict guard does not actually fire"
+pass "the no-verdict guard fires on a planted verdict field"
+
+# --- read-only: the loop repo nets zero change -------------------------------
+before="$(git -C "$repo" rev-parse HEAD)$(git -C "$repo" status --porcelain)"
+"${L[@]}" unresolved >/dev/null
+after="$(git -C "$repo" rev-parse HEAD)$(git -C "$repo" status --porcelain)"
+[ "$before" = "$after" ] || fail "unresolved changed the loop repo"
+[ ! -e "$repo/unresolved.md" ] \
+  || fail "the brief must NEVER be written into the target repo"
+pass "read-only: the loop repo nets zero change; no brief written into it"
+
+# --- the notification: stderr, never blocking --------------------------------
+"${L[@]}" dashboard >"$root/out.txt" 2>"$root/err.txt"
+grep -q "note: 1 unresolved loop branch" "$root/err.txt" \
+  || fail "the dashboard must note drift on stderr: $(cat "$root/err.txt")"
+grep -q "reconcile" "$root/err.txt" || fail "the note must name the command that acts"
+grep -q "note:" "$root/out.txt" && fail "the note must not pollute stdout"
+grep -q "health:" "$root/out.txt" || fail "the dashboard screen itself is unchanged"
+rc=0; "${L[@]}" dashboard >/dev/null 2>&1 || rc=$?
+[ "$rc" = "0" ] || fail "the note must not change the exit code (unattended runs keep working)"
+pass "drift note: stderr only, names reconcile, stdout and exit code unchanged"
+
+# Silent when there is no debt.
+git -C "$repo" branch -D tanuki-loop/t/20260101-aaa >/dev/null 2>&1
+"${L[@]}" dashboard 2>"$root/err2.txt" >/dev/null
+grep -q "note:" "$root/err2.txt" && fail "no debt must mean no note"
+pass "no drift, no note"
+
+echo "ALL PASS"
