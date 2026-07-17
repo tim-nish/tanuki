@@ -89,7 +89,12 @@ For operators (and models) that do touch the substrate directly, `--help`
 must state the full contract in place:
 
 - `upsert-finding --kind`: list the closed enum (`friction|papercut|gap`).
-- `set-status --status`: list `open|proposed|accepted|dismissed`.
+- `set-status --status`: list `open|proposed|accepted|dismissed`, and name
+  the canonical path (`open` → `proposed` → `accepted`/`dismissed`) while
+  stating that transitions are recorded, never rejected — the tool prints a
+  one-line notice on a non-canonical transition (e.g. `open` → `accepted`,
+  legitimate for a watching-list accept) and sequencing stays with the
+  command layer (`docs/tanuki-spec.md`, Finding lifecycle).
 - `upsert-finding --match`: state that it takes a finding id and bumps
   recurrence instead of creating a duplicate.
 - `ingest`: include a one-line JSONL event example and the evidence-pointer
