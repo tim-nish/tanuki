@@ -166,9 +166,19 @@ breakers, records the start SHA, and snapshots the ledger (exit 3 +
    reports skipped and the model verifies manually (always configure one for
    an unattended run).
 6. **Commit** with forked commit-grouping logic — intent-scoped commits on the
-   integration branch (no push, no PR). Then `tanuki-loop iter-verify`
-   (`--no-patch` when no change was expected) — the four-part integration
-   invariant; it records the end SHA and breaks on any violation.
+   integration branch (no push, no PR). **Never `git add -A` blindly**: stage
+   the work product, not whatever the runtime regenerated. Then
+   `tanuki-loop iter-verify` (`--no-patch` when no change was expected) — the
+   four-part integration invariant; it records the end SHA and breaks on any
+   violation.
+   **Build-artifact guard** (issue #71): regenerable output (`__pycache__/`,
+   `.pytest_cache/`, `.mypy_cache/`, `.ruff_cache/`, `*.pyc`, `*.pyo`,
+   `*.egg-info`) never counts as a dirty worktree — it is not work product,
+   so it adds no friction to a clean bracket — but it is a **breaker if
+   committed** to the integration branch. The guard fires at the commit that
+   introduced the contamination and names the offending paths and the cause,
+   instead of surfacing several iterations later as an unexplained
+   worktree-not-clean breaker.
 7. Append the iteration to the audit artifact (start/end SHA, findings
    bumped/new, items implemented, items deferred). Loop back to step 1.
 

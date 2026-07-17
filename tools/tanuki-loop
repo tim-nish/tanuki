@@ -734,9 +734,58 @@ def _worktree_head(state):
     return sha if rc == 0 else None
 
 
+# Build artifacts a language runtime regenerates at will. They are never work
+# product, so they must not make a worktree "dirty" (false friction), and they
+# must never reach the integration branch (F64 / issue #71): once committed
+# they trip iter-verify's not-clean breaker on a LATER iteration, far from the
+# commit that introduced them, with a diagnostic that names neither the files
+# nor the cause. The guard is an ignore-list, stated here and in --help.
+_ARTIFACT_DIRS = ("__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache")
+_ARTIFACT_SUFFIXES = (".pyc", ".pyo")
+
+
+def is_build_artifact(path):
+    """True for a path git reports that is a regenerable build artifact."""
+    parts = [p for p in path.replace("\\", "/").split("/") if p]
+    if any(p in _ARTIFACT_DIRS for p in parts):
+        return True
+    return path.endswith(_ARTIFACT_SUFFIXES) or path.endswith(".egg-info")
+
+
+def _dirty_split(state):
+    """(real_dirty, artifact_dirty) from `git status --porcelain`.
+
+    -uall is load-bearing: git collapses a wholly-untracked directory to one
+    entry ("?? pkg/"), which would hide that its only content is __pycache__
+    and make an artifact-only tree read as dirty. Listing files individually
+    lets the ignore-list see real paths.
+    """
+    rc, o = git(state["worktree"], "status", "--porcelain", "-uall")
+    if rc != 0:
+        return ["?"], []
+    names = [ln[3:] for ln in o.splitlines() if ln.strip()]
+    real = [n for n in names if not is_build_artifact(n)]
+    arts = [n for n in names if is_build_artifact(n)]
+    return real, arts
+
+
 def _clean(state):
-    rc, o = git(state["worktree"], "status", "--porcelain")
-    return rc == 0 and o == ""
+    # Untracked build artifacts do not count as dirty: they are regenerable
+    # and not work product. Artifacts that were COMMITTED are caught by
+    # committed_artifacts() at verify, where the diagnostic can name the cause.
+    real, _ = _dirty_split(state)
+    return real == []
+
+
+def committed_artifacts(wt, start, head):
+    """Build artifacts introduced into the integration branch between start
+    and head. This is the contamination that matters: an agent's `git add -A`
+    sweeps __pycache__ in, and nothing notices until a later iteration."""
+    rc, o = git(wt, "diff", "--name-only", f"{start}..{head}")
+    if rc != 0:
+        return []
+    return sorted({n for n in o.splitlines() if n.strip()
+                   and is_build_artifact(n)})
 
 
 def cmd_iter_start(args):
@@ -787,12 +836,21 @@ def cmd_iter_verify(args):
         breaker(state, "integration invariant: start SHA is not an ancestor of HEAD")
     if not args.no_patch and head == start:
         breaker(state, "integration invariant: HEAD == start SHA but a patch was expected")
+    # Artifact guard (F64 / issue #71): catch contamination AT the commit that
+    # introduced it, naming the paths and the root cause — not several
+    # iterations later as an unexplained not-clean breaker.
+    arts = committed_artifacts(wt, start, head)
+    if arts:
+        shown = ", ".join(arts[:8]) + (" …" if len(arts) > 8 else "")
+        breaker(state, "build artifacts committed to the integration branch "
+                       f"({shown}) — these are regenerable output, not work "
+                       "product; drop them from the commit (e.g. `git rm -r "
+                       "--cached`) and ignore them in the repo")
     if not _clean(state):
-        rc, porc = git(wt, "status", "--porcelain")
-        names = [ln[3:] for ln in porc.splitlines()] if rc == 0 else []
-        shown = ", ".join(names[:8]) + (" …" if len(names) > 8 else "")
+        real, _ = _dirty_split(state)
+        shown = ", ".join(real[:8]) + (" …" if len(real) > 8 else "")
         breaker(state, "integration invariant: worktree not clean after commit"
-                       + (f" (dirty: {shown})" if names else ""))
+                       + (f" (dirty: {shown})" if real else ""))
     it["end"] = head
     it["phase"] = "verified"
     state["head_expected"] = head
@@ -1622,7 +1680,20 @@ def main():
     sp.add_argument("--allow-stale-base", action="store_true")
 
     sub.add_parser("iter-start")
-    sp = sub.add_parser("iter-verify"); sp.add_argument("--no-patch", action="store_true")
+    sp = sub.add_parser(
+        "iter-verify",
+        help="close the open iteration: integration invariants + the build-"
+             "artifact guard",
+        description=(
+            "Verify the open iteration and close its bracket. Build-artifact "
+            "guard (issue #71): regenerable output (__pycache__/, "
+            ".pytest_cache/, .mypy_cache/, .ruff_cache/, *.pyc, *.pyo, "
+            "*.egg-info) never counts as a dirty worktree — it is not work "
+            "product — and is a BREAKER if committed to the integration "
+            "branch, naming the offending paths and the cause at the commit "
+            "that introduced them rather than as an unexplained not-clean "
+            "breaker several iterations later."))
+    sp.add_argument("--no-patch", action="store_true")
     sub.add_parser(
         "rollback",
         help="reset the loop worktree --hard to the iteration start SHA + git "

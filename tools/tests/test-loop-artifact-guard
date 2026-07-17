@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Fixture for the loop's build-artifact guard (story 1.4 / issue #71, ledger
+# finding F64). Regenerable output is not work product:
+#   - untracked artifacts never make the worktree "dirty" (no false friction);
+#   - artifacts COMMITTED to the integration branch are a breaker AT the
+#     commit that introduced them, naming the paths and the root cause —
+#     not an unexplained not-clean breaker several iterations later;
+#   - a clean bracket is unaffected (iter-start -> work -> iter-verify).
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
+export TANUKI_ROOT="$root"
+L=("$here/tanuki-loop" --target t)
+jget() { python3 -c "import json,sys; d=json.load(sys.stdin); print(d$1)"; }
+
+repo="$root/repo"; mkdir -p "$repo"
+git init -q "$repo"; git -C "$repo" config user.email a@b.c
+git -C "$repo" config user.name t
+echo x > "$repo/f.py"; git -C "$repo" add -A; git -C "$repo" commit -qm init
+
+wt="$("${L[@]}" init --loop-repo "$repo" --cap 9 | jget '["worktree"]')"
+gwt() { git -C "$wt" "$@"; }
+
+# --- clean path: no regression ------------------------------------------------
+"${L[@]}" iter-start >/dev/null
+echo "work" >> "$wt/f.py"; gwt commit -qam "real work"
+"${L[@]}" iter-verify >/dev/null || fail "clean bracket must verify unchanged"
+pass "clean path: an artifact-free bracket verifies unchanged"
+
+# --- untracked artifacts are not 'dirty' -------------------------------------
+# The runtime regenerates these constantly; they must add no friction.
+"${L[@]}" iter-start >/dev/null
+mkdir -p "$wt/pkg/__pycache__"
+echo junk > "$wt/pkg/__pycache__/mod.cpython-311.pyc"
+echo junk > "$wt/stray.pyc"
+mkdir -p "$wt/.pytest_cache"; echo junk > "$wt/.pytest_cache/v"
+echo "more work" >> "$wt/f.py"; gwt commit -qam "work with artifacts lying around"
+"${L[@]}" iter-verify >/dev/null \
+  || fail "untracked build artifacts must not make the worktree dirty"
+pass "untracked artifacts (__pycache__, *.pyc, .pytest_cache) never read as dirty"
+
+# A REAL untracked file still makes it dirty — the guard must not blanket-ignore.
+"${L[@]}" iter-start >/dev/null
+echo "more" >> "$wt/f.py"; gwt commit -qam "work"
+echo "genuinely uncommitted" > "$wt/real-leftover.txt"
+rc=0; b="$("${L[@]}" iter-verify 2>&1)" || rc=$?
+[ "$rc" = "3" ] || fail "a real untracked file must still trip not-clean, got $rc"
+echo "$b" | grep -q "real-leftover.txt" \
+  || fail "not-clean breaker should still name real dirty paths: $b"
+echo "$b" | grep -q "worktree not clean" \
+  || fail "expected the not-clean breaker for a real dirty file: $b"
+pass "a real dirty file still trips not-clean (guard is not a blanket ignore)"
+rm -f "$wt/real-leftover.txt"
+"${L[@]}" rollback >/dev/null 2>&1 || true
+
+# --- committed artifacts: breaker naming paths AND root cause -----------------
+# The actual contamination path: an agent's `git add -A` sweeps them in.
+"${L[@]}" iter-start >/dev/null
+mkdir -p "$wt/pkg/__pycache__"
+echo junk > "$wt/pkg/__pycache__/mod.cpython-311.pyc"
+echo "work" >> "$wt/f.py"
+gwt add -A                      # the mistake this guard exists to catch
+gwt commit -qm "work + swept-in artifacts"
+rc=0; b="$("${L[@]}" iter-verify 2>&1)" || rc=$?
+[ "$rc" = "3" ] || fail "committed artifacts must break the iteration, got $rc"
+reason="$(echo "$b" | jget '["breaker"]')"
+echo "$reason" | grep -q "pkg/__pycache__/mod.cpython-311.pyc" \
+  || fail "breaker must name the offending path, got: $reason"
+echo "$reason" | grep -qi "build artifacts committed" \
+  || fail "breaker must state the root cause, got: $reason"
+echo "$reason" | grep -qi "not clean" \
+  && fail "committed artifacts must not masquerade as a not-clean breaker: $reason"
+pass "committed artifacts break AT the commit, naming the paths and the cause"
+
+# The guard fires at the introducing commit, so the RECORDED breaker is the
+# artifact one — the failure this story describes is precisely that the
+# contamination used to surface iterations later as something else.
+# (state.json is read directly here so this fixture stays independent of
+# story 1.3's status-surfacing work.)
+recorded="$(python3 -c '
+import glob, json, sys
+p = glob.glob(sys.argv[1] + "/t/loop/*/state.json")
+print(json.load(open(p[0]))["last_breaker"]["reason"])' "$root")"
+echo "$recorded" | grep -qi "build artifacts committed" \
+  || fail "the recorded breaker should be the artifact one, got: $recorded"
+pass "the artifact breaker is what state records (diagnosable at the source)"
+
+echo "ALL PASS"
