@@ -236,6 +236,45 @@ rc=0; "${L[@]}" iter-start >/tmp/cap.json 2>&1 || rc=$?
 [ "$rc" = "3" ] && grep -q "iteration cap reached" /tmp/cap.json || fail "expected cap breaker"
 pass "cap breaker fires once the fixed iteration ceiling is hit"
 
+# --- F3 / issue #64: the cap breaker states its CAUSE and a next action -------
+# "cap reached" alone reads like a sequencing complaint on a retry and gives no
+# way to see that rolled-back work consumed the allowance.
+grep -q "1/1 consumed (1 verified, 0 rolled back)" /tmp/cap.json \
+  || fail "cap breaker must state the consumption breakdown: $(cat /tmp/cap.json)"
+grep -q "proceed to the morning gate" /tmp/cap.json \
+  || fail "cap breaker must name the next action: $(cat /tmp/cap.json)"
+pass "issue #64: cap breaker states the cause (n/cap, verified/rolled back) + next action"
+
+# The issue's exact scenario: both iterations consumed, one verified and one
+# ROLLED BACK — the case where the breakdown carries real information.
+"${L[@]}" init --loop-repo "$repo" --cap 2 >/dev/null
+wt3="$("${L[@]}" status | jget '["worktree"]')"
+"${L[@]}" iter-start >/dev/null
+echo v4 > "$wt3/f"; git -C "$wt3" commit -qam iter1
+"${L[@]}" iter-verify >/dev/null
+"${L[@]}" iter-start >/dev/null
+echo v5 > "$wt3/f"; git -C "$wt3" commit -qam iter2
+"${L[@]}" rollback >/dev/null
+rc=0; "${L[@]}" iter-start >/tmp/cap2.json 2>&1 || rc=$?
+[ "$rc" = "3" ] || fail "expected the cap breaker on a consumed run, got $rc"
+grep -q "2/2 consumed (1 verified, 1 rolled back)" /tmp/cap2.json \
+  || fail "breakdown must count the rolled-back iteration: $(cat /tmp/cap2.json)"
+pass "issue #64: rolled-back work is visible in the cap breakdown (1 verified, 1 rolled back)"
+
+# A cap breaker must NOT masquerade as a sequencing violation, or vice versa:
+# the two are distinct causes and the sequencing check runs first, so an open
+# bracket reports sequencing even when the cap is also exhausted.
+grep -qi "sequencing" /tmp/cap2.json \
+  && fail "cap breaker must not read as a sequencing violation: $(cat /tmp/cap2.json)"
+"${L[@]}" init --loop-repo "$repo" --cap 1 >/dev/null
+"${L[@]}" iter-start >/dev/null
+rc=0; "${L[@]}" iter-start >/tmp/seq.json 2>&1 || rc=$?
+[ "$rc" = "3" ] && grep -q "sequencing violation" /tmp/seq.json \
+  || fail "a double iter-start must report sequencing, not the cap: $(cat /tmp/seq.json)"
+grep -q "iteration cap reached" /tmp/seq.json \
+  && fail "sequencing violation masked by the cap breaker (issue #64)"
+pass "issue #64: cap and sequencing stay distinct causes; neither masks the other"
+
 integ="$("${L[@]}" status | jget '["integration_branch"]')"
 git -C "$repo" merge -q --no-ff "$integ" -m "merge integration"
 "${L[@]}" gate-check | jget '["reachable"]' | grep -q True || fail "gate-check should see integration reachable from base"
