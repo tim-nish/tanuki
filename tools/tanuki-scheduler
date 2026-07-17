@@ -756,9 +756,28 @@ def cmd_status(args):
          "scenarios": sched["scenarios"]})
 
 
+def slug_target(value):
+    """--target is a namespace slug, never a path (issues #68/#70).
+
+    State lives under $TANUKI_ROOT/<target>/, so a path-like value either
+    nests silently (os.path.join swallows an absolute path — the accidental
+    "support" #68 reported) or fails deep inside a later git call with a
+    low-level error (#70). Both are the same root cause: --target was never
+    validated. Reject at parse time so the message names the contract.
+    TANUKI_ROOT is the supported way to relocate state.
+    """
+    if (value and not value.startswith(".")
+            and all(c.isalnum() or c in "._-" for c in value)):
+        return value
+    raise argparse.ArgumentTypeError(
+        f"--target must be a simple namespace slug (letters, digits, "
+        f"'.', '_', '-'), not a path: {value!r}. State lives under "
+        f"$TANUKI_ROOT/<target>/ — set TANUKI_ROOT to relocate it.")
+
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--target", default=None)
+    p.add_argument("--target", default=None, type=slug_target)
     sub = p.add_subparsers(dest="cmd", required=True)
     sp = sub.add_parser("register")
     sp.add_argument("--repo", required=True)

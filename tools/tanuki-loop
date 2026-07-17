@@ -1521,14 +1521,34 @@ def cmd_status(args):
     })
 
 
+def slug_target(value):
+    """--target is a namespace slug, never a path (issues #68/#70).
+
+    State lives under $TANUKI_ROOT/<target>/, so a path-like value either
+    nests silently (os.path.join swallows an absolute path — the accidental
+    "support" #68 reported) or fails deep inside a later git call with a
+    low-level error (#70). Both are the same root cause: --target was never
+    validated. Reject at parse time so the message names the contract.
+    TANUKI_ROOT is the supported way to relocate state.
+    """
+    if (value and not value.startswith(".")
+            and all(c.isalnum() or c in "._-" for c in value)):
+        return value
+    raise argparse.ArgumentTypeError(
+        f"--target must be a simple namespace slug (letters, digits, "
+        f"'.', '_', '-'), not a path: {value!r}. State lives under "
+        f"$TANUKI_ROOT/<target>/ — set TANUKI_ROOT to relocate it.")
+
+
 def main():
     p = argparse.ArgumentParser()
     # --target is a global option and must precede the subcommand, e.g.
     # `tanuki-loop --target foo iter-start` (F40); it is a namespace slug, not a
     # path (F52) — state lives under $TANUKI_ROOT/<target>/.
-    p.add_argument("--target", required=True,
-                   help="target namespace slug (not a path); global option — "
-                        "must come before the subcommand")
+    p.add_argument("--target", required=True, type=slug_target,
+                   help="target namespace slug (not a path; path-like values "
+                        "are rejected); global option — must come before the "
+                        "subcommand")
     p.add_argument("--run", default=None)
     sub = p.add_subparsers(dest="cmd", required=True)
 

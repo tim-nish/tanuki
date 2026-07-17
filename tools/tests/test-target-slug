@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Fixture for the --target slug contract (issues #68/#70, one coordinated
+# disposition — owner 2026-07-17):
+#   --target is a simple namespace slug; path-like values are rejected at
+#   argument-parse time with a clear error, in EVERY tool that takes --target.
+# The two symptoms this closes:
+#   #68 — an absolute path silently "worked" in tanuki-ledger as an accidental
+#         os.path.join side effect (join swallows an absolute right-hand side);
+#   #70 — a path-like value failed deep inside `git worktree add` with a
+#         confusing low-level error instead of failing up front.
+# Same root cause: --target was never validated. The document-the-mode branch
+# was declined; TANUKI_ROOT is the supported way to relocate state.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
+export TANUKI_ROOT="$root"
+
+# Every tool that takes --target enforces the same contract (uniform, not
+# per-tool): ledger + drive + scheduler + loop.
+tools=(tanuki-ledger tanuki-drive tanuki-scheduler tanuki-loop)
+
+# Path-like shapes that must all be rejected. The absolute path is #68's
+# accidental mode; the rest are #70's shape.
+bad=("/abs/path" "../evil" "a/b" "./x" "." ".." "~/tilde")
+
+for t in "${tools[@]}"; do
+  for v in "${bad[@]}"; do
+    out="$("$here/$t" --target "$v" status 2>&1 || true)"
+    rc=0; "$here/$t" --target "$v" status >/dev/null 2>&1 || rc=$?
+    [ "$rc" = "2" ] || fail "$t --target '$v' exited $rc, expected 2 (parse-time reject)"
+    echo "$out" | grep -q -- "--target must be a simple namespace slug" \
+      || fail "$t --target '$v' did not name the slug contract: $out"
+    # The error must arrive from argument parsing, never from a later git or
+    # filesystem call (#70's whole complaint was a deep, low-level error).
+    echo "$out" | grep -qi "worktree\|Traceback\|No such file or directory" \
+      && fail "$t --target '$v' leaked a low-level error: $out"
+  done
+  pass "$t rejects path-like --target at parse time, naming the contract"
+done
+
+# #68 specifically: the absolute-path mode must be GONE, not merely noisy —
+# nothing may be created outside $TANUKI_ROOT.
+outside="$root/outside-namespace"
+"$here/tanuki-ledger" --target "$outside" init >/dev/null 2>&1 || true
+[ ! -e "$outside/ledger.json" ] \
+  || fail "absolute-path --target still created a ledger outside the namespace"
+pass "#68: absolute-path --target creates nothing (accidental mode removed)"
+
+# The contract must not break ordinary slugs, including dots/dashes/digits.
+for good in t my-target my.target-v2 target2 a; do
+  "$here/tanuki-ledger" --target "$good" init >/dev/null 2>&1 \
+    || fail "valid slug '$good' was rejected"
+  [ -e "$root/$good/ledger.json" ] \
+    || fail "valid slug '$good' did not create state under TANUKI_ROOT"
+done
+pass "valid slugs (letters, digits, dots, dashes) still work"
+
+# TANUKI_ROOT remains the supported relocation path — the reason declining
+# #68's document-the-mode branch costs nothing.
+alt="$(mktemp -d)"; trap 'rm -rf "$root" "$alt"' EXIT
+TANUKI_ROOT="$alt" "$here/tanuki-ledger" --target relocated init >/dev/null 2>&1 \
+  || fail "TANUKI_ROOT relocation broke"
+[ -e "$alt/relocated/ledger.json" ] \
+  || fail "TANUKI_ROOT relocation did not place state under the new root"
+pass "TANUKI_ROOT still relocates state (the supported alternative)"
+
+echo "ALL PASS"
