@@ -265,7 +265,10 @@ def breaker_hint(reason):
                 ".pyc, coverage files) — add them to .gitignore or clean them; "
                 "the dirty paths are named in the breaker reason")
     if "integration invariant" in r:
-        return "the four-part integration check failed — inspect the worktree against the audit trail"
+        return ("the four-part integration check failed — the iteration is in an "
+                "inconsistent state; reset it with `tanuki-loop --target <t> "
+                "rollback` (resets to the start SHA and cleans the worktree), or "
+                "inspect the worktree against the audit trail first")
     if "rollback failed" in r:
         return "the worktree could not be reset cleanly — inspect it by hand at the start SHA"
     return None

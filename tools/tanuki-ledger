@@ -905,8 +905,9 @@ def render_next(state, target, ledger):
             f"drives both)"),
         "watching-only": (
             "promote chronic/high-confidence open findings with "
-            "'promote --min-recurrence N', then decide them: "
-            f"/tanuki {target} decide"),
+            "'promote --min-recurrence N', then decide them with the "
+            f"/tanuki {target} decide slash command in Claude Code "
+            "(not a tanuki-ledger subcommand)"),
         "all-decided": (
             # "compacted" is NOT a status — a tombstoned finding is still
             # accepted or dismissed (issue #62 / F25; the F99 regression was
