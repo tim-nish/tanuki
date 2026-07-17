@@ -1191,7 +1191,11 @@ def main():
     # rejection error (F33). choices= also produces a clear argparse message.
     sp.add_argument("--kind", default="friction", choices=KINDS,
                     help=f"finding kind (default: friction); one of {KINDS}")
-    sp.add_argument("--evidence", required=True)
+    # Show the comma-joined form here too, so multi-evidence is discoverable
+    # from `upsert-finding --help` and not only from the top-level usage (F124).
+    sp.add_argument("--evidence", required=True,
+                    help="one or more run/scenario#seq pointers, comma-joined "
+                         "(e.g. runA/scen#1,runB/scen#2)")
     # --match takes an existing finding id to accumulate onto (bumps recurrence
     # and scenario spread) instead of creating a duplicate (F62); omit it to
     # create a new finding (then --title is required).
