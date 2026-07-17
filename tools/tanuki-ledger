@@ -363,14 +363,57 @@ def cmd_promote(args, ledger):
     print(json.dumps(with_priority(out), indent=2, ensure_ascii=False))
 
 
+# Canonical lifecycle (docs/tanuki-spec.md, "Finding lifecycle"). The arrow
+# path is the canonical OPERATOR path, not a tool-enforced state machine:
+# set-status records any of the four states and sequencing belongs to the
+# command layer (the decision pass promotes before it asks). The tool's job is
+# to make a skip visible, never to block it — warn-only, spec decision
+# 2026-07-17.
+CANONICAL_TRANSITIONS = {("open", "proposed"), ("proposed", "accepted"),
+                         ("proposed", "dismissed")}
+CANONICAL_PATH = "open -> proposed -> accepted/dismissed"
+
+
+def lifecycle_notice(before, after):
+    """One line naming a non-canonical transition, or None when canonical.
+
+    Never a rejection: the two direct transitions the spec names as expected
+    (open -> accepted for a watching-list accept; accepted -> open for a
+    regression re-open) are legitimate, so a notice tells a deliberate
+    shortcut from a sequencing mistake without blocking either.
+    """
+    if (before, after) in CANONICAL_TRANSITIONS:
+        return None
+    if before == after:
+        return f"note: {before} -> {after} is a no-op (already {after})"
+    if after == "open":
+        return (f"note: {before} -> open re-opens a decided finding — "
+                f"expected when a verified-fixed finding recurs; canonical "
+                f"path is {CANONICAL_PATH}")
+    if before == "open":
+        # open -> accepted / dismissed: the skipped state is 'proposed'.
+        why = ("expected for a watching-list accept" if after == "accepted"
+               else "skipping the brief")
+        return (f"note: open -> {after} skips proposed — {why}; canonical "
+                f"path is {CANONICAL_PATH}")
+    # accepted <-> dismissed: reversing a decision already taken.
+    return (f"note: {before} -> {after} reverses a decision already recorded; "
+            f"canonical path is {CANONICAL_PATH}")
+
+
 def cmd_set_status(args, ledger):
     if args.status not in STATUSES:
         print(f"error: status must be one of {STATUSES}", file=sys.stderr)
         sys.exit(2)
     for f in ledger["findings"]:
         if f["id"] == args.id:
+            before = f.get("status")
             f["status"] = args.status
             save(args.target, ledger)
+            # Notice on stderr so stdout stays the unchanged contract.
+            notice = lifecycle_notice(before, args.status)
+            if notice:
+                print(notice, file=sys.stderr)
             print(f"{f['id']} -> {args.status}")
             return
     print(f"error: no finding {args.id}", file=sys.stderr)
@@ -1027,12 +1070,29 @@ def main():
     sp.add_argument("--dry-run", action="store_true",
                     help="preview only: list qualifying findings without "
                          "changing any status")
-    sp = sub.add_parser("set-status")
+    sp = sub.add_parser(
+        "set-status",
+        help="record a finding's decision state (any transition; never "
+             "rejected on lifecycle grounds)",
+        description=(
+            f"Record a finding's status. The canonical operator path is "
+            f"{CANONICAL_PATH} — but that is the OPERATOR path, not a "
+            f"tool-enforced state machine: sequencing belongs to the command "
+            f"layer (the decision pass promotes before it asks). Any "
+            f"transition is recorded and a non-canonical one prints a "
+            f"one-line notice on stderr naming the skipped state; it is "
+            f"NEVER rejected. Two direct transitions are expected and "
+            f"legitimate: open -> accepted (accepting a below-bar finding "
+            f"straight off the watching list) and accepted -> open "
+            f"(re-opening when a verified-fixed finding recurs). See "
+            f"docs/tanuki-spec.md, \"Finding lifecycle\"."))
     sp.add_argument("--id", required=True)
     # Enumerate valid statuses in --help (F60), not only via a rejection error;
     # choices= also yields a clear argparse message on a bad value.
     sp.add_argument("--status", required=True, choices=STATUSES,
-                    help=f"new status; one of {STATUSES}")
+                    help=f"new status; one of {STATUSES}. Canonical path: "
+                         f"{CANONICAL_PATH}; non-canonical transitions are "
+                         f"recorded with a notice, never rejected")
     sp = sub.add_parser(
         "consolidate",
         help="read-only: emit candidate groups of related findings (JSON) for "

@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Fixture for set-status's lifecycle notice (story 1.5 / issue #67, ledger
+# finding F63). The arrow path in docs/tanuki-spec.md ("Finding lifecycle") is
+# the canonical OPERATOR path, not a tool-enforced state machine:
+#   - a canonical transition is silent;
+#   - a non-canonical one is RECORDED with a one-line stderr notice naming the
+#     skipped state — never rejected (warn-only, spec decision 2026-07-17);
+#   - the two direct transitions the spec names as legitimate (open->accepted
+#     for a watching-list accept, accepted->open for a regression re-open)
+#     both succeed;
+#   - stdout and the exit code are unchanged (the notice is stderr-only, so a
+#     stdout parser never sees it).
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
+export TANUKI_ROOT="$root"
+L=("$here/tanuki-ledger" --target t)
+
+"${L[@]}" init >/dev/null 2>&1
+"${L[@]}" upsert-finding --title "a defect" --kind gap --evidence "r1/s1#1" >/dev/null
+
+# set <status>, capturing stdout/stderr/rc separately.
+set_status() {
+  rc=0
+  o="$("${L[@]}" set-status --id F1 --status "$1" 2>"$root/err")" || rc=$?
+  e="$(cat "$root/err")"
+}
+
+# --- canonical transitions are silent ----------------------------------------
+for step in proposed accepted; do
+  set_status "$step"
+  [ "$rc" = "0" ] || fail "canonical -> $step exited $rc"
+  [ -z "$e" ] || fail "canonical -> $step printed a notice: $e"
+  [ "$o" = "F1 -> $step" ] || fail "stdout contract changed: $o"
+done
+pass "canonical transitions (open->proposed->accepted) are silent"
+
+"${L[@]}" set-status --id F1 --status open >/dev/null 2>&1   # reset
+set_status proposed
+set_status dismissed
+[ -z "$e" ] || fail "canonical proposed->dismissed printed a notice: $e"
+pass "canonical proposed->dismissed is silent"
+
+# --- the skip: open -> accepted (watching-list accept) ------------------------
+"${L[@]}" set-status --id F1 --status open >/dev/null 2>&1
+set_status accepted
+[ "$rc" = "0" ] || fail "open->accepted must succeed (warn-only), exited $rc"
+[ -n "$e" ] || fail "open->accepted printed no notice"
+echo "$e" | grep -q "proposed" \
+  || fail "notice must name the skipped state 'proposed': $e"
+echo "$e" | grep -qi "watching" \
+  || fail "notice should say why the skip is expected: $e"
+[ "$(printf '%s' "$e" | wc -l)" -le 1 ] || fail "notice must be ONE line: $e"
+[ "$o" = "F1 -> accepted" ] || fail "stdout contract changed on a skip: $o"
+pass "open->accepted: succeeds, one-line notice names the skipped state"
+
+# --- the re-open: accepted -> open (regression) -------------------------------
+set_status open
+[ "$rc" = "0" ] || fail "accepted->open must succeed (regression re-open), exited $rc"
+[ -n "$e" ] || fail "accepted->open printed no notice"
+echo "$e" | grep -qi "re-open" || fail "notice should name the re-open: $e"
+[ "$o" = "F1 -> open" ] || fail "stdout contract changed on a re-open: $o"
+pass "accepted->open: succeeds with a notice (regression re-open)"
+
+# --- never rejects on lifecycle grounds --------------------------------------
+# Every ordered pair of statuses must be recorded, whatever the notice says.
+for a in open proposed accepted dismissed; do
+  for b in open proposed accepted dismissed; do
+    "${L[@]}" set-status --id F1 --status "$a" >/dev/null 2>&1
+    rc=0; "${L[@]}" set-status --id F1 --status "$b" >/dev/null 2>&1 || rc=$?
+    [ "$rc" = "0" ] || fail "$a -> $b was rejected (exit $rc); lifecycle is warn-only"
+    got="$("${L[@]}" findings --status "$b" 2>/dev/null | grep -c F1 || true)"
+    [ "$got" != "0" ] || fail "$a -> $b did not record the status"
+  done
+done
+pass "no transition is ever rejected on lifecycle grounds (all 16 pairs record)"
+
+# --- the notice is stderr-only ------------------------------------------------
+"${L[@]}" set-status --id F1 --status open >/dev/null 2>&1
+clean="$("${L[@]}" set-status --id F1 --status accepted 2>/dev/null)"
+[ "$clean" = "F1 -> accepted" ] \
+  || fail "a stdout parser must never see the notice, got: $clean"
+pass "notice is stderr-only; stdout stays the unchanged contract"
+
+# --- --help carries the contract (D3) -----------------------------------------
+# argparse re-wraps the description, so collapse whitespace before matching —
+# the contract is the words, not where the terminal broke the line.
+h="$("${L[@]}" set-status --help 2>&1 | tr '\n' ' ' | tr -s ' ')"
+echo "$h" | grep -q "open -> proposed -> accepted/dismissed" \
+  || fail "--help must name the canonical path"
+echo "$h" | grep -qi "never rejected" \
+  || fail "--help must state transitions are never rejected"
+echo "$h" | grep -qi "notice" || fail "--help must state a notice is printed"
+for s in open proposed accepted dismissed; do
+  echo "$h" | grep -q "$s" || fail "--help must list the status enum ($s missing)"
+done
+pass "--help lists the enum, names the canonical path, and states warn-only"
+
+echo "ALL PASS"
