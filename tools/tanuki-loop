@@ -119,10 +119,12 @@ import argparse
 import json
 import os
 import shutil
+import re
 import subprocess
 import sys
 import tempfile
 import time
+from datetime import date
 
 TANUKI_ROOT = os.environ.get("TANUKI_ROOT", os.path.expanduser("~/.tanuki"))
 
@@ -350,6 +352,303 @@ def cleanup_merged_integration_branches(repo, base, target):
             kept.append(b)                          # unmerged tip — never delete
     return {"deleted": deleted, "kept": kept, "skipped": skipped,
             "skipped_reasons": skipped_reasons}
+
+
+# --- unresolved: the reconcile pass's discovery + mechanical signals ---------
+# (spec-tanuki-loop "Reconcile substrate + drift notification")
+#
+# SIGNALS, NEVER VERDICTS. This tool must not print, return, or imply
+# already-landed / superseded / conflicting / still-applicable. Those are
+# semantic: on 2026-07-17 every one of 25 commits was patch-non-equivalent
+# (`git cherry` called them all unmerged) while several were already landed,
+# and a commit subjected "render the module docstrings in --help" carried a
+# REJECTED design in another hunk. A tool guessing a verdict from patch
+# identity or a subject line would be confidently wrong, and confidently wrong
+# is worse than silent — it is the failure the reconcile pass exists to
+# prevent. The verdicts belong to that attended pass.
+#
+# The closed set of field names this payload may use for per-commit facts.
+# Enforced (see _assert_no_verdicts) rather than left to discipline, because
+# the instinct to add "applicable": true here is exactly what the rule forbids.
+_VERDICT_WORDS = ("landed", "applicable", "superseded", "conflicting",
+                  "conflict", "verdict", "recommend", "should_land", "safe")
+
+
+def _assert_no_verdicts(payload):
+    """A verdict-shaped key is a bug, not a feature (spec: signals never
+    verdicts). Fail loudly here rather than let one reach an operator who
+    would reasonably trust it."""
+    def walk(o, path=""):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                kl = str(k).lower()
+                for w in _VERDICT_WORDS:
+                    if w in kl:
+                        raise AssertionError(
+                            f"unresolved emitted a verdict-shaped field "
+                            f"{path}{k!r}: classification is the reconcile "
+                            f"pass's judgment, not this tool's "
+                            f"(spec-tanuki-loop, Rules)")
+                walk(v, f"{path}{k}.")
+        elif isinstance(o, list):
+            for i in o:
+                walk(i, path)
+    walk(payload)
+    return payload
+
+
+def _loop_repo_for(target, explicit=None):
+    """The loop repo for a target: an explicit --loop-repo wins (the contract
+    for scripts); otherwise the most recent run's state.json, which recorded
+    it. Never guessed from cwd."""
+    if explicit:
+        return explicit
+    d = os.path.join(TANUKI_ROOT, target, "loop")
+    if not os.path.isdir(d):
+        return None
+    runs = sorted(r for r in os.listdir(d)
+                  if os.path.isdir(os.path.join(d, r)))
+    for run in reversed(runs):
+        p = os.path.join(d, run, "state.json")
+        if os.path.exists(p):
+            try:
+                with open(p, encoding="utf-8") as f:
+                    return json.load(f).get("loop_repo")
+            except (ValueError, OSError):
+                continue
+    return None
+
+
+def unresolved_branches(repo, target, base=None):
+    """Signals for this target's unmerged integration branches. Read-only.
+
+    Reuses cleanup_merged_integration_branches' resolution — same prefix, same
+    worktree mapping, same reachability test — so this cannot disagree with
+    the sweep that decides what gets deleted.
+    """
+    prefix = f"tanuki-loop/{target}/"
+    rc, refs = git(repo, "for-each-ref", "--format=%(refname:short)",
+                   f"refs/heads/{prefix}*")
+    branches = [b for b in refs.splitlines()
+                if b.startswith(prefix)] if rc == 0 else []
+    base = base or git(repo, "symbolic-ref", "--short", "HEAD")[1] or "main"
+    # Same worktree map shape as the cleanup sweep (F9).
+    checked_out, _wt = {}, None
+    for ln in git(repo, "worktree", "list", "--porcelain")[1].splitlines():
+        if ln.startswith("worktree "):
+            _wt = ln[len("worktree "):]
+        elif ln.startswith("branch "):
+            checked_out[ln[len("branch "):].replace("refs/heads/", "")] = _wt
+    out = []
+    for b in branches:
+        # Merged tips are the sweep's business, not this command's: they are
+        # not a debt.
+        if git(repo, "merge-base", "--is-ancestor", b, base)[0] == 0:
+            continue
+        ahead = git(repo, "rev-list", "--count", f"{base}..{b}")[1]
+        behind = git(repo, "rev-list", "--count", f"{b}..{base}")[1]
+        last = git(repo, "log", "-1", "--format=%cI", b)[1]
+        days = None
+        if last:
+            try:
+                days = (date.today() - date.fromisoformat(last[:10])).days
+            except ValueError:
+                days = None
+        commits = []
+        for line in git(repo, "log", "--format=%h%x00%s", f"{base}..{b}")[1].splitlines():
+            sha, _, subj = line.partition("\0")
+            files = git(repo, "show", "--name-only", "--format=", sha)[1].split()
+            body = git(repo, "log", "-1", "--format=%B", sha)[1]
+            commits.append({
+                "sha": sha,
+                # The subject is REPORTED because an operator reads it, and
+                # flagged as inadmissible because they should not trust it:
+                # 8f4d556's subject described one of its two hunks.
+                "subject": subj,
+                "files": files,
+                # A fact about git, NOT a synonym for applicable. Named for
+                # what it measures.
+                "cherry_picks_cleanly": _picks_cleanly(repo, sha, base),
+                # Findings the message cites, paired with their CURRENT status
+                # — a citation of a finding now accepted-and-tombstoned is a
+                # superseded *candidate* for the pass to judge, never a verdict
+                # here.
+                "cites_findings": _cited_findings(target, body),
+            })
+        wt = checked_out.get(b)
+        out.append({
+            "branch": b, "tip": git(repo, "rev-parse", "--short", b)[1],
+            "ahead": int(ahead) if ahead.isdigit() else 0,
+            "behind": int(behind) if behind.isdigit() else 0,
+            "last_commit": last or None, "days_since_last_commit": days,
+            "worktree": wt,
+            "worktree_clean": (git(wt, "status", "--porcelain")[1] == ""
+                               if wt and os.path.isdir(wt) else None),
+            "commits": commits,
+        })
+    return sorted(out, key=lambda r: -(r["behind"]))
+
+
+def _picks_cleanly(repo, sha, base):
+    """Would `cherry-pick <sha>` onto <base> apply without conflict?
+
+    Cherry-pick semantics are a three-way merge with the commit's PARENT as
+    the merge base — merging <base> with <sha> directly is a different
+    question (it drags in every earlier commit on the branch) and answers it
+    wrong: a commit that only adds a new file reads as conflicting because
+    something else on the branch touched a shared file. A field named
+    `cherry_picks_cleanly` that measures a different merge is worse than no
+    field at all.
+
+    Uses the ORIGINAL `merge-tree <base-tree> <branch1> <branch2>` form, which
+    is a pure three-way merge: it touches no index, no ref and no worktree, and
+    exists in every git this repo could plausibly run on. The newer
+    `--write-tree --merge-base=` spelling is git >= 2.38 and returns a *usage
+    error* (129) on older gits — which, tested for with `rc == 0`, silently
+    reports EVERY commit as conflicting. This function is a signal the
+    reconcile pass reads; a fabricated one is worse than none, so it detects
+    conflict from the merge output rather than an exit code whose meaning
+    varies by version.
+
+    Still NOT a verdict: 8f4d556 applied perfectly and carried a rejected
+    design.
+    """
+    rc, merged = git(repo, "merge-tree", f"{sha}^", base, sha)
+    if rc != 0:
+        return None            # unknown, never a cheerful default
+    return "<<<<<<<" not in merged
+
+
+def _cited_findings(target, body):
+    """Finding ids a commit message cites, each with its CURRENT ledger status
+    (or null when the ledger has no such id). Pairing them is the point: the
+    citation alone is what a subject line is — a claim, not evidence."""
+    ids = sorted(set(re.findall(r"\bF\d+\b", body or "")))
+    if not ids:
+        return []
+    statuses = {}
+    p = os.path.join(TANUKI_ROOT, target, "ledger.json")
+    if os.path.exists(p):
+        try:
+            with open(p, encoding="utf-8") as f:
+                for fd in json.load(f).get("findings", []):
+                    statuses[fd["id"]] = {
+                        "status": fd.get("status"),
+                        "tombstoned": bool(fd.get("tombstone")),
+                    }
+        except (ValueError, OSError):
+            pass
+    return [{"id": i, **(statuses.get(i) or {"status": None,
+                                             "tombstoned": None})}
+            for i in ids]
+
+
+def drift_note(target, repo):
+    """One line for stderr when a debt exists, else None.
+
+    Never blocks, never prompts (the announce_new_target rule: unattended
+    callers must keep working). States; never acts.
+    """
+    if not repo or not os.path.isdir(repo):
+        return None
+    try:
+        rows = unresolved_branches(repo, target)
+    except Exception:
+        return None            # a notification must never break a run
+    if not rows:
+        return None
+    worst = max(r["behind"] for r in rows)
+    n = len(rows)
+    return (f"note: {n} unresolved loop branch(es) — the most stale is "
+            f"{worst} commit(s) behind. They hold work that never merged; "
+            f"`tanuki-loop --target {target} reconcile` reports what to do "
+            f"with it.")
+
+
+def cmd_unresolved(args):
+    repo = _loop_repo_for(args.target, getattr(args, "loop_repo", None))
+    if not repo or not os.path.isdir(repo):
+        body, typed = empty_state("unresolved:no-loop-repo", args.target)
+        payload = _assert_no_verdicts(
+            {"target": args.target, "loop_repo": repo, "branches": [],
+             "empty_state": typed})
+        if args.json:
+            out(payload)
+        else:
+            print(f"unresolved — {args.target}\n  {body}")
+        return
+    rows = unresolved_branches(repo, args.target)
+    payload = {"target": args.target, "loop_repo": repo, "branches": rows,
+               "empty_state": None}
+    if not rows:
+        body, typed = empty_state("unresolved:none", args.target)
+        payload["empty_state"] = typed
+    _assert_no_verdicts(payload)
+    write_unresolved_brief(args.target, payload)
+    if args.json:
+        out(payload)
+        return
+    print(f"unresolved — {args.target}")
+    if not rows:
+        print(f"  {body}")
+        return
+    for r in rows:
+        print(f"  {r['branch']}  {r['ahead']} ahead / {r['behind']} behind"
+              + (f", last commit {r['days_since_last_commit']}d ago"
+                 if r["days_since_last_commit"] is not None else ""))
+        for c in r["commits"]:
+            picks = {True: "picks-clean", False: "conflicts",
+                     None: "pick-unknown"}[c["cherry_picks_cleanly"]]
+            cites = ", ".join(f"{x['id']}={x['status'] or '?'}"
+                              + ("+tombstoned" if x["tombstoned"] else "")
+                              for x in c["cites_findings"])
+            print(f"    {c['sha']}  {picks:<11} {c['subject'][:52]}"
+                  + (f"  [cites {cites}]" if cites else ""))
+    print("\n  These are SIGNALS, not verdicts: whether a change is already "
+          "landed,\n  superseded, conflicting or still applicable is judgment "
+          "— and a subject\n  line is a claim, not evidence. "
+          f"`tanuki-loop --target {args.target} reconcile` classifies them.")
+
+
+def write_unresolved_brief(target, payload):
+    """The stable-path brief (spec: ~/.tanuki/<target>/unresolved.md — NEVER
+    the target repo, which nothing may write to)."""
+    d = os.path.join(TANUKI_ROOT, target)
+    if not os.path.isdir(d):
+        return None
+    lines = [f"# Unresolved loop branches — {target}", "",
+             f"_Generated by `tanuki-loop --target {target} unresolved`. "
+             f"Signals only — the verdicts are the reconcile pass's._", ""]
+    if not payload["branches"]:
+        lines += [payload["empty_state"]["reason"], ""]
+    else:
+        lines += [f"**{len(payload['branches'])} branch(es) hold work that "
+                  f"never merged.** `tanuki-loop --target {target} reconcile` "
+                  f"reports what to do with each.", ""]
+        for r in payload["branches"]:
+            lines.append(f"## {r['branch']}")
+            lines.append(f"- {r['ahead']} ahead / **{r['behind']} behind**"
+                         + (f" · last commit {r['days_since_last_commit']}d ago"
+                            if r["days_since_last_commit"] is not None else ""))
+            if r["worktree"]:
+                lines.append(f"- worktree: `{r['worktree']}`"
+                             + ("" if r["worktree_clean"] else " (dirty)"))
+            lines.append("")
+            for c in r["commits"]:
+                cites = ", ".join(f"{x['id']}={x['status'] or '?'}"
+                                  for x in c["cites_findings"])
+                mark = {True: "", False: " — *conflicts*",
+                        None: " — *pick state unknown*"}[
+                            c["cherry_picks_cleanly"]]
+                lines.append(f"- `{c['sha']}` {c['subject']}{mark}"
+                             + (f" — cites {cites}" if cites else ""))
+            lines.append("")
+    p = os.path.join(d, "unresolved.md")
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(tmp, p)
+    return p
 
 
 def resolve_loop_config(args):
@@ -1633,6 +1932,19 @@ EMPTY_STATES = {
         reason="no ledger movement yet — no iteration has started, so nothing "
                "could have moved",
         next="tanuki-loop --target {t} iter-start"),
+    # -- unresolved loop branches ---------------------------------------------
+    "unresolved:none": dict(
+        expected=True,
+        reason="no unresolved loop branches — every integration branch is "
+               "merged or gone. Expected: this is what a repo looks like when "
+               "the morning gate is kept up with",
+        next=None),
+    "unresolved:no-loop-repo": dict(
+        expected=True,
+        reason="no loop repo recorded for this target yet — expected before "
+               "the first `init`; there are no integration branches to hold a "
+               "debt",
+        next="tanuki-loop --target {t} init --loop-repo <repo>"),
     # -- scheduler decisions (F47 / issue #66) --------------------------------
     "scheduler:never-synced-fresh": dict(
         expected=True,
@@ -1666,6 +1978,15 @@ def empty_state(key, target, **fmt):
                   "next": nxt}
 
 
+def emit_drift_note(target, repo):
+    """Print the drift note if a debt exists. stderr, one line, never blocks —
+    an unattended phase that hits this keeps running (the announce_new_target
+    rule). States; never acts."""
+    note = drift_note(target, repo)
+    if note:
+        print(note, file=sys.stderr)
+
+
 def cmd_dashboard(args):
     """Operational status (plain text, one screen). Within seconds the
     operator can answer: is the loop healthy, did anything unexpected happen,
@@ -1673,8 +1994,14 @@ def cmd_dashboard(args):
     convergence, and what decision comes next. Cumulative/lifetime numbers are
     a single pointer line — the long view is `tanuki-scheduler history`.
     --follow N re-renders every N seconds; reads state files only."""
+    # Drift note once, before the first render — not inside the --follow loop,
+    # which would repeat it every N seconds until it stopped being read.
+    _noted = False
     while True:
         state = load_state(args.target, args.run)
+        if not _noted:
+            emit_drift_note(state["target"], state.get("loop_repo"))
+            _noted = True
         findings = ledger_findings(state["target"])
         n_done = len(state["iterations"])
         # F45 / issue #63: rolled-back iterations still consume the cap, so the
@@ -2175,6 +2502,25 @@ def main():
     sp = sub.add_parser("dashboard")
     sp.add_argument("--follow", type=int, default=None)
     sub.add_parser("status")
+    sp = sub.add_parser(
+        "unresolved",
+        help="read-only: signals about this target's unmerged integration "
+             "branches (the reconcile pass's discovery)",
+        description=(
+            "Enumerate the loop's own unmerged integration branches and the "
+            "mechanical signals about them: staleness (ahead/behind, days), "
+            "files touched, whether each commit cherry-picks cleanly, and the "
+            "ledger findings each message cites paired with their CURRENT "
+            "status. Writes nothing but ~/.tanuki/<target>/unresolved.md; "
+            "never prompts. SIGNALS, NEVER VERDICTS: whether a change is "
+            "already landed, superseded, conflicting or still applicable is "
+            "semantic judgment and belongs to `reconcile` "
+            "(commands/tanuki-loop.md). `cherry_picks_cleanly` is a fact "
+            "about git and is NOT a synonym for applicable."))
+    sp.add_argument("--json", action="store_true")
+    sp.add_argument("--loop-repo", default=None,
+                    help="the repo holding the integration branches "
+                         "(default: the most recent run's recorded loop_repo)")
 
     args = p.parse_args()
     {"init": cmd_init, "doctor": cmd_doctor,
@@ -2185,7 +2531,8 @@ def main():
      "gate-check": cmd_gate_check, "gate-push": cmd_gate_push,
      "issue-get": cmd_issue_get,
      "issue-put": cmd_issue_put, "policy": cmd_policy, "finish": cmd_finish,
-     "dashboard": cmd_dashboard, "status": cmd_status}[args.cmd](args)
+     "dashboard": cmd_dashboard, "status": cmd_status,
+     "unresolved": cmd_unresolved}[args.cmd](args)
 
 
 if __name__ == "__main__":
