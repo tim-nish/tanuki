@@ -1042,10 +1042,18 @@ def cmd_doctor(args):
     #    regression. Run in a throwaway detached worktree, removed afterward:
     #    the operator's tree is never touched and the repo nets zero change.
     if not cfg["test_cmd"]:
+        # derived_from marks this as a CONSEQUENCE of loop-config, not an
+        # independent fault (F112): with no test_cmd there is nothing to run,
+        # so fixing loop-config fixes this too. The breaker summary reads this
+        # field and names only root causes, so the operator sees one problem to
+        # fix rather than two unrelated ones.
         checks.append({"check": "baseline-test", "ok": False,
+                       "derived_from": "loop-config",
                        "detail": "no test_cmd to check — configure one first "
                                  "(the loop's test breaker is the headless "
-                                 "run's only regression gate)"})
+                                 "run's only regression gate). This check "
+                                 "fails only because loop-config is "
+                                 "incomplete — fixing that fixes this."})
         # Report the artifact check even when it cannot run. A check that shows
         # up only in the ready report looks like it appeared from nowhere
         # between two runs (F91) — the fixed skeleton the dashboard already
@@ -1162,12 +1170,27 @@ def cmd_doctor(args):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     failed = [c["check"] for c in checks if not c["ok"]]
+    # Cause before consequence (F112). A derived check fails only because the
+    # check it names failed; listing the two as peers reads as two unrelated
+    # problems. Derived entries are still reported in full under "checks" —
+    # they are demoted in the SUMMARY, never hidden.
+    derived = {c["check"]: c["derived_from"] for c in checks
+               if not c["ok"] and c.get("derived_from")
+               and c["derived_from"] in failed}
+    roots = [c for c in failed if c not in derived]
     report = {"phase": args.phase, "target": args.target, "base": base,
               "base_sha": base_sha, "ready": not failed, "checks": checks}
     if failed:
-        report["breaker"] = (f"doctor: {len(failed)} check(s) failed "
-                             f"({', '.join(failed)}) — not ready for "
+        tail = ""
+        if derived:
+            tail = ("; " + ", ".join(f"{c} follows from {r}"
+                                     for c, r in derived.items()))
+        report["breaker"] = (f"doctor: {len(roots)} check(s) failed "
+                             f"({', '.join(roots)}){tail} — not ready for "
                              f"phase {args.phase} headless execution")
+        report["root_causes"] = roots
+        if derived:
+            report["derived_failures"] = derived
         # Surface the exit-code contract in the payload so a scripted headless
         # caller learns it from the tool, not only from commands/tanuki-loop.md
         # (F34): exit 3 == not ready / breaker; exit 0 == ready.
@@ -1238,6 +1261,19 @@ def committed_artifacts(wt, start, head):
 
 
 def cmd_iter_start(args):
+    """Open an iteration, tripping any breaker that should stop the run first.
+
+    Check PRECEDENCE, which is observable and worth knowing (F93): sequencing,
+    then cap, then wall-time, then external modification. The order matters
+    because the first match wins and stops the run — so once a run reaches its
+    cap, `cap reached` shadows the external-modification check permanently, and
+    an external edit to a capped run's worktree is never reported. That is
+    deliberate (a capped run is over; it has no next iteration to protect) but
+    it means a capped run's worktree is NOT guarded — re-`init` to get a fresh
+    guarded run rather than continuing to edit a capped one. Rolled-back
+    iterations consume cap slots, so a run can reach this state earlier than
+    its landed-commit count suggests (F27).
+    """
     state = load_state(args.target, args.run)
     if state["iterations"] and state["iterations"][-1].get("phase") == "started":
         breaker(state, "sequencing violation: previous iteration was never "
@@ -1475,11 +1511,23 @@ def cmd_attempt(args):
 
 def cmd_test(args):
     state = load_state(args.target, args.run)
+    # Running `test` on a finished run is EXPECTED, not an error: the morning
+    # gate's step 1 re-runs the suite after the unattended run closed with
+    # `cap`/`converged`. So this reports the terminal state instead of guarding
+    # against it (F101) — a refusal would break the documented gate. Without
+    # this the call is indistinguishable from a mid-run test, while silently
+    # appending to a closed run's audit.
+    fin = state.get("finished")
+    post = ({"run_finished": {"reason": fin.get("reason"), "at": fin.get("at"),
+                              "note": "run already closed; this is expected at "
+                                      "the morning gate (step 1) — the result "
+                                      "is appended to the closed run's audit"}}
+            if fin else {})
     cmd = state.get("test_cmd")
     if not cmd:
         audit(state, "test: no test_cmd configured — skipped "
                      "(configure one for unattended runs)")
-        out({"skipped": True})
+        out({"skipped": True, **post})
         return
     r = subprocess.run(cmd, shell=True, cwd=state["worktree"],
                        capture_output=True, text=True)
@@ -1492,7 +1540,7 @@ def cmd_test(args):
                        + (f": …{tail}" if tail else ""))
     audit(state, "test: passed")
     # Echo the command that passed (F67).
-    out({"ok": True, "cmd": cmd})
+    out({"ok": True, "cmd": cmd, **post})
 
 
 def cmd_record_cycle(args):
@@ -2392,12 +2440,34 @@ def main():
     sp = sub.add_parser(
         "doctor",
         help="read-only headless-readiness check (exit 0 = ready, 3 = not ready)",
-        description=("Validate a target for a Phase 2/3 headless run without "
-                     "writing any state. Exit code 0 means ready; exit code 3 "
-                     "means not ready (the JSON carries a \"breaker\" reason "
-                     "and \"exit_code\": 3)."))
+        description=(
+            "Validate a target for a Phase 2/3 headless run without "
+            "writing any state. Exit code 0 means ready; exit code 3 "
+            "means not ready (the JSON carries a \"breaker\" reason "
+            "and \"exit_code\": 3).\n\n"
+            "The ceilings come from the scenarios file's \"loop\" block, whose "
+            "shape is (F35 — stated here so a cold operator need not fail a "
+            "run to learn the format):\n"
+            "  {\"loop\": {\"test_cmd\": \"<the repo's suite>\",\n"
+            "            \"iterations\": 5,         # same knob as --cap\n"
+            "            \"wall_time_s\": 21600,\n"
+            "            \"token_budget\": 2000000,\n"
+            "            \"attempt_cap\": 4}}\n"
+            "It belongs in the target's scenarios file, whose canonical "
+            "location is $TANUKI_ROOT/scenarios/<target>.scenarios.json "
+            "(default ~/.tanuki/scenarios/<target>.scenarios.json). That is a "
+            "CONVENTION, not enforcement: --scenarios accepts any path and the "
+            "canonical file is never auto-loaded (F38, F87). The canonical "
+            "directory is machine-wide and shared across every target, so a "
+            "slug that collides with another session's shares its config "
+            "(F94)."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     sp.add_argument("--loop-repo", required=True)
-    sp.add_argument("--scenarios", default=None)
+    sp.add_argument("--scenarios", default=None,
+                    help="path to the target's scenarios file; its \"loop\" "
+                         "block supplies the ceilings. NOT defaulted to the "
+                         "canonical path — pass it explicitly or the "
+                         "loop-config check reports the ceilings missing")
     sp.add_argument("--cap", type=int, default=None)
     sp.add_argument("--base", default=None)
     sp.add_argument("--phase", type=int, default=2, choices=(2, 3))

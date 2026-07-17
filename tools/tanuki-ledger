@@ -23,7 +23,7 @@ Usage:
   tanuki-ledger --target <slug> promote [--min-recurrence 3] [--min-scenarios 2] [--dry-run]
   tanuki-ledger --target <slug> set-status --id F3 --status open|proposed|accepted|dismissed
   tanuki-ledger --target <slug> consolidate [--status proposed,open] [--min-similarity 0.5]
-  tanuki-ledger --target <slug> compact [--unseen-runs N]
+  tanuki-ledger --target <slug> compact [--unseen-runs N]   # needs re-DRIVEN runs
   tanuki-ledger --target <slug> scenario-yield [--runs N]
   tanuki-ledger --target <slug> status   # human-readable "where was I?" view
   tanuki-ledger --target <slug> next     # just the derived next step
@@ -56,6 +56,14 @@ Ledger growth policy (docs/tanuki-spec.md "Ledger growth policy").
      one-line tombstones (id, resolution, count): kept so nothing resurfaces
      as new on dedupe, but stripped of per-run detail (which lives in
      raw.jsonl).
+     PREREQUISITE (F75): "unseen for N runs" counts runs that RE-DROVE the
+     finding's scenario — a run directory with a manifest.json, as written by
+     `tanuki-drive`. Plain `ingest` of hand-written events never creates one,
+     so on an ingest-only ledger `compact` reports "nothing to compact"
+     indefinitely and this invariant never fires. Note that `status`'s
+     "runs: N" counter is NOT that number (it also counts runs merely named
+     inside ingested records), so a climbing "runs: N" is not evidence that
+     compaction can advance (F65).
 """
 
 import argparse
@@ -977,8 +985,12 @@ def cmd_status(args, ledger):
         print(f"\n  WATCHING (open, top {min(5, len(watching))} of "
               f"{len(watching)}):")
         for f in watching[:5]:
+            # scen: renders here as well as in AWAITING (F110): the priority
+            # badge is derived from recurrence AND scenario count, so omitting
+            # scen: leaves the badge unexplained by the line that carries it.
             print(f"    {priority(f)} {f['id']} [{f['kind']}] "
-                  f"rec:{f['recurrence']} — {f['title'][:90]}")
+                  f"rec:{f['recurrence']} scen:{len(f['scenarios'])} — "
+                  f"{f['title'][:90]}")
     # Derived, never patched string logic (F24/F36/F76): the same closed-
     # enumeration derivation the `next` subcommand exposes alone.
     print(f"\n  next: {next_step(args.target, ledger)}")
