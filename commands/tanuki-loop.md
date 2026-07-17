@@ -335,25 +335,17 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
    *(Skipped along with step 5 when no tracker is configured.)*
 7. Remove the loop worktree (`git worktree remove` — if it refuses with a
    modified-file error naming regenerable output, see the note at the end of
-   this step), then close the run
-   machine-readably: `tanuki-loop finish --reason gate-ratified` (likewise
-   `converged` / `cap` / `aborted` when a run ends without a gate). **`finish`
-   owns the branch cleanup** — its `branch_cleanup` report has three buckets:
-   `deleted` (tip reachable from the base branch), `kept` (unmerged tips stay),
-   and `skipped` (e.g. a branch still checked out in a worktree — "remove it
-   first"). The next `init` for the target is the backstop. No branch is left
-   to accumulate until an unrelated tool collects it.
-   **Order matters, and this is the call that actually deletes the branch.**
-   The run's *first* `finish` (the overnight close, `--reason cap` or
-   `converged`) always reports the integration branch under `skipped` — the
-   worktree is still checked out, because you need it to read the diff in step
-   1. That is expected, not a fault. Removing the worktree first and running
-   `finish` again here is what performs that deferred deletion; you can see it
-   land in `branch_cleanup.deleted` (F96, F9).
-   **What a second `finish` reports** (F108): it echoes `previously_finished`
+   this step). **No closing command follows** (owner ruling 2026-07-17): the
+   merge's reachability from the base *is* the settlement, and the surfaces
+   that need it derive it — `status` reports it, the next `init`'s
+   merged-branch sweep deletes the integration branch (tip reachable from the
+   base; an unmerged tip is never deleted), and `/repo-cleanup` owns any
+   earlier branch/worktree removal. `finish --reason gate-ratified` remains
+   accepted for compatibility only — nothing in this workflow invokes it, and
+   invoked anyway it refuses unless the delivery verifiably landed.
+   **What a repeated `finish` reports** (F108): it echoes `previously_finished`
    with the earlier close's reason and timestamp rather than overwriting it
-   silently, so a double close is visible and deliberate — the `cap` close and
-   this `gate-ratified` close are two calls in one run's life, both expected.
+   silently, so a double close is visible and deliberate.
    Likewise `gate-check` after the branch is deleted reports `branch_deleted`
    with a `note`: a deleted branch is the *success* state at that point, not a
    missing one.
@@ -391,12 +383,22 @@ availability up front) and the gate reshapes:
   PR (recorded in state, or found on the forge after a crash) and never
   duplicates; a failed push or PR create exits 3 with the local integration
   branch and run state intact — fix the cause and re-run.
-- **Cleanup waits for the merge to be real.** `finish --reason gate-ratified`
-  refuses until the PR's forge state is MERGED **and** the local base
-  contains the merge commit (`git pull --ff-only` first) — so the worktree
-  and branch can never be deleted from under an open PR. Then steps 5–7
-  proceed as documented (issues where a tracker is configured; worktree
-  removal; the second `finish` performs the deferred branch deletion).
+- **The loop ends at delivery** (owner ruling 2026-07-17). `gate-pr` records
+  the run as delivered — PR number, integration-tip SHA, base SHA — and that
+  is the loop's terminal fact. It does not poll, merge, comment, or wait, and
+  **you never run a closing command**: `status`, `init`, and `unresolved`
+  derive the settlement from the forge and the current base when they need
+  it — merged + reachable → `landed`; PR open → `pending`; closed without
+  merge → `declined`; unverifiable → `unknown`, never an optimistic default.
+  Offline, the last observed result is shown with its timestamp, marked
+  stale.
+- **Cleanup follows proof, not ceremony.** `/repo-cleanup` owns branch and
+  worktree removal (the next `init`'s sweep is the backstop) and deletes only
+  after reachability proves the work landed or an attended decision discards
+  it — so nothing is deleted from under an open PR. Finding verification and
+  recurrence accounting treat a change as landed **only** when its delivered
+  SHA is reachable from the current base. Steps 5–6 (issues, where a tracker
+  is configured) still follow the merge.
 
 ## Monitoring (the operator's window)
 
@@ -595,10 +597,10 @@ Per-hunk verdicts (closed set):
   (`gate-push`, refusing a diverged remote rather than force-pushing) — a
   local-only merge leaves dangling issue links and a diverged remote. On a
   PR-protected target (`"gate": "pr"`) the approval takes the form of PR
-  approval + merge on the forge: `gate-pr` delivers one Draft PR (review
-  material, never ratification), the loop never auto-merges, and
-  `finish --reason gate-ratified` refuses until the PR is merged and local
-  base contains it. Phases
+  approval + merge on the forge: the loop ends at delivering one Draft PR
+  (`gate-pr` — review material, never ratification; owner ruling 2026-07-17),
+  it never auto-merges, and settlement is derived by read-only surfaces from
+  the forge and the current base — no human closing command. Phases
   differ only in supervision and cap — one code path, Phase-3-ready from the
   first run.
 - Merged integration branches are deleted by `tanuki-loop finish` (backstop:
