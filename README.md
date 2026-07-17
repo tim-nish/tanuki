@@ -108,14 +108,15 @@ That's the whole loop. After a run, useful entry points:
 /tanuki my-plugin decide                # decide what's pending, and file the issues
 /tanuki my-plugin ingest "…"            # log friction YOU hit, in plain words
 /tanuki my-plugin history               # the long view: what's been explored
+/tanuki my-plugin view                  # every read-only view, one picker
 /tanuki my-plugin mine <run-id>         # re-mine a crashed or interrupted run
 /tanuki "try the export flow with a huge file"   # one-off ad-hoc scenario
 /tanuki-loop                            # unattended overnight mode (below)
 ```
 
 **One rule for the grammar:** a **bare word** is a mode that doesn't drive
-(`init`, `decide`, `status`, `history`, `ingest`, `mine`); flags modify a
-drive; the bare default *is* driving. The older spellings — `--brief`,
+(`init`, `decide`, `status`, `history`, `view`, `ingest`, `mine`); flags
+modify a drive; the bare default *is* driving. The older spellings — `--brief`,
 `--status`, `--history`, `--ingest`, `--mine-only` — still work as aliases,
 so nothing in your fingers breaks.
 

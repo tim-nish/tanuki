@@ -1,10 +1,14 @@
 # Spec: /tanuki view — one human-facing surface for every read-only view
 
-Status: PROPOSED 2026-07-17 (drafted on the operator's order as a **new
-design exercise**, grounded in the current repository — not a transcription
-of a previously ratified discussion); **D3 AMENDED and OPEN-1 RESOLVED
+Status: IMPLEMENTED 2026-07-17 (D1/D2 landed in `commands/tanuki.md` and
+`docs/tanuki-spec.md` on the operator's order; D3 had already landed ahead of
+them — `EMPTY_STATES` in `tools/tanuki-loop` with
+`tools/tests/test-loop-empty-states` — and D4 stands as the acceptance rule.
+OPEN-2 remains open. Drafted PROPOSED 2026-07-17 as a **new design
+exercise**, grounded in the current repository — not a transcription of a
+previously ratified discussion; **D3 AMENDED and OPEN-1 RESOLVED
 2026-07-17** — the empty state is a closed enumeration, typed and tested (see
-D3), and D3 now lands ahead of D1/D2 with issue #66 as its first instance.
+D3), and D3 landed ahead of D1/D2 with issue #66 as its first instance.
 Touches `commands/tanuki.md`, `docs/tanuki-spec.md`, and — per OPEN-1's
 resolution — `tools/tanuki-loop` (the dashboard's empty states gain typed
 `{state, expected, reason, next}` alongside the prose they already print; an
@@ -285,8 +289,10 @@ instance. D4 is a standing acceptance rule rather than a one-time change.
 verbatim today — and is a prerequisite only for any cross-target coverage
 comparison.
 
-Sequencing against current work: this spec is **PROPOSED and unscheduled**.
-It follows the in-flight sequence (commit the #72/#73 spec changes → Story
-1.6 → Story 1.7); no story is created from it in this sitting, and its
-`live` view's substrate description should be re-checked against Story 1.7's
-outcome, which changes what the decision pass is called.
+Sequencing against current work: originally **PROPOSED and unscheduled**,
+following the in-flight sequence (commit the #72/#73 spec changes → Story
+1.6 → Story 1.7) with no story created in that sitting. **Superseded
+2026-07-17:** the operator ordered implementation directly; D1/D2 landed as
+the "Views" section of `commands/tanuki.md`. The `live` view's substrate
+description should still be re-checked against Story 1.7's outcome, which
+changes what the decision pass is called.

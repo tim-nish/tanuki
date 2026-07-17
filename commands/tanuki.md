@@ -20,9 +20,7 @@ a **bare word selects a mode that does not drive**; **flags modify a drive**;
 the bare default is driving. Every non-driving mode below is a word; the
 previously documented flag spellings are retained as aliases and marked as
 such. A new mode is a word if it does not drive — the rule answers it, not
-precedent. `view` is **reserved** by the rule but not yet implemented
-(`specs/spec-tanuki-view/SPEC.md` is PROPOSED); reserving it now keeps a
-future target or scenario named `view` from colliding with it later.
+precedent.
 
 Argument handling ($ARGUMENTS):
 - `init`: **onboarding** — run from inside the plugin repo (see "Init" below).
@@ -64,7 +62,15 @@ Argument handling ($ARGUMENTS):
   pass). With a scenario id: every execution (date, decision-point pins,
   yield, findings) plus its transition log. Built from persisted artifacts
   only (manifests, ledger, scheduler state, the matrix) — never model
-  memory. No driving. *Alias:* `--history`.
+  memory. No driving. *Alias:* `--history`. The coverage block and the
+  per-run trajectory render also have named doors of their own:
+  `view coverage`, `view trajectory` (see "Views" below).
+- `<target> view [name]`: the **view surface** — one option-free door to
+  every read-only view this repo computes
+  (`specs/spec-tanuki-view/SPEC.md` D1/D2). Bare `view` presents the view
+  picker; `view <name>` jumps straight to a named view from the closed
+  catalog (`status`, `live`, `history`, `coverage`, `trajectory`). Read-only,
+  never writes, safe alongside a running loop. No driving. See "Views" below.
 - `<target> mine <run-id>`: skip driving; mine + consolidate an
   existing run's events (use after a crashed or interrupted session).
   *Alias:* `--mine-only <run-id>`.
@@ -107,6 +113,77 @@ bundled `${CLAUDE_PLUGIN_ROOT}/templates/example.scenarios.json`) to
 `~/.tanuki/scenarios/<new-target>.scenarios.json` and edit `plugin`/`host`/
 scenarios. Offer init when the user names a target that has no config yet.
 Regenerate more charters (same gate) whenever the unexplored pool empties.
+
+## Views (`/tanuki [target] view [name]` — the read-only surface)
+
+Contract: `${CLAUDE_PLUGIN_ROOT}/specs/spec-tanuki-view/SPEC.md`. The
+principle: **every read-only view is reachable from one option-free command;
+the tools that compute the views remain the fully-optioned machine
+substrate.** This surface **reads and renders; it never computes** what a
+tool could compute, and it never writes — no ledger writes, no scheduler
+writes, no matrix edits, no dispositions (those live in `decide`), and no
+prompts in headless mode (the picker is an attended convenience only).
+
+**Entry (D1).** Resolve the target exactly as this command always does (the
+fixed order above — nothing view-specific). Then:
+
+- Bare `view`: present the **view picker** via AskUserQuestion — every
+  catalog view as a selectable option with its one-line description and a
+  **state-derived hint** of whether it currently has anything to say (e.g.
+  `coverage — 3 axis values uncovered`, `live — no loop run yet`). Hints come
+  from the substrates' own outputs (`--json` where it exists), never from
+  re-derivation. Selection beats typing.
+- `view <name>`: jump straight to that view. Names come from the catalog
+  below and nowhere else; an unknown name gets the picker plus a one-line
+  note, never a guess.
+
+**The catalog (D2 — a closed enumeration).** Adding a view means amending
+the spec's list first; an unenumerated view is the defect this surface
+exists to fix. Each view names its substrate — run it, render its output:
+
+- **`status`** — ledger counts + the derived next step.
+  Substrate: `tanuki-ledger --target <t> status` and `next` (the
+  short-command-surface D2 derivation; never recomputed here).
+- **`live`** — the loop dashboard: health verdict, latest drive, this run,
+  scheduler decisions, convergence, why-stopped/NEXT.
+  Substrate: `tanuki-loop --target <t> dashboard` (offer `--follow 10` when
+  a loop is running). The **live** view; `history` is the long view.
+- **`history`** — cross-run per-scenario execution history: state,
+  executions, streaks, recurrence, unexplored, long-unrun, recently
+  productive, selection history with reasons.
+  Substrate: `tanuki-scheduler --target <t> history`.
+- **`coverage`** — declared exploration space vs execution record: per axis
+  value explored / authored-never-run / uncovered, the axis rollup, the
+  exploration debt summary, and the ≤3 advisory recommendations (advisory
+  only — never applied from a view).
+  Substrate: `tanuki-scheduler --target <t> history --scenarios
+  <matrix-file>` — a named view of its own, not a block that appears inside
+  `history` only when the matrix happens to declare `axes`: an absent
+  declaration is a state to report, not a reason to render nothing.
+- **`trajectory`** — one run's step-by-step path (choices, errors,
+  recoveries, outcome) from its event files alone.
+  Substrate: `tanuki-scheduler --target <t> history --scenario <id>
+  --trajectory [--run <run-id>]`. This is the proper name for what
+  `--history <scenario>` used to overload; when no scenario id was given,
+  pick one the same way as everything else — list the matrix's scenarios via
+  AskUserQuestion, selection beats typing.
+
+**No silent nothing (D3).** Every catalog view is always *offered*; a view
+whose substrate is missing states why in **one line**, at the picker and in
+the view itself, carrying the expected-vs-gap signal: whether emptiness is
+normal for this target's state (a fresh target has no runs — expected) or a
+real gap the operator should close (iterations ran but no plan persisted —
+GAP). Where the substrate emits its typed empty state
+(`tools/tanuki-loop` `EMPTY_STATES`: `{state, expected, reason, next}`),
+render that verbatim — one truth, the tool's. Any command a reason names
+must be explained where it is named, never assumed known.
+
+**Render, don't compute (D4 — a standing acceptance rule).** Every number,
+verdict, and ranking a view shows comes from a substrate command's output.
+The command layer composes, labels, and orders; it never re-derives. A view
+needing a number no tool emits is a substrate change with its own spec and
+tests — never arithmetic done in prose here. No view introduces a term its
+substrate rejects, invokes downstream tooling, or modifies anything.
 
 ## Ad-hoc scenarios (free text — "probe the present")
 
