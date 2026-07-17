@@ -224,8 +224,13 @@ one.
   independent actionable findings; stop **only** if a deferred/frozen item
   blocks *all* remaining work.
 - *Recovery from the external-modification breaker* (attended;
-  spec-tanuki-loop "Circuit breakers"): never `rollback` — it needs an open
-  iteration and the breaker fires with all iterations closed. The operator
+  spec-tanuki-loop "Circuit breakers"): **detection is deferred** — the breaker
+  fires at the *next* `iter-start` (which compares the worktree HEAD against
+  the last verified `head_expected`), not immediately when the worktree is
+  touched and not on `iter-verify` (F41). So a between-iterations external edit
+  surfaces only when the loop tries to open the following iteration. Recovery:
+  never `rollback` — it needs an open iteration and the breaker fires with all
+  iterations closed. The operator
   runs `tanuki-loop recover` and explicitly chooses `--restore` (reset the
   worktree to the last verified `head_expected`, discarding external commits;
   audited, reflog-recoverable) or `--adopt` (re-baseline: accept the current

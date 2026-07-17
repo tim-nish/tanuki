@@ -1988,7 +1988,19 @@ def cmd_status(args):
         "base_sha": state.get("base_sha"),
         "last_breaker": state.get("last_breaker"),
         "finished": state.get("finished"),
-        "iterations_done": len(state["iterations"]), "cap": state["cap"],
+        # F107: iterations_done counted iterations that were still OPEN, so "2"
+        # could mean two closed or one closed and one in flight — ambiguous
+        # exactly where the morning gate skims it. Report closed only, with the
+        # open and started counts alongside, and keep the old key meaning what
+        # its name says. (The cap counts STARTED iterations: a rolled-back one
+        # consumes a slot, so iterations_started is what to compare to cap.)
+        "iterations_done": len([i for i in state["iterations"]
+                                if i.get("phase") in ("verified",
+                                                      "rolled_back")]),
+        "iterations_open": len([i for i in state["iterations"]
+                                if i.get("phase") == "started"]),
+        "iterations_started": len(state["iterations"]),
+        "cap": state["cap"],
         "quiet_streak": state["quiet_streak"], "frozen": state["frozen"],
         "attempts": state["attempts"],
         "elapsed_s": round(time.time() - state["wall_start"], 1),
