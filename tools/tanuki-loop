@@ -1508,11 +1508,47 @@ def cmd_dashboard(args):
         time.sleep(args.follow)
 
 
+def run_verdict(state):
+    """The run's condition as ONE typed answer: running | stopped | finished.
+
+    An operator returning to a run they did not just drive should not have to
+    infer the condition by cross-reading last_breaker, iteration counters, and
+    state.json (F42). Precedence is finished > stopped > running: `finish` is
+    terminal and a run may be finished after a breaker (aborted), so the
+    terminal state is first-class rather than indistinguishable from a stop.
+    """
+    fin = state.get("finished")
+    if fin:
+        return {"state": "finished", "reason": fin.get("reason"),
+                "at": fin.get("at"),
+                "summary": f"finished: {fin.get('reason')}"}
+    lb = state.get("last_breaker")
+    if lb:
+        s = {"state": "stopped", "reason": lb.get("reason"), "at": lb.get("at"),
+             "summary": f"stopped: {lb.get('reason')}"}
+        if lb.get("hint"):
+            s["hint"] = lb["hint"]
+        return s
+    done, cap = len(state["iterations"]), state["cap"]
+    openb = [i for i in state["iterations"] if i.get("end") is None]
+    where = (f"iteration {openb[-1]['n']} open" if openb
+             else f"{done}/{cap} iterations done")
+    return {"state": "running", "reason": None,
+            "summary": f"running (healthy): {where}, no breaker"}
+
+
 def cmd_status(args):
     state = load_state(args.target, args.run)
     out({
+        # Verdict leads: the condition is the question status exists to answer.
+        "verdict": run_verdict(state),
         "run": state["run"], "integration_branch": state["integration_branch"],
         "worktree": state["worktree"], "base": state["base"],
+        # Operator-critical fields state.json holds but no CLI surfaced (F42):
+        # base_sha is the gate diff's left side; last_breaker diagnoses a stop.
+        "base_sha": state.get("base_sha"),
+        "last_breaker": state.get("last_breaker"),
+        "finished": state.get("finished"),
         "iterations_done": len(state["iterations"]), "cap": state["cap"],
         "quiet_streak": state["quiet_streak"], "frozen": state["frozen"],
         "attempts": state["attempts"],
