@@ -80,6 +80,13 @@ grep -q "deferred F99:" <<<"$out3"        || fail "deferred reason line missing"
 grep -q "… — full: queue.md" <<<"$out3"   || fail "truncated reason missing its pointer (F7)"
 pass "truncated deferral reason carries a pointer to the full text (F7)"
 
+# --- F46 / issue #65: 'drive' is defined for a cold reader --------------------
+# "drive" is tanuki-drive, an internal term a cold reader has never met.
+# Checked against the init-only dashboard captured above.
+grep -qi "a drive is one tanuki-drive pipeline run over the scenarios" <<<"$out" \
+  || fail "the 'drive' term must be defined inline for a cold reader (F46): $(grep 'latest drive' <<<"$out")"
+pass "issue #65: the internal term 'drive' carries its inline definition"
+
 # --- F45 / issue #63: a NONZERO rolled-back count actually shows --------------
 # The whole point of the finding: a reader could not tell where the number
 # would appear. Roll the open iteration back and confirm it is reported — and
@@ -89,5 +96,35 @@ out4="$("${L[@]}" dashboard)"
 grep -qE "iterations: 1/3 consumed \(1 rolled back\)" <<<"$out4" \
   || fail "a rolled-back iteration must be counted and shown: $(grep iterations: <<<"$out4")"
 pass "issue #63: a nonzero rolled-back count is stated and still consumes the cap"
+
+# --- F46 / issue #65: the empty state tells the truth after an iteration ran --
+# "none yet — no iteration has started a drive" was simply FALSE once an
+# iteration had run. The rollback above closed iteration 1, so iterations HAVE
+# run here and none recorded a drive — exactly the state that used to lie.
+out5="$("${L[@]}" dashboard)"
+grep -q "no iteration has started a drive" <<<"$out5" \
+  && fail "post-iteration empty state still claims no iteration started (F46)"
+grep -qE "latest drive: none recorded — [0-9]+ iteration\(s\) ran without a drive" <<<"$out5" \
+  || fail "post-iteration empty state must say iterations ran without a drive: $(grep 'latest drive' <<<"$out5")"
+pass "issue #65: after an iteration ran, the empty state states that accurately"
+
+# A drive recorded by an EARLIER iteration is still the latest drive — keying
+# on the current iteration alone reported "none yet" while one sat on disk.
+run2="$("${L[@]}" status | python3 -c 'import json,sys;print(json.load(sys.stdin)["run"])')"
+pdir="$TANUKI_ROOT/t/events/$run2-iter1"
+mkdir -p "$pdir"
+cat > "$pdir/progress.json" <<'EOF'
+{"stage":"complete","done":1,"total":1,
+ "results":[{"scenario":"scenA","status":"ok","events":3,"duration_s":5}]}
+EOF
+"${L[@]}" iter-start >/dev/null
+out6="$("${L[@]}" dashboard)"
+grep -q "latest drive (iter 1" <<<"$out6" \
+  || fail "an earlier iteration's drive must still show as the latest: $(grep 'latest drive' <<<"$out6")"
+grep -q "scenA" <<<"$out6" || fail "the recorded drive's results should render"
+# History is never "now": only the current iteration can be mid-drive.
+grep -q "NOW:" <<<"$out6" \
+  && fail "a past iteration's completed drive must not render as NOW"
+pass "issue #65: an earlier iteration's drive is found; history never reads as NOW"
 
 echo "all dashboard skeleton checks passed"

@@ -1375,21 +1375,38 @@ def cmd_dashboard(args):
         # -- (section 2) latest drive — ALWAYS present (Fixed skeleton): a
         #    missing progress.json degrades to a stated reason, never absence.
         drive_lines, driving, unmatched = [], False, 0
-        ppath = (os.path.join(TANUKI_ROOT, state["target"], "events",
-                              f"{state['run']}-iter{cur['n']}", "progress.json")
-                 if cur else None)
+        # F46 / issue #65: look for the latest iteration that actually recorded
+        # a drive, not only the current one. Keying on cur alone made the
+        # section report "none yet" after an iteration had run — false, and the
+        # reason it read wrong post-iteration.
+        drive_it, ppath = None, None
+        for _it in reversed(state["iterations"]):
+            _p = os.path.join(TANUKI_ROOT, state["target"], "events",
+                              f"{state['run']}-iter{_it['n']}", "progress.json")
+            if os.path.exists(_p):
+                drive_it, ppath = _it, _p
+                break
         if ppath and os.path.exists(ppath):
             with open(ppath, encoding="utf-8") as f:
                 p = json.load(f)
+            # Only the CURRENT iteration can be mid-drive; an older recorded
+            # drive is history, never "now".
             driving = (p.get("stage") != "complete"
-                       and cur["phase"] == "started")
+                       and cur is not None and cur["phase"] == "started"
+                       and drive_it is cur)
             if driving:
                 drive_lines.append(
                     f"  NOW: iter {cur['n']} driving "
                     f"[{p['done']}/{p['total']}] {p.get('current')} — "
                     f"{p.get('stage')} ({p.get('elapsed_s', 0)}s, "
                     f"{p.get('captured_kb', 0)}KB)")
-            drive_lines.append(f"  latest drive (iter {cur['n']}):")
+            # F46 / issue #65: "drive" is tanuki-drive, an internal term a cold
+            # reader has never met — define it inline, the way the 'fixed'
+            # counter does (F6), rather than renaming the fixed-skeleton
+            # section this contract keys on.
+            drive_lines.append(
+                f"  latest drive (iter {drive_it['n']} — a drive is one "
+                f"tanuki-drive pipeline run over the scenarios):")
             for r in p.get("results", []):
                 line = (f"    {r['scenario']:<22} {r['status'][:28]:<28}"
                         f" {r['events']:>3} events "
@@ -1402,12 +1419,23 @@ def cmd_dashboard(args):
                 drive_lines.append(line)
         elif cur and cur["phase"] == "started":
             driving = True
-            drive_lines.append(f"  latest drive (iter {cur['n']}): none yet — "
-                               "iteration started, drive not begun "
-                               "(no progress.json)")
+            drive_lines.append(
+                f"  latest drive (iter {cur['n']}): none yet — iteration "
+                "started, drive not begun (no progress.json). A drive is one "
+                "tanuki-drive pipeline run over the scenarios")
+        elif state["iterations"]:
+            # F46 / issue #65: iterations HAVE run, so "no iteration has
+            # started a drive" was simply false here. Say what is actually
+            # true: they ran and none recorded a drive.
+            n = len(state["iterations"])
+            drive_lines.append(
+                f"  latest drive: none recorded — {n} iteration(s) ran without "
+                "a drive (no progress.json). A drive is one tanuki-drive "
+                "pipeline run over the scenarios")
         else:
-            drive_lines.append("  latest drive: none yet — no iteration has "
-                               "started a drive")
+            drive_lines.append(
+                "  latest drive: none yet — no iteration has started. A drive "
+                "is one tanuki-drive pipeline run over the scenarios")
 
         lines = [f"tanuki-loop — {state['target']} / {state['run']}",
                  f"  health: {_health(state, driving, unmatched)}",
