@@ -32,7 +32,12 @@ Usage:
 
 `findings` and `promote` emit each finding with a computed `priority`
 (P1/P2/P3) so the brief's ordering mirrors `status` without the caller
-recomputing it.
+recomputing it. The scale is deterministic, not a judgment (F83):
+  P1  recurrence >= 3 OR seen in >= 2 distinct scenarios   (chronic or broad)
+  P2  recurrence == 2, OR kind == "gap"                    (repeat or a gap)
+  P3  everything else                                      (seen once)
+P1 uses the same bar `promote` defaults to, so a P1 open finding is exactly
+one that a default `promote` would move to `proposed`.
 
 Ledger growth policy (docs/tanuki-spec.md "Ledger growth policy").
 `ledger.json` may grow indefinitely on disk, bounded by three invariants:
@@ -76,8 +81,16 @@ EVIDENCE_CAP = 5
 # dismissed: human said no; kept for dedupe so it never resurfaces as new
 
 
+#: The P1/P2/P3 rule in one line, so every surface that shows a priority can
+#: also show what it means instead of leaving the operator to infer the scale
+#: by watching it change (F83).
+PRIORITY_LEGEND = ("P1 = recurrence >= 3 or seen in >= 2 scenarios (the "
+                   "default promote bar); P2 = recurrence 2, or kind 'gap'; "
+                   "P3 = seen once")
+
+
 def priority(f):
-    """P1/P2/P3 for display. Deterministic, no judgment."""
+    """P1/P2/P3 for display. Deterministic, no judgment; see PRIORITY_LEGEND."""
     if f["recurrence"] >= 3 or len(f["scenarios"]) >= 2:
         return "P1"
     if f["recurrence"] == 2 or f["kind"] == "gap":
@@ -305,6 +318,11 @@ def status_filter(value):
 
 
 def cmd_findings(args, ledger):
+    # --status is validated at parse time by status_filter(): unknown values
+    # exit 2 naming the enum, and 'compacted' is rejected with an explanation
+    # (arbitration 2026-07-17 / #88). A tombstone is a MODIFIER on a stored
+    # status, so a tombstoned finding still answers to `--status accepted` —
+    # excluding it here would silently change what that filter means.
     rows = ledger["findings"]
     if args.status:
         rows = [f for f in rows if f["status"] == args.status]
@@ -372,8 +390,25 @@ def cmd_promote(args, ledger):
     # the values came from flags or config.
     bar = f"recurrence >= {min_rec} OR scenarios >= {min_scen}"
     if not out:
-        print(f"note: no open finding met the promotion bar ({bar}); pass "
-              f"--min-recurrence/--min-scenarios to widen it", file=sys.stderr)
+        # "Widen it" alone does not explain WHY nothing qualified. The bar is
+        # deliberately a chronic-only filter, so a freshly-extracted finding
+        # (recurrence 1, one scenario) is unpromotable BY DESIGN — following
+        # the documented ingest -> upsert -> promote lifecycle literally always
+        # hits this wall, and it reads as a broken tool rather than a working
+        # filter (F92). Say what the bar is for, and name the nearest miss.
+        opens = [f for f in ledger["findings"] if f["status"] == "open"]
+        near = max(opens, key=lambda f: (f["recurrence"], len(f["scenarios"])),
+                   default=None)
+        why = ("there are no open findings at all" if not opens else
+               "the bar promotes CHRONIC findings only — a finding seen once "
+               "(recurrence 1, one scenario) is not promotable by design; it "
+               "qualifies once it recurs or turns up in a second scenario. "
+               "Closest open finding: %s at recurrence %d / %d scenario(s)"
+               % (near["id"], near["recurrence"], len(near["scenarios"])))
+        print(f"note: no open finding met the promotion bar ({bar}) — {why}. "
+              f"To promote anyway (e.g. walking the lifecycle end-to-end on a "
+              f"single finding), widen with --min-recurrence 1 --min-scenarios 1",
+              file=sys.stderr)
     elif args.dry_run:
         print(f"dry-run ({bar}): {len(out)} finding(s) would move to proposed "
               f"({', '.join(f['id'] for f in out)}); ledger unchanged",
@@ -712,6 +747,15 @@ def cmd_compact(args, ledger):
             "status": status, "recurrence": f.get("recurrence", 1),
             "scenarios": [], "evidence": [],
             "resolution": resolution, "tombstone": True,
+            # Empty scenarios/evidence is the POINT of a tombstone (the ledger
+            # growth policy's bounded frontier), but a reader seeing the arrays
+            # cleared assumes data loss (F85). Say it in the record itself.
+            "tombstone_note": ("compacted to a one-line tombstone: evidence "
+                               "and scenarios are intentionally dropped to "
+                               "bound ledger growth — the id/title/resolution "
+                               "are kept so this finding can never resurface "
+                               "as new. Original detail remains in the run's "
+                               "events under ~/.tanuki/<target>/events/."),
         }
         compacted.append((f["id"], resolution))
 
@@ -719,7 +763,10 @@ def cmd_compact(args, ledger):
     if compacted:
         for fid, res in compacted:
             print(f"tombstoned {fid} ({res})")
-        print(f"compacted {len(compacted)} finding(s) unseen for >= {n} run(s)")
+        print(f"compacted {len(compacted)} finding(s) unseen for >= {n} run(s); "
+              f"each collapsed to a one-line tombstone — evidence/scenarios "
+              f"intentionally dropped (bounded growth), id/title/resolution "
+              f"kept so they never resurface")
     else:
         print(f"nothing to compact (threshold: unseen for >= {n} run(s))")
 
@@ -825,23 +872,40 @@ def render_next(state, target, ledger):
         "events-no-findings": (
             "events are ingested but no findings yet — extract one with "
             "upsert-finding --title … --evidence <run>/<scenario>#<seq>"),
+        # `/tanuki …` is the PLUGIN's slash command, driven from Claude Code —
+        # not something this CLI implements, and not runnable from the shell
+        # you are reading this in (F84). Name the CLI equivalent first, then
+        # the slash command, and say which is which.
         "proposed-awaiting": (
             f"decide the {len(by['proposed'])} proposed item(s): "
-            f"/tanuki {target} --brief"),
+            f"`findings --status proposed` to read them, then `set-status "
+            f"--id <F> --status accepted|dismissed` for each "
+            f"(or the /tanuki {target} decide slash command in Claude Code "
+            f"for the guided pass)"),
+        # tanuki-drive is a SIBLING tool next to this one, not a subcommand —
+        # naming it bare just moved the dead end (F90): the operator went
+        # looking for it in `tanuki-ledger --help` and did not find it. Say
+        # where it lives.
         "accepted-awaiting": (
-            f"re-run the pipeline (/tanuki {target}) to verify the "
-            f"{len(awaiting)} accepted item(s) stop recurring"),
+            f"re-run the pipeline to verify the {len(awaiting)} accepted "
+            f"item(s) stop recurring: `tanuki-drive` (a sibling tool beside "
+            f"this one in the plugin's tools/ dir, not a subcommand of it) "
+            f"then `ingest` its events here "
+            f"(or the /tanuki {target} slash command in Claude Code, which "
+            f"drives both)"),
         "watching-only": (
             "promote chronic/high-confidence open findings with "
             "'promote --min-recurrence N', then decide them: "
-            f"/tanuki {target} --brief"),
+            f"/tanuki {target} decide"),
         "all-decided": (
             # "compacted" is NOT a status — a tombstoned finding is still
             # accepted or dismissed (issue #62 / F25; the F99 regression was
             # naming it here as a peer, which `findings --status compacted`
             # then rejects).
             "all findings are decided (accepted/dismissed, some tombstoned) — "
-            f"re-run the pipeline (/tanuki {target}) to surface any new ones"),
+            f"re-run the pipeline (`tanuki-drive`, the sibling tool beside "
+            f"this one, then `ingest` here; or the /tanuki {target} slash "
+            f"command in Claude Code) to surface any new ones"),
     }
     if state not in hints:
         raise ValueError(f"unenumerated ledger state: {state!r} "
@@ -1052,7 +1116,12 @@ def slug_target(value):
 
 
 def main():
-    p = argparse.ArgumentParser()
+    # See tanuki-loop's main() — same fix, same reason (F98): the evidence
+    # schema, the ledger growth policy and the P1/P2/P3 legend live in the
+    # module docstring and never reached --help without this.
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     # --target is a short namespace slug, NOT a filesystem path (F18): state
     # lives under $TANUKI_ROOT/<target>/ (default ~/.tanuki/<target>/), so the
     # current directory is ignored and a path-like value nests silently.
@@ -1118,24 +1187,29 @@ def main():
     cfg = load_config()  # promote's default thresholds, named in --help (F68)
     sp = sub.add_parser(
         "promote",
-        help="move open findings meeting the recurrence/scenario thresholds "
+        help="move open findings meeting the recurrence OR scenario threshold "
              "to `proposed` (--dry-run for a read-only preview)",
         description=(
-            "Promote findings that qualify by recurrence and scenario-spread "
-            "thresholds: each qualifying `open` finding's status moves to "
-            "`proposed`, awaiting the human gate's accept/dismiss decision "
-            "(dispositions still go through `set-status`). Findings already "
-            "proposed/accepted/dismissed are never touched. With --dry-run "
-            "the same listing is printed and nothing is written. Defaults: "
-            "--min-recurrence %(mr)s, --min-scenarios %(ms)s (from config); "
-            "the applied thresholds are always named in the output."
+            "Promote findings that qualify by recurrence or scenario-spread: "
+            "the two thresholds are combined with OR, not AND — a finding "
+            "qualifies when `recurrence >= --min-recurrence` OR it was seen "
+            "in `>= --min-scenarios` distinct scenarios, so clearing either "
+            "bar alone is enough. Each qualifying `open` finding's status "
+            "moves to `proposed`, awaiting the human gate's accept/dismiss "
+            "decision (dispositions still go through `set-status`). Findings "
+            "already proposed/accepted/dismissed are never touched. With "
+            "--dry-run the same listing is printed and nothing is written. "
+            "Defaults: --min-recurrence %(mr)s, --min-scenarios %(ms)s (from "
+            "config); the applied bar is always named in the output."
             % {"mr": cfg["min_recurrence"], "ms": cfg["min_scenarios"]}))
+    # Keep "(default: N)" early in each help string: argparse wraps this column
+    # at ~56 chars, and a trailing default can split across lines mid-token.
     sp.add_argument("--min-recurrence", type=int, default=None,
-                    help="chronic threshold (default: %s)"
-                         % cfg["min_recurrence"])
+                    help="chronic threshold (default: %s); OR'd with "
+                         "--min-scenarios" % cfg["min_recurrence"])
     sp.add_argument("--min-scenarios", type=int, default=None,
-                    help="breadth threshold (default: %s)"
-                         % cfg["min_scenarios"])
+                    help="breadth threshold (default: %s); OR'd with "
+                         "--min-recurrence" % cfg["min_scenarios"])
     sp.add_argument("--dry-run", action="store_true",
                     help="preview only: list qualifying findings without "
                          "changing any status")

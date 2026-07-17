@@ -32,10 +32,15 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
        state written. Checks: required loop config (test_cmd, wall_time_s,
        token_budget, attempt_cap, iterations), base freshness (same guard
        init fails closed on), test_cmd on the base tip (throwaway detached
-       worktree, removed afterward), policy coverage (which actionable
-       findings have no policy answer and would DEFER — informational), and
-       host cloneability (throwaway clone, removed afterward; fatal for
-       hosted targets, a passing note for hostless — spec-host-snapshot).
+       worktree, removed afterward), test-cmd-artifacts (what test_cmd sheds
+       into a pristine checkout — informational; unignored artifacts trip
+       iter-verify's clean-worktree breaker mid-run), policy coverage (which
+       actionable findings have no policy answer and would DEFER —
+       informational), and host cloneability (throwaway clone, removed
+       afterward; fatal for hosted targets, a passing note for hostless —
+       spec-host-snapshot). Every check is reported in EVERY report, ready or
+       not: a check that appears only on success reads as one that materialized
+       out of nowhere (F91).
        Not-ready follows the breaker convention ({"breaker": …} + exit 3)
        but persists nothing — there is no run state to write.
   iter-start                     cap / wall-time / external-modification breakers;
@@ -65,6 +70,15 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
                                  gate-ratified | aborted) — machine-readable;
                                  also deletes merged integration branches for
                                  the target (unmerged tips kept) — issue #6
+  recover --restore | --adopt    ATTENDED recovery from the external-modification
+                                 breaker (the one breaker `rollback` cannot clear:
+                                 it needs an open iteration, and the breaker fires
+                                 with all iterations closed). --restore resets the
+                                 worktree to the last verified head_expected,
+                                 discarding external commits (audited, recoverable
+                                 via reflog); --adopt re-baselines, accepting the
+                                 current HEAD as head_expected. Never automatic —
+                                 the operator chooses.
   status                         JSON summary for the morning gate
   dashboard [--follow SECS]      operational status, one screen: health verdict,
                                  latest drive with each anomaly classified against
@@ -78,6 +92,24 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
 Sequencing is guarded: each iteration must move started -> (verified |
 rolled_back) before the next iter-start, and record-cycle refuses an open
 iteration — a skipped check is itself a breaker, never a silent pass.
+
+Breakers — what actually trips each one, and where (every breaker prints
+{"breaker": …, "hint": …} + exit 3; the hint names the remedy):
+  iteration cap reached      iter-start, when len(iterations) >= cap. NOTE:
+                             rolled-back iterations count toward the cap — a
+                             rollback does not give the attempt back.
+  wall-time exceeded         iter-start, when now - wall_start > wall_limit_s.
+  external modification      iter-start, when the worktree HEAD is not the
+                             head_expected the last iter-verify recorded (i.e.
+                             something committed outside the loop). Fires on the
+                             NEXT iter-start, not at the moment of the edit; clear
+                             it with `recover --restore|--adopt`, never `rollback`.
+  sequencing violation       iter-start on an unclosed iteration, or record-cycle
+                             with an iteration still open.
+  test failure               test, when the configured test_cmd exits non-zero.
+  worktree not clean         after commit, when test_cmd left untracked artifacts.
+  integration invariant      iter-verify, when the four-part check fails.
+  rollback failed            rollback, when the worktree could not be reset.
 
 The token budget is stored but NOT enforced here — token accounting is the
 runtime's; the loop treats it as an operator-supplied ceiling the harness trips.
@@ -174,6 +206,23 @@ def breaker_hint(reason):
                 "(discard the external change, reset to the last verified HEAD) "
                 "or --adopt (accept the current HEAD as the new baseline)")
     if "sequencing violation" in r:
+        # Four distinct violations used to share one hint, which was wrong for
+        # half of them: told to "close the open iteration" when there is no
+        # open iteration, the operator reaches for `rollback`, and THAT failure
+        # overwrites last_breaker and disarms `recover` (F82, and the trigger
+        # for F17). Discriminate on the reason each site already records.
+        if "rollback without an open iteration" in r:
+            return ("nothing to roll back — no iteration is open. If you are "
+                    "trying to clear an external-modification breaker, "
+                    "`rollback` is the wrong tool and running it here "
+                    "overwrites the breaker `recover` needs: use "
+                    "`tanuki-loop --target <t> recover --restore|--adopt`")
+        if "iter-verify without an open iteration" in r:
+            return ("no iteration is open to verify — start one with "
+                    "`iter-start`, or the previous one is already closed")
+        if "record-cycle" in r:
+            return ("close the open iteration with `iter-verify` (or "
+                    "`rollback`) before recording the cycle")
         return "close the open iteration with `iter-verify` or `rollback` first"
     if "iteration cap reached" in r or "wall-time" in r:
         return "the run hit its ceiling — proceed to the morning gate; no more iterations run"
@@ -196,11 +245,33 @@ def breaker(state, reason):
     entry = {"reason": reason, "at": time.strftime("%Y-%m-%d %H:%M:%S")}
     if hint:
         entry["hint"] = hint
-    state["last_breaker"] = entry
+    # A failed remedy attempt must never erase the diagnosis it was aimed at.
+    # `rollback` is the reflex for "undo the bad thing", but on an
+    # external-modification breaker it raises a sequencing violation (no
+    # iteration is open), and overwriting last_breaker with THAT disarmed
+    # `recover`, whose precondition is an external-modification breaker — the
+    # operator had to re-trigger the original breaker to get unstuck (F17).
+    # Keep the original diagnosis; record the attempt alongside it.
+    prev = state.get("last_breaker") or {}
+    guard = ("external modification" in prev.get("reason", "")
+             and not prev.get("recovered")
+             and "sequencing violation" in reason.lower())
+    payload = {"breaker": reason}
+    if guard:
+        state.setdefault("failed_remedies", []).append(entry)
+        note = ("the external-modification breaker from %s is still the "
+                "active one and `recover` remains armed — this attempt did "
+                "not clear it and has not overwritten it"
+                % prev.get("at", "earlier"))
+        payload["preserved_breaker"] = prev.get("reason")
+        payload["note"] = note
+    else:
+        state["last_breaker"] = entry
     save_state(state)
     audit(state, f"BREAKER (immediate stop): {reason}"
-                 + (f" | hint: {hint}" if hint else ""))
-    payload = {"breaker": reason}
+                 + (f" | hint: {hint}" if hint else "")
+                 + (" | last_breaker preserved (external modification still "
+                    "active; recover still armed)" if guard else ""))
     if hint:
         payload["hint"] = hint
     out(payload)
@@ -245,8 +316,16 @@ def cleanup_merged_integration_branches(repo, base, target):
     branches = [b for b in refs.splitlines()
                 if b.startswith(prefix)] if rc == 0 else []
     rc_w, wt = git(repo, "worktree", "list", "--porcelain")
-    checked_out = {ln[len("branch "):].replace("refs/heads/", "")
-                   for ln in wt.splitlines() if ln.startswith("branch ")}
+    # Track which worktree holds each branch, so the skip reason can name the
+    # exact `git worktree remove` command instead of leaving the operator to
+    # infer it (F9) — the porcelain lists `worktree <path>` before its `branch`.
+    checked_out = {}
+    _wt_path = None
+    for ln in wt.splitlines():
+        if ln.startswith("worktree "):
+            _wt_path = ln[len("worktree "):]
+        elif ln.startswith("branch "):
+            checked_out[ln[len("branch "):].replace("refs/heads/", "")] = _wt_path
     deleted, kept, skipped = [], [], []
     # Why each branch was skipped, so the status isn't opaque on-screen (F9):
     # a live worktree can't be deleted, and a merged branch whose delete failed
@@ -255,7 +334,12 @@ def cleanup_merged_integration_branches(repo, base, target):
     for b in branches:
         if b in checked_out:
             skipped.append(b)                       # can't delete a live branch
-            skipped_reasons[b] = "checked out in a worktree — remove it first"
+            _p = checked_out[b]
+            skipped_reasons[b] = (
+                "checked out in a worktree — remove it first: "
+                "`git worktree remove %s`, then re-run `tanuki-loop --target "
+                "%s finish --reason <reason>` (or the next `init` will collect "
+                "it)" % (_p or "<path>", target))
         elif git(repo, "merge-base", "--is-ancestor", b, base)[0] == 0:
             if git(repo, "branch", "-D", b)[0] == 0:
                 deleted.append(b)
@@ -502,11 +586,26 @@ def cmd_init(args):
         audit(state, f"host fixture pinned @ {host_base_sha[:12]} from {host} "
                      f"-> {host_fixture_path}"
                      + (f" ({host_note})" if host_note else ""))
+    # Name the cap (F78) and the artifact paths (F79) on the way in: the
+    # morning gate is told to present audit.md/state.json/queue.md, and the
+    # ~/.tanuki/<target>/loop/<run>/ convention is otherwise undocumented —
+    # operators had to find(1) them. The cap is echoed because rolled-back
+    # iterations consume it, which is only discoverable by tripping the breaker.
+    _ld = loop_dir(args.target, run)
     out({"run": run, "integration_branch": integration, "worktree": worktree,
          "base_sha": base_sha, "base_upstream": upstream,
          "base_behind": n_behind, "branch_cleanup": cleaned,
          "host_fixture_path": host_fixture_path, "host_base_sha": host_base_sha,
-         "host_freshness": host_note})
+         "host_freshness": host_note,
+         "cap": cap,
+         "cap_note": ("%d iteration(s) max; rolled-back iterations count "
+                      "toward the cap" % cap),
+         "artifacts": {
+             "dir": _ld,
+             "state": os.path.join(_ld, "state.json"),
+             "audit": os.path.join(_ld, "audit.md"),
+             "queue": os.path.join(_ld, "queue.md"),
+         }})
 
 
 def _doctor_policy(args):
@@ -577,10 +676,15 @@ def cmd_doctor(args):
         "check": "loop-config", "ok": not missing,
         "configured": {k: v for k, v in required.items() if v is not None},
         "missing": missing,
+        # Name each missing key WITH its flag inline ("iterations (--cap)"):
+        # the two names for one knob were only reconcilable by cross-checking
+        # the separate set_via_flag map (F86).
         "detail": ("every headless ceiling is configured" if not missing else
                    "an unattended run would have no ceiling for: "
-                   + ", ".join(missing) + " — set them in the scenarios "
-                   "file's \"loop\" block (shown below) or pass the init flags. "
+                   + ", ".join("%s (%s)" % (k, flag_for[k]) for k in missing)
+                   + " — set them in the scenarios "
+                   "file's \"loop\" block (shown below, using the config key "
+                   "names) or pass the init flags shown in parentheses. "
                    "Consequence: init refuses to start without them; a forced "
                    "run would be unbounded (no cap/wall-time/token ceiling) with "
                    "no regression gate (F74)"),
@@ -589,6 +693,20 @@ def cmd_doctor(args):
         loop_check["set_via_flag"] = {k: flag_for[k] for k in missing}
         loop_check["scenarios_loop_shape"] = {
             "loop": {k: "<value>" for k in required}}
+        if "test_cmd" in missing:
+            # Nothing said what a good test_cmd validates, so a first-timer
+            # could not tell whether a trivial "true" was acceptable or a
+            # misconfiguration (F88).
+            loop_check["test_cmd_guidance"] = (
+                "test_cmd is the headless run's ONLY regression gate: it runs "
+                "in the loop worktree after every iteration's commits, and a "
+                "non-zero exit stops the run. Use the repo's real test/check "
+                "suite (e.g. `make test`, `pytest -q`, `npm test`), minus any "
+                "check that already fails on the base branch — a baseline "
+                "failure is inherited state, not a regression, and would trip "
+                "the breaker on iteration 1. A placeholder like `true` is "
+                "accepted but leaves the run with NO regression gate; doctor "
+                "cannot tell the difference, so it is your call.")
         # Name the canonical path so the operator knows WHERE the "loop" block
         # goes and that it is not auto-loaded (F38).
         loop_check["scenarios_file"] = {
@@ -629,12 +747,23 @@ def cmd_doctor(args):
                        "detail": "no test_cmd to check — configure one first "
                                  "(the loop's test breaker is the headless "
                                  "run's only regression gate)"})
+        # Report the artifact check even when it cannot run. A check that shows
+        # up only in the ready report looks like it appeared from nowhere
+        # between two runs (F91) — the fixed skeleton the dashboard already
+        # follows: degrade to an explicit reason, never a silent omission.
+        checks.append({"check": "test-cmd-artifacts", "ok": True,
+                       "artifacts": None,
+                       "detail": "not checked — needs a test_cmd to run"})
     else:
         tmpdir = tempfile.mkdtemp(prefix="tanuki-doctor-")
         wt = os.path.join(tmpdir, "base")
         rc, err = git(repo, "worktree", "add", "--detach", wt, base_sha)
         if rc != 0:
             shutil.rmtree(tmpdir, ignore_errors=True)
+            checks.append({"check": "test-cmd-artifacts", "ok": True,
+                           "artifacts": None,
+                           "detail": "not checked — the throwaway worktree "
+                                     "could not be created"})
             checks.append({"check": "baseline-test", "ok": False,
                            "detail": "could not create the throwaway "
                                      f"worktree for the baseline run: {err}"})
@@ -652,6 +781,27 @@ def cmd_doctor(args):
                                f"{r.returncode}) — every iteration would trip "
                                "the test breaker on inherited state, not a "
                                f"regression: …{tail}"),
+                })
+                # We just ran test_cmd in a pristine checkout, so anything
+                # untracked here is something test_cmd sheds (__pycache__,
+                # .pyc, coverage data). Mid-run that trips iter-verify's
+                # clean-worktree breaker far from its cause, and recovering
+                # from it burns the scenario's turn budget (F64, F89). Say so
+                # now, while it is one .gitignore line. Informational, never
+                # fatal: the run is still correct, just noisier.
+                rc_s, dirty = git(wt, "status", "--porcelain", "--untracked-files=all")
+                shed = sorted({ln[3:].split("/")[0] for ln in dirty.splitlines()
+                               if ln.startswith("?? ")}) if rc_s == 0 else []
+                checks.append({
+                    "check": "test-cmd-artifacts", "ok": True,
+                    "artifacts": shed,
+                    "detail": ("test_cmd leaves no untracked artifacts"
+                               if not shed else
+                               "test_cmd leaves untracked artifact(s) in a "
+                               "pristine checkout: %s — .gitignore them, or "
+                               "iter-verify's clean-worktree breaker will fire "
+                               "mid-run after a commit, far from this cause"
+                               % ", ".join(shed)),
                 })
             finally:
                 git(repo, "worktree", "remove", "--force", wt)
@@ -1126,14 +1276,51 @@ def cmd_gate_check(args):
     state = load_state(args.target, args.run)
     repo, base = state["loop_repo"], state["base"]
     rc, integ_head = git(repo, "rev-parse", state["integration_branch"])
-    rc2, _ = git(repo, "merge-base", "--is-ancestor",
-                 state["integration_branch"], base)
-    reachable = rc == 0 and rc2 == 0
-    audit(state, f"gate-check: integration reachable from {base}: {reachable}")
+    # `finish` deletes the integration branch once it is merged, so a re-check
+    # after a ratified run — an operator double-checking, or a crash-retry
+    # re-entering the gate at this step — finds no ref and used to report a
+    # bare reachable:false, indistinguishable from "the merge never landed"
+    # (F61). Fall back to the HEAD the run recorded so the answer stays
+    # truthful, and say which ref answered it either way.
+    branch_gone = rc != 0
+    finished = state.get("finished")
+    if branch_gone and finished:
+        integ_head = state.get("head_expected") or ""
+    ref = integ_head if branch_gone else state["integration_branch"]
+    if ref:
+        rc2, _ = git(repo, "merge-base", "--is-ancestor", ref, base)
+    else:
+        rc2 = 1
+    reachable = bool(ref) and rc2 == 0
+    audit(state, f"gate-check: integration reachable from {base}: {reachable}"
+                 + (" (branch already deleted; checked the recorded HEAD)"
+                    if branch_gone and finished else ""))
     if not reachable:
-        out({"reachable": False})
+        if branch_gone and not finished:
+            hint = ("the integration branch is gone but this run was never "
+                    "finished — it was deleted outside the loop; inspect the "
+                    "reflog, or re-run the gate from a fresh `init`")
+        elif branch_gone:
+            hint = ("the run is finished and its branch deleted, but the "
+                    "recorded HEAD is NOT an ancestor of %s — the merge did "
+                    "not land; re-run the merge step" % base)
+        else:
+            hint = ("the integration branch is not an ancestor of %s — merge "
+                    "it (`git merge --no-ff %s` on %s) before gate-push"
+                    % (base, state["integration_branch"], base))
+        out({"reachable": False, "checked_ref": ref or None,
+             "branch_deleted": branch_gone, "run_finished": bool(finished),
+             "hint": hint})
         sys.exit(3)
-    out({"reachable": True, "integration_head": integ_head})
+    res = {"reachable": True, "integration_head": integ_head}
+    if branch_gone and finished:
+        res["branch_deleted"] = True
+        res["note"] = ("integration branch already deleted by `finish` "
+                       "(reason: %s) — reachability verified from the run's "
+                       "recorded HEAD; this run is already ratified and "
+                       "gate-check is idempotent"
+                       % finished.get("reason", "?"))
+    out(res)
 
 
 def cmd_gate_push(args):
@@ -1273,8 +1460,17 @@ def cmd_finish(args):
                      f"{cleaned['deleted'] or 'none'}; kept (unmerged): "
                      f"{cleaned['kept'] or 'none'}; skipped: "
                      f"{cleaned['skipped_reasons'] or 'none'}")
+    _ld = loop_dir(state["target"], state["run"])
     payload = {"ok": True, "reason": args.reason, "branch_cleanup": cleaned,
-               "host_drift": host_drift}
+               "host_drift": host_drift,
+               # The morning gate is told to present these three; point at them
+               # instead of making the operator find(1) the run dir (F79).
+               "artifacts": {
+                   "dir": _ld,
+                   "state": os.path.join(_ld, "state.json"),
+                   "audit": os.path.join(_ld, "audit.md"),
+                   "queue": os.path.join(_ld, "queue.md"),
+               }}
     if prev_finished:
         payload["previously_finished"] = prev_finished
         audit(state, f"note: run was already finished as "
@@ -1792,7 +1988,19 @@ def cmd_status(args):
         "base_sha": state.get("base_sha"),
         "last_breaker": state.get("last_breaker"),
         "finished": state.get("finished"),
-        "iterations_done": len(state["iterations"]), "cap": state["cap"],
+        # F107: iterations_done counted iterations that were still OPEN, so "2"
+        # could mean two closed or one closed and one in flight — ambiguous
+        # exactly where the morning gate skims it. Report closed only, with the
+        # open and started counts alongside, and keep the old key meaning what
+        # its name says. (The cap counts STARTED iterations: a rolled-back one
+        # consumes a slot, so iterations_started is what to compare to cap.)
+        "iterations_done": len([i for i in state["iterations"]
+                                if i.get("phase") in ("verified",
+                                                      "rolled_back")]),
+        "iterations_open": len([i for i in state["iterations"]
+                                if i.get("phase") == "started"]),
+        "iterations_started": len(state["iterations"]),
+        "cap": state["cap"],
         "quiet_streak": state["quiet_streak"], "frozen": state["frozen"],
         "attempts": state["attempts"],
         "elapsed_s": round(time.time() - state["wall_start"], 1),
@@ -1820,7 +2028,16 @@ def slug_target(value):
 
 
 def main():
-    p = argparse.ArgumentParser()
+    # description=__doc__ is load-bearing, not decoration: the subcommand
+    # table, the breaker triggers and their remedies, the sequencing rules and
+    # the recovery modes all live in the module docstring. Without this, none
+    # of it reached --help and the only way to read any of it was to grep the
+    # file — so every "documented in the docstring" fix was unreachable to the
+    # operator it was written for (F98). Raw formatter: the docstring is a
+    # hand-aligned table and argparse would otherwise reflow it to mush.
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     # --target is a global option and must precede the subcommand, e.g.
     # `tanuki-loop --target foo iter-start` (F40); it is a namespace slug, not a
     # path (F52) — state lives under $TANUKI_ROOT/<target>/.

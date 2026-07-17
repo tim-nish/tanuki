@@ -224,8 +224,13 @@ one.
   independent actionable findings; stop **only** if a deferred/frozen item
   blocks *all* remaining work.
 - *Recovery from the external-modification breaker* (attended;
-  spec-tanuki-loop "Circuit breakers"): never `rollback` — it needs an open
-  iteration and the breaker fires with all iterations closed. The operator
+  spec-tanuki-loop "Circuit breakers"): **detection is deferred** — the breaker
+  fires at the *next* `iter-start` (which compares the worktree HEAD against
+  the last verified `head_expected`), not immediately when the worktree is
+  touched and not on `iter-verify` (F41). So a between-iterations external edit
+  surfaces only when the loop tries to open the following iteration. Recovery:
+  never `rollback` — it needs an open iteration and the breaker fires with all
+  iterations closed. The operator
   runs `tanuki-loop recover` and explicitly chooses `--restore` (reset the
   worktree to the last verified `head_expected`, discarding external commits;
   audited, reflog-recoverable) or `--adopt` (re-baseline: accept the current
@@ -236,12 +241,28 @@ one.
 ## 2. Morning gate (attended — invariant in every phase)
 
 Do not end at "here is what ran." Present, for one review:
-- the **integration branch diff** (the relocated Human Gate — `git diff
-  <base SHA>..<integration HEAD>`),
+- the **integration branch diff** (the relocated Human Gate). Copy-pasteable,
+  using the `base_sha` and `integration_branch` that `init` printed:
+  ```
+  git diff <base_sha>..<integration_branch>        # two dots — what the loop wrote
+  git log --oneline <base_sha>..<integration_branch>
+  ```
+  Use **two dots**, not three: `A..B` is "what B has that A doesn't" — exactly
+  the loop's work. `A...B` diffs against the merge-base instead, which silently
+  hides anything that landed on `main` since the run started (F95).
+  Run it from **either the loop worktree or the operator's normal checkout** —
+  both share one object store and ref namespace, so the integration branch
+  resolves identically from each; reading the diff from the normal checkout is
+  safe and intended, and does **not** touch the worktree. (`git diff` here is
+  read-only — the "never touch the operator's working tree" rule bars *writes*,
+  not reads.)
 - the **morning review queue** (deferred spec / judgment items, each with its
   reason), and
 - the **audit artifact** (per-iteration SHAs, auto-decisions, convergence or
   breaker reason).
+`init` and `finish` both print an `artifacts` block with the absolute paths to
+`state.json` / `audit.md` / `queue.md` (under `~/.tanuki/<target>/loop/<run>/`)
+— take them from there rather than hunting the run dir.
 
 Then, behind the operator's single approval, run **merge-first and idempotent**
 — nothing outward-facing until the merge is a fact:
@@ -249,7 +270,18 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
    configured `test_cmd` each iteration runs); abort the gate on failure.
 2. **Merge `integration → main`** — a plain `git merge --no-ff
    <integration-branch>` on `main` (there is no `tanuki-loop merge` subcommand;
-   this one gate step is a hand-run git operation). Use `--no-ff` so the batch
+   this one gate step is a hand-run git operation).
+   **Check out the base branch first, and use its real name.** The merge runs
+   in the operator's normal checkout and lands on whatever branch is currently
+   checked out — `git checkout <base>` before merging, or the batch lands
+   somewhere unintended. The base is **not** assumed to be `main`: take the
+   actual name from `init`'s `base` / `base_upstream` output (it may be
+   `master` or anything else); the `main` in these snippets is a placeholder
+   (F100, F103).
+   **Look at `status`'s `warning` field before approving.** If the loop's
+   commits swept build artifacts (`__pycache__`, `*.pyc`) onto the integration
+   branch, `iter-verify` recorded them and `status` names them — they reach the
+   remote at step 4 unless removed now (F102). Use `--no-ff` so the batch
    lands as one reviewable merge commit that `gate-check` can then confirm is
    reachable; executed by the gate only after approval, never unattended (F12).
 3. **Verify** with `tanuki-loop gate-check` (integration HEAD reachable from
@@ -290,6 +322,13 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
    and `skipped` (e.g. a branch still checked out in a worktree — "remove it
    first"). The next `init` for the target is the backstop. No branch is left
    to accumulate until an unrelated tool collects it.
+   **Order matters, and this is the call that actually deletes the branch.**
+   The run's *first* `finish` (the overnight close, `--reason cap` or
+   `converged`) always reports the integration branch under `skipped` — the
+   worktree is still checked out, because you need it to read the diff in step
+   1. That is expected, not a fault. Removing the worktree first and running
+   `finish` again here is what performs that deferred deletion; you can see it
+   land in `branch_cleanup.deleted` (F96, F9).
 
 ## Monitoring (the operator's window)
 
@@ -363,7 +402,11 @@ the loop never decides a spec alternative on its own.
 - Cumulative on one integration branch; never fan out per-iteration branches
   from `main`.
 - Rollback is `reset --hard <start SHA>` **plus** `git clean -fd` in the loop
-  worktree only, recorded in the audit; prior successes are untouched.
+  worktree only, recorded in the audit; prior successes are untouched. **A
+  rolled-back iteration still consumes one of the `cap` slots** (F27) — the cap
+  counts every *consumed* iteration, verified or rolled back, so a cap of N
+  bounds total attempts, not just successful ones (visible in `status` /
+  the dashboard's "N/N consumed" counter).
 - Questions only in iteration 1 (recorded as run policy); iterations ≥ 2 never
   ask — unanswered judgment defers. A finding is re-fixed up to its attempt
   cap (default 4), then frozen — never a whole-loop stop.

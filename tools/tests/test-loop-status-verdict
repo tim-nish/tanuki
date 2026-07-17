@@ -50,6 +50,18 @@ echo "$s" | jget '["last_breaker"]' >/dev/null \
   || fail "status must surface last_breaker (null when none)"
 pass "status surfaces base_sha and last_breaker (F42's operator-critical fields)"
 
+# --- F107: iterations_done counts CLOSED only, never open ---------------------
+# "2" used to mean either two closed or one closed and one in flight —
+# ambiguous exactly where the morning gate skims it.
+c="$("${L[@]}" status)"
+[ "$(echo "$c" | jget '["iterations_done"]')" = "0" ] \
+  || fail "an OPEN iteration must not count as done: $(echo "$c" | jget '["iterations_done"]')"
+[ "$(echo "$c" | jget '["iterations_open"]')" = "1" ] \
+  || fail "the open iteration must be counted as open"
+[ "$(echo "$c" | jget '["iterations_started"]')" = "1" ] \
+  || fail "iterations_started counts every opened iteration (what cap bounds)"
+pass "F107: done counts closed only; open/started reported alongside"
+
 # --- stopped (breaker) --------------------------------------------------------
 # Trip a real breaker through a real path: an external commit in the worktree,
 # caught at the next iter-start. Assert against the breaker that ACTUALLY
