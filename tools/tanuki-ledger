@@ -934,13 +934,33 @@ def cmd_stats(args, ledger):
     }, indent=2))
 
 
+def slug_target(value):
+    """--target is a namespace slug, never a path (issues #68/#70).
+
+    State lives under $TANUKI_ROOT/<target>/, so a path-like value either
+    nests silently (os.path.join swallows an absolute path — the accidental
+    "support" #68 reported) or fails deep inside a later git call with a
+    low-level error (#70). Both are the same root cause: --target was never
+    validated. Reject at parse time so the message names the contract.
+    TANUKI_ROOT is the supported way to relocate state.
+    """
+    if (value and not value.startswith(".")
+            and all(c.isalnum() or c in "._-" for c in value)):
+        return value
+    raise argparse.ArgumentTypeError(
+        f"--target must be a simple namespace slug (letters, digits, "
+        f"'.', '_', '-'), not a path: {value!r}. State lives under "
+        f"$TANUKI_ROOT/<target>/ — set TANUKI_ROOT to relocate it.")
+
+
 def main():
     p = argparse.ArgumentParser()
     # --target is a short namespace slug, NOT a filesystem path (F18): state
     # lives under $TANUKI_ROOT/<target>/ (default ~/.tanuki/<target>/), so the
     # current directory is ignored and a path-like value nests silently.
-    p.add_argument("--target", required=True,
-                   help="target namespace slug (not a path); state lives under "
+    p.add_argument("--target", required=True, type=slug_target,
+                   help="target namespace slug (not a path; path-like values "
+                        "are rejected); state lives under "
                         "$TANUKI_ROOT/<target>/ (default ~/.tanuki/<target>/)")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("init")
