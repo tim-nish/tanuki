@@ -397,7 +397,7 @@ decision pass. UX rules, from dogfooding Tanuki itself:
 - **All intermediates live under `~/.tanuki/<target>/events/<run>/`** —
   never the session temp dir, never the target repos. The brief's canonical
   home stays `~/.tanuki` (writing it into a repo would pollute it); the
-  in-session presentation + `--brief` are the access path.
+  in-session presentation + `decide` are the access path.
 
 ## The decision pass — `/tanuki [target] decide` (alias `--brief`)
 

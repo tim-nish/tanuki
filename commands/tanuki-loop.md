@@ -303,7 +303,7 @@ run — it reads only state files, so it's always safe to run alongside the
 loop.
 The dashboard is the live view; for the cross-run long view (per-scenario
 execution history, transitions, coverage, selection history) use
-`tanuki-scheduler --target <t> history` (surfaced as `/tanuki <t> --history`).
+`tanuki-scheduler --target <t> history` (surfaced as `/tanuki <t> history`).
 
 The deferred queue is handed back for a normal attended triage sitting —
 the loop never decides a spec alternative on its own.
