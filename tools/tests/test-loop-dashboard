@@ -47,6 +47,17 @@ pass "sections render in the fixed contract order"
 grep -qE "iterations: 0/3 consumed" <<<"$out" || fail "iteration counter not annotated 'consumed' (F29)"
 pass "iteration counter annotated as consumed (F29)"
 
+# --- F45 / issue #63: the rolled-back COUNT is stated, not just mentioned -----
+# The line used to say "(rolled-back count too)" — naming the concept while
+# omitting the number, so a reader could not tell where a nonzero count would
+# show. Zero is stated too: "none rolled back" must be a fact, not an inference
+# from silence.
+grep -qE "iterations: 0/3 consumed \(0 rolled back\)" <<<"$out" \
+  || fail "iterations line must state the rolled-back count, incl. zero: $out"
+grep -q "rolled-back count too" <<<"$out" \
+  && fail "iterations line still promises a count it does not print (F45)"
+pass "issue #63: iterations line states the rolled-back count (zero case)"
+
 # --- F6: 'fixed' carries its inline definition once a run has movement --------
 "${L[@]}" iter-start >/dev/null
 echo v1 > "$("${L[@]}" status | python3 -c 'import json,sys;print(json.load(sys.stdin)["worktree"])')/f"
@@ -68,5 +79,15 @@ out3="$("${L[@]}" dashboard)"
 grep -q "deferred F99:" <<<"$out3"        || fail "deferred reason line missing"
 grep -q "… — full: queue.md" <<<"$out3"   || fail "truncated reason missing its pointer (F7)"
 pass "truncated deferral reason carries a pointer to the full text (F7)"
+
+# --- F45 / issue #63: a NONZERO rolled-back count actually shows --------------
+# The whole point of the finding: a reader could not tell where the number
+# would appear. Roll the open iteration back and confirm it is reported — and
+# that a rolled-back iteration still consumes the cap (F29's invariant).
+"${L[@]}" rollback >/dev/null
+out4="$("${L[@]}" dashboard)"
+grep -qE "iterations: 1/3 consumed \(1 rolled back\)" <<<"$out4" \
+  || fail "a rolled-back iteration must be counted and shown: $(grep iterations: <<<"$out4")"
+pass "issue #63: a nonzero rolled-back count is stated and still consumes the cap"
 
 echo "all dashboard skeleton checks passed"

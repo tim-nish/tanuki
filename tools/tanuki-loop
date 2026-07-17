@@ -1352,6 +1352,10 @@ def cmd_dashboard(args):
         state = load_state(args.target, args.run)
         findings = ledger_findings(state["target"])
         n_done = len(state["iterations"])
+        # F45 / issue #63: rolled-back iterations still consume the cap, so the
+        # count is what makes "N/N consumed" legible when work was undone.
+        n_rolled_back = sum(1 for i in state["iterations"]
+                            if i.get("phase") == "rolled_back")
         cur = state["iterations"][-1] if state["iterations"] else None
         elapsed = int(time.time() - state["wall_start"])
 
@@ -1398,8 +1402,12 @@ def cmd_dashboard(args):
                  f"(base {state['base']})",
                  # F29: the counter is *consumed* iterations (rolled-back ones
                  # count), so "cap hit" beside it never reads as a contradiction.
+                 # F45 / issue #63: state the rolled-back NUMBER — the line used
+                 # to mention rolled-back iterations without ever saying how
+                 # many, so a reader could not tell where a nonzero count would
+                 # show. Zero is stated too, so "none" is a fact, not a guess.
                  f"  iterations: {n_done}/{state['cap']} consumed "
-                 f"(rolled-back count too) · elapsed {elapsed // 60}m"]
+                 f"({n_rolled_back} rolled back) · elapsed {elapsed // 60}m"]
         lines += drive_lines
 
         # -- (section 3) this run's ledger movement — ALWAYS present; lifetime
