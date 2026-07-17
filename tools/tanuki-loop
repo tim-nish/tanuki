@@ -849,16 +849,17 @@ def cmd_iter_verify(args):
         breaker(state, "integration invariant: start SHA is not an ancestor of HEAD")
     if not args.no_patch and head == start:
         breaker(state, "integration invariant: HEAD == start SHA but a patch was expected")
-    # Artifact guard (F64 / issue #71): catch contamination AT the commit that
-    # introduced it, naming the paths and the root cause — not several
-    # iterations later as an unexplained not-clean breaker.
+    # Artifact guard (F64/F102, issues #71 + the 2026-07-17 arbitration):
+    # REPORTED, never a breaker. Making it fatal would add a fifth halt to the
+    # documented four-part integration invariant (specs/spec-tanuki-loop
+    # SPEC.md, commands/tanuki-loop.md, this tool's docstring) and would stop
+    # an unattended overnight run over a merely-incomplete .gitignore — a
+    # contract change that is the operator's call, not a headless run's. The
+    # decision is deferred to the attended gate WITH the evidence attached,
+    # and gate-push refuses to put artifacts on the remote (cmd_gate_push), so
+    # deferring costs no safety.
     arts = committed_artifacts(wt, start, head)
-    if arts:
-        shown = ", ".join(arts[:8]) + (" …" if len(arts) > 8 else "")
-        breaker(state, "build artifacts committed to the integration branch "
-                       f"({shown}) — these are regenerable output, not work "
-                       "product; drop them from the commit (e.g. `git rm -r "
-                       "--cached`) and ignore them in the repo")
+    it["build_artifacts_committed"] = arts or None
     if not _clean(state):
         real, _ = _dirty_split(state)
         shown = ", ".join(real[:8]) + (" …" if len(real) > 8 else "")
@@ -869,7 +870,22 @@ def cmd_iter_verify(args):
     state["head_expected"] = head
     save_state(state)
     audit(state, f"iter {it['n']}: verified, end @ {head[:12]}")
-    out({"ok": True, "iteration": it["n"], "end_sha": head})
+    payload = {"ok": True, "iteration": it["n"], "end_sha": head,
+               # Always present, explicitly null when clean: absence and "no
+               # artifacts" must not look identical to a reader following the
+               # docs (the fixed-skeleton rule, applied to JSON).
+               "build_artifacts_committed": arts or None,
+               "warning": None}
+    if arts:
+        shown = ", ".join(arts[:8]) + (" …" if len(arts) > 8 else "")
+        payload["warning"] = (
+            f"build artifacts committed to the integration branch ({shown}) "
+            "— regenerable output, not work product. Not fatal: drop them "
+            "(`git rm -r --cached <path>`) and add them to .gitignore. "
+            "gate-push will refuse to push them to the remote.")
+        audit(state, f"iter {it['n']}: WARNING build artifacts committed: "
+                     f"{', '.join(arts)}")
+    out(payload)
 
 
 def cmd_rollback(args):
@@ -1140,6 +1156,27 @@ def cmd_gate_push(args):
     if rc_r != 0 or not remote:
         die(f"no remote configured for base '{base}'")
     git(repo, "fetch", remote)  # refresh the tracking ref before deciding
+    # Build artifacts must not reach the remote (F102: __pycache__/*.pyc rode
+    # the integration branch through the merge AND gate-push onto origin, with
+    # nothing objecting anywhere on that path). iter-verify only WARNS — a
+    # headless run must not halt over an incomplete .gitignore — so this is
+    # where the deferred decision is actually enforced: the last mechanical
+    # boundary before the remote, and an attended one, where the operator can
+    # fix it or override deliberately. Same shape as the diverged-remote
+    # refusal below: refuse and name the remedy, never rewrite anything.
+    swept = [p for p in committed_artifacts(repo, upstream, base)
+             if p]
+    if swept and not args.allow_artifacts:
+        shown = ", ".join(swept[:8]) + (" …" if len(swept) > 8 else "")
+        audit(state, f"gate-push BLOCKED: build artifacts in the merged diff: "
+                     f"{', '.join(swept)}")
+        out({"pushed": False, "build_artifacts": swept,
+             "hint": f"the merge adds build artifacts ({shown}) — regenerable "
+                     f"output, not work product. Remove them (git -C {repo} rm "
+                     "-r --cached <path>), add them to .gitignore, commit, "
+                     "then re-run gate-push. --allow-artifacts overrides this "
+                     "deliberately."})
+        sys.exit(3)
     ahead = git(repo, "rev-list", "--count", f"{base}..{upstream}")[1]
     n_ahead = int(ahead) if ahead.isdigit() else 0
     if n_ahead > 0:  # remote diverged — a plain push would not fast-forward
@@ -1646,9 +1683,23 @@ def run_verdict(state):
 
 def cmd_status(args):
     state = load_state(args.target, args.run)
+    # The gate reads status before approving the merge, and it is the last
+    # thing between these paths and the remote — a warning that only reached
+    # the audit trail would not be read in time (F102/F106). Always present,
+    # explicitly null when empty: absence and "nothing to warn about" must not
+    # be indistinguishable.
+    swept = sorted({p for it in state["iterations"]
+                    for p in (it.get("build_artifacts_committed") or [])})
+    warning = None
+    if swept:
+        shown = ", ".join(swept[:8]) + (" …" if len(swept) > 8 else "")
+        warning = (f"build artifacts committed to the integration branch "
+                   f"({shown}) — gate-push will refuse until they are removed")
     out({
         # Verdict leads: the condition is the question status exists to answer.
         "verdict": run_verdict(state),
+        "warning": warning,
+        "build_artifacts_committed": swept or None,
         "run": state["run"], "integration_branch": state["integration_branch"],
         "worktree": state["worktree"], "base": state["base"],
         # Operator-critical fields state.json holds but no CLI surfaced (F42):
@@ -1793,7 +1844,21 @@ def main():
     sp.add_argument("--finding", required=True); sp.add_argument("--reason", required=True)
     sp = sub.add_parser("log"); sp.add_argument("--audit", required=True)
     sub.add_parser("gate-check")
-    sub.add_parser("gate-push")
+    sp = sub.add_parser(
+        "gate-push",
+        help="push the merged base to its remote; refuses a diverged remote "
+             "or build artifacts in the merged diff",
+        description=(
+            "The morning gate's first outward-facing step. Refuses (exit 3, "
+            "nothing pushed) when the remote has diverged — reconcile, never "
+            "force-push — or when the merged diff adds build artifacts "
+            "(__pycache__/, *.pyc, …): regenerable output must not reach the "
+            "remote. iter-verify only warns about artifacts so an unattended "
+            "run never halts over an incomplete .gitignore; this is where "
+            "that deferred decision is enforced, at the attended boundary."))
+    sp.add_argument("--allow-artifacts", action="store_true",
+                    help="push even though the merged diff adds build "
+                         "artifacts (deliberate override)")
     sp = sub.add_parser("issue-get"); sp.add_argument("--key", required=True)
     sp = sub.add_parser("issue-put")
     sp.add_argument("--key", required=True); sp.add_argument("--issue", required=True)
