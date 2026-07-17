@@ -142,6 +142,29 @@ grep -q "pr create --draft" "$root/gh-state/calls.log" \
   || fail "the PR must be created as a DRAFT"
 pass "finished+tested run: branch pushed, one Draft PR opened"
 
+# --- the delivery record is the loop's terminal fact --------------------------
+[ "$(echo "$res" | jget '["delivered"]["pr"]')" = "7" ] \
+  || fail "gate-pr must record delivered.pr"
+[ -n "$(echo "$res" | jget '["delivered"]["head_sha"]')" ] \
+  || fail "gate-pr must record delivered.head_sha"
+[ -n "$(echo "$res" | jget '["delivered"]["base_sha"]')" ] \
+  || fail "gate-pr must record delivered.base_sha"
+pass "delivery recorded: {pr, head_sha, base_sha} — the loop ends here"
+
+# --- settlement is DERIVED, not declared --------------------------------------
+[ "$(("${L[@]}" status) | jget '["settlement"]["result"]')" = "pending" ] \
+  || fail "status must derive settlement=pending while the PR is open"
+pass "status derives settlement: pending (PR open on the forge)"
+
+# Offline: the forge is unreachable — show the LAST OBSERVED result with its
+# timestamp, marked stale; never an optimistic default.
+off="$(PATH="$root/nogh" "$here/tanuki-loop" --target t status)"
+[ "$(echo "$off" | jget '["settlement"]["result"]')" = "pending" ] \
+  || fail "offline status must serve the last observed settlement"
+[ "$(echo "$off" | jget '["settlement"]["stale"]')" = "True" ] \
+  || fail "an offline-served observation must be marked stale"
+pass "offline: last observed settlement served, marked stale with timestamp"
+
 # --- idempotency: re-run reuses, never duplicates -----------------------------
 res2="$("${L[@]}" gate-pr)"
 [ "$(echo "$res2" | jget '["reused"]')" = "True" ] \
@@ -150,15 +173,42 @@ res2="$("${L[@]}" gate-pr)"
   || fail "gate-pr must never create a second PR for the same head"
 pass "idempotent: re-run reuses PR #7, no duplicate create"
 
-# --- finish gate-ratified refuses while the PR is open ------------------------
-if "${L[@]}" finish --reason gate-ratified >/dev/null 2>&1; then
-  fail "finish gate-ratified must refuse while the gate PR is unmerged"
-fi
-pass "finish gate-ratified refuses: PR still open (loop never merges)"
+# --- unresolved annotates a delivered branch with its settlement --------------
+unres="$("${L[@]}" unresolved --json)"
+[ "$(echo "$unres" | jget '["branches"][0]["delivered"]["settlement"]["result"]')" = "pending" ] \
+  || fail "unresolved must annotate a delivered branch as pending, not rot"
+pass "unresolved: delivered branch annotated settlement=pending (not debt)"
 
-# --- merged on the forge but local base not synchronized ----------------------
-# Simulate the operator's merge: merge integration into base ON THE REMOTE
-# only (clone, merge, push), so local base lacks the merge commit.
+# --- dashboard: a delivered run reports settlement, not local gate steps ------
+dash="$("${L[@]}" dashboard)"
+echo "$dash" | grep -q "DELIVERED: PR #7" \
+  || fail "dashboard must show the delivery"
+echo "$dash" | grep -q "SETTLEMENT: pending" \
+  || fail "dashboard must show the derived settlement"
+echo "$dash" | grep -q "review + merge the Draft PR" \
+  || fail "dashboard NEXT must point at the forge, not local merge steps"
+if echo "$dash" | grep -q "approve or reject the merge"; then
+  fail "a delivered run must not show the local morning-gate steps"
+fi
+pass "dashboard: delivered run shows settlement + forge NEXT, no local gate"
+
+# --- declined: closed without merging is derivable debt -----------------------
+echo "CLOSED" > "$root/gh-state/pr_state"
+[ "$(("${L[@]}" status) | jget '["settlement"]["result"]')" = "declined" ] \
+  || fail "status must derive settlement=declined for a closed-unmerged PR"
+pass "status derives settlement: declined (closed without merge)"
+echo "OPEN" > "$root/gh-state/pr_state"
+
+# --- compatibility: finish gate-ratified is NOT a workflow step ---------------
+# It survives only as a guard: invoked anyway, it refuses unless the delivery
+# verifiably landed in the local base.
+if "${L[@]}" finish --reason gate-ratified >/dev/null 2>&1; then
+  fail "compat finish gate-ratified must refuse while the PR is open"
+fi
+pass "compat guard: gate-ratified refuses while settlement=pending"
+
+# Operator merges ON THE REMOTE only (clone, merge, push): forge says MERGED
+# but local base lacks the merge commit.
 clone="$root/clone"; git clone -q "$bare" "$clone"
 git -C "$clone" config user.email a@b.c; git -C "$clone" config user.name t
 git -C "$clone" checkout -q "$base"
@@ -166,16 +216,25 @@ git -C "$clone" merge -q --no-ff -m "operator merges the PR" "origin/$integ"
 git -C "$clone" push -q origin "$base"
 git -C "$clone" rev-parse HEAD > "$root/gh-state/merge_oid"
 echo "MERGED" > "$root/gh-state/pr_state"
+st="$("${L[@]}" status)"
+[ "$(echo "$st" | jget '["settlement"]["result"]')" = "landed" ] \
+  || fail "settlement must be landed once the forge reports MERGED"
+[ "$(echo "$st" | jget '["settlement"]["local_synced"]')" = "False" ] \
+  || fail "merged-but-unsynced must carry local_synced=false"
 if "${L[@]}" finish --reason gate-ratified >/dev/null 2>&1; then
-  fail "finish gate-ratified must refuse until local base contains the merge"
+  fail "compat finish must refuse until local base contains the merge"
 fi
-pass "finish gate-ratified refuses: merged remotely, local base not synced"
+pass "merged on forge, base unsynced: landed + local_synced=false; compat refuses"
 
-# --- synchronized: finish passes ----------------------------------------------
+# Synchronized: settlement fully landed; the compat path now passes too.
 git -C "$repo" pull -q --ff-only origin "$base"
+st="$("${L[@]}" status)"
+[ "$(echo "$st" | jget '["settlement"]["result"]')" = "landed" ] \
+  && [ "$(echo "$st" | jget '["settlement"]["local_synced"]')" = "True" ] \
+  || fail "settlement must be landed+local_synced after the base syncs"
 "${L[@]}" finish --reason gate-ratified >/dev/null \
-  || fail "finish gate-ratified must pass once merged + synchronized"
-pass "finish gate-ratified passes after merge + local sync"
+  || fail "compat finish must pass once the delivery verifiably landed"
+pass "synced: settlement landed (local_synced=true); compat path passes"
 
 # --- the loop never merges ----------------------------------------------------
 # Match the gh SUBCOMMAND (line start), not the whole argv — the PR body

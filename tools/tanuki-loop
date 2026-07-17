@@ -64,21 +64,25 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
                                  remote rather than force-pushing
   gate-pr [--title T] [--body-file F]   PR-protected targets: push the
                                  INTEGRATION branch and open one Draft PR
-                                 against the base — the delivery of review
-                                 material, not ratification. Idempotent (an
-                                 existing PR is reused); never merges; any
-                                 failure leaves the local branch intact.
-                                 `finish --reason gate-ratified` then refuses
-                                 until the PR is merged and the local base
-                                 contains the merge
+                                 against the base — DELIVERY, the loop's
+                                 terminal act (owner ruling 2026-07-17).
+                                 Records {pr, head_sha, base_sha}; never
+                                 merges, polls, or waits. Idempotent (an
+                                 existing PR is reused); any failure leaves
+                                 the local branch intact. Settlement (landed/
+                                 pending/declined/unknown) is DERIVED later
+                                 by status/init/unresolved from the forge and
+                                 the current base — no closing command
   issue-get --key K              print the issue already materialized for a problem key
   issue-put --key K --issue N    record a materialized issue (idempotency)
   policy --finding F --decision "…"   record an iteration-1 judgment answer as
                                  run policy (applied unasked from iteration 2)
   finish --reason R              mark the run terminal (converged | cap |
-                                 gate-ratified | aborted) — machine-readable;
-                                 also deletes merged integration branches for
-                                 the target (unmerged tips kept) — issue #6
+                                 aborted; gate-ratified is compatibility only
+                                 — settlement is derived, owner ruling
+                                 2026-07-17) — machine-readable; also deletes
+                                 merged integration branches for the target
+                                 (unmerged tips kept) — issue #6
   recover --restore | --adopt    ATTENDED recovery from the external-modification
                                  breaker (the one breaker `rollback` cannot clear:
                                  it needs an open iteration, and the breaker fires
@@ -587,6 +591,21 @@ def cmd_unresolved(args):
             print(f"unresolved — {args.target}\n  {body}")
         return
     rows = unresolved_branches(repo, args.target)
+    # Settlement annotation (owner ruling 2026-07-17): a branch whose run
+    # delivered a PR carries the derived outcome — `pending` is awaiting
+    # review (not rot), `declined` is exactly the debt this surface exists
+    # for. This is a mechanical fact from the forge and reachability, not a
+    # verdict: what to DO with a declined branch stays reconcile's judgment.
+    dmap = _delivered_states(args.target)
+    for r in rows:
+        st = dmap.get(r["branch"])
+        if st:
+            s = derive_settlement(st)
+            r["delivered"] = {"pr": s.get("pr"), "url": s.get("url"),
+                              "settlement": {k: s.get(k) for k in
+                                             ("result", "detail",
+                                              "observed_at", "stale")
+                                             if s.get(k) is not None}}
     payload = {"target": args.target, "loop_repo": repo, "branches": rows,
                "empty_state": None}
     if not rows:
@@ -605,6 +624,14 @@ def cmd_unresolved(args):
         print(f"  {r['branch']}  {r['ahead']} ahead / {r['behind']} behind"
               + (f", last commit {r['days_since_last_commit']}d ago"
                  if r["days_since_last_commit"] is not None else ""))
+        dv = r.get("delivered")
+        if dv:
+            s = dv.get("settlement", {})
+            print(f"    delivered as PR #{dv.get('pr')} — settlement: "
+                  f"{s.get('result', '?')}"
+                  + (" (last observed "
+                     f"{s.get('observed_at')})" if s.get("stale") else "")
+                  + f" — {s.get('detail', '')[:100]}")
         for c in r["commits"]:
             picks = {True: "picks-clean", False: "conflicts",
                      None: "pick-unknown"}[c["cherry_picks_cleanly"]]
@@ -700,6 +727,112 @@ def gh(repo, *args):
         return 127, "`gh` (GitHub CLI) not found on PATH"
     text = r.stdout if r.returncode == 0 else (r.stderr or r.stdout)
     return r.returncode, (text or "").strip()
+
+
+def derive_settlement(state, save=True):
+    """Derive a delivered run's settlement from the forge and the current base
+    (owner ruling 2026-07-17, delivery boundary): the loop's own record stops
+    at delivery, and no human restates the forge's decision — surfaces that
+    need the outcome derive it here, when they need it.
+
+      landed   — the delivered tip (or the forge's merge commit) is reachable
+                 from the current local base; `local_synced: false` marks the
+                 merged-on-forge-but-base-not-pulled window
+      pending  — the PR is still open on the forge
+      declined — the PR was closed without merging (the branch holds unlanded
+                 work; reconcile owns its classification)
+      unknown  — the forge is unreachable and no prior observation exists;
+                 never an optimistic default
+
+    A successful observation is cached in state (`settlement_observed`, with
+    its timestamp) so offline views can show the LAST OBSERVED result; a
+    cache served in place of a live answer always carries `stale: true` and
+    the observation time — it is never presented as current truth. Returns
+    None for a run that was never delivered."""
+    d = state.get("delivered") or state.get("gate_pr")
+    if not d:
+        return None
+    repo, base = state["loop_repo"], state["base"]
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    def observed(result, detail, extra=None, cache=True):
+        obs = {"result": result, "detail": detail, "observed_at": now}
+        if cache and save:
+            state["settlement_observed"] = obs
+            save_state(state)
+        return {**obs, **(extra or {}),
+                "pr": d.get("number"), "url": d.get("url")}
+
+    # Local reachability first: answerable offline, and the strict test that
+    # finding verification / recurrence accounting is allowed to use.
+    sha = d.get("head_sha")
+    if sha and git(repo, "merge-base", "--is-ancestor", sha, base)[0] == 0:
+        return observed("landed", f"delivered tip {sha[:12]} is reachable "
+                                  f"from local '{base}'",
+                        {"local_synced": True})
+    ref = str(d.get("number") or d.get("url") or "")
+    rc, o = gh(repo, "pr", "view", ref, "--json", "state,mergeCommit")
+    if rc == 0:
+        try:
+            v = json.loads(o)
+        except ValueError:
+            v = {}
+        st = v.get("state")
+        if st == "MERGED":
+            oid = (v.get("mergeCommit") or {}).get("oid") or ""
+            if oid and git(repo, "merge-base", "--is-ancestor",
+                           oid, base)[0] == 0:
+                return observed("landed", f"merge commit {oid[:12]} is "
+                                          f"reachable from local '{base}'",
+                                {"local_synced": True})
+            return observed("landed", f"merged on the forge; local '{base}' "
+                                      "does not contain it yet — git pull "
+                                      "--ff-only. Accounting must not treat "
+                                      "this as landed until it is reachable "
+                                      "locally",
+                            {"local_synced": False})
+        if st == "OPEN":
+            return observed("pending", "the PR is open on the forge — "
+                                       "awaiting the operator's review")
+        if st == "CLOSED":
+            return observed("declined", "the PR was closed without merging — "
+                                        "the branch holds unlanded work "
+                                        "(reconcile owns its classification)")
+        return observed("unknown", f"forge reported unexpected PR state "
+                                   f"{st!r}", cache=False)
+    prior = state.get("settlement_observed")
+    if prior:
+        return {**prior, "stale": True,
+                "pr": d.get("number"), "url": d.get("url"),
+                "detail": (prior.get("detail", "") +
+                           f" — LAST OBSERVED {prior.get('observed_at')}; "
+                           "the forge is unreachable now")}
+    return {"result": "unknown", "observed_at": now,
+            "pr": d.get("number"), "url": d.get("url"),
+            "detail": "forge unreachable and no prior observation — never "
+                      "assumed merged"}
+
+
+def _delivered_states(target):
+    """{integration_branch: state} for every run of the target that recorded
+    a delivery — the map read-only surfaces use to annotate branches with
+    their derived settlement."""
+    d = os.path.join(TANUKI_ROOT, target, "loop")
+    found = {}
+    if not os.path.isdir(d):
+        return found
+    for run in sorted(os.listdir(d)):
+        sp = os.path.join(d, run, "state.json")
+        if not os.path.isfile(sp):
+            continue
+        try:
+            with open(sp, encoding="utf-8") as f:
+                st = json.load(f)
+        except ValueError:
+            continue
+        if st.get("delivered") or st.get("gate_pr"):
+            found[st.get("integration_branch")] = st
+    return found
 
 
 def resolve_base(repo, base):
@@ -1799,9 +1932,14 @@ def cmd_gate_pr(args):
     run's close pushes the INTEGRATION branch and opens a single Draft PR
     integration -> base.
 
-    The Draft PR is the DELIVERY OF REVIEW MATERIAL, not ratification: the
-    Human Gate relocates to PR approval + merge on the forge, and this tool
-    NEVER merges — there is deliberately no merge call anywhere in it.
+    THE LOOP ENDS HERE (owner ruling 2026-07-17, delivery boundary). Success
+    records the run as delivered — PR number, integration-tip SHA, base SHA —
+    and that is the loop's terminal fact. This tool NEVER merges (no merge
+    call exists anywhere in it), never polls, never comments, never waits.
+    Whether the PR is ultimately merged is not the loop's to know or restate:
+    settlement (landed | pending | declined | unknown) is DERIVED by the
+    read-only surfaces (status, init's backstop, unresolved) from the forge
+    and the current base, at the moment an operation actually needs it.
 
     Preconditions (all mechanical, all refuse with exit 3 and a remedy):
       - the run is finished (cap | converged) — a live run has no reviewed
@@ -1908,17 +2046,29 @@ def cmd_gate_pr(args):
     pr.update({"head_sha": head, "base": base, "draft": True,
                "at": time.strftime("%Y-%m-%d %H:%M:%S")})
     state["gate_pr"] = pr
+    # The DELIVERY record — the loop's terminal fact (owner ruling 2026-07-17):
+    # PR number, integration-tip SHA, and the base SHA at delivery. The loop
+    # ends here; whether the PR merges is derived later (derive_settlement) by
+    # whichever surface needs it, never restated by a human closing command.
+    rc_b, base_sha_now = git(repo, "rev-parse", base)
+    state["delivered"] = {"pr": pr.get("number"), "url": pr.get("url"),
+                          "head_sha": head,
+                          "base_sha": base_sha_now if rc_b == 0 else None,
+                          "at": pr["at"]}
     save_state(state)
     audit(state, ("gate-pr: opened Draft PR " if created else
                   "gate-pr: reusing PR ")
                  + f"#{pr.get('number')} ({pr.get('url')}) — head "
-                 f"{head[:12]}; review material delivered, NOT ratified")
+                 f"{head[:12]}; DELIVERED — the loop ends here; settlement "
+                 "(landed/pending/declined) is derived later from the forge "
+                 "and the current base")
     out({"created": created, "reused": not created, "pushed": True,
-         "pr": pr,
-         "note": "delivery of review material, not ratification — the Human "
-                 "Gate is PR approval + merge on the forge; the loop never "
-                 "merges. `finish --reason gate-ratified` will refuse until "
-                 "the PR is merged and the local base contains it."})
+         "pr": pr, "delivered": state["delivered"],
+         "note": "delivered — the loop's boundary. The Human Gate is PR "
+                 "approval + merge on the forge; the loop never merges, "
+                 "polls, or waits. status/init/unresolved derive the "
+                 "settlement (landed/pending/declined/unknown) when they "
+                 "need it; no closing command is required."})
 
 
 def cmd_issue_get(args):
@@ -1956,55 +2106,31 @@ def cmd_policy(args):
 
 
 def cmd_finish(args):
-    """Mark the run terminal, machine-readably: converged | cap |
-    gate-ratified | aborted. The dashboard's answer to 'why did it stop?'."""
+    """Mark the run terminal, machine-readably: converged | cap | aborted.
+    The dashboard's answer to 'why did it stop?'. gate-ratified is accepted
+    for compatibility only (owner ruling 2026-07-17): the loop's terminal
+    fact for a delivered run is the delivery itself, and settlement is
+    derived — no workflow instructs this reason any more."""
     state = load_state(args.target, args.run)
-    # PR-gate guard (spec-tanuki-loop "PR-protected targets"): once a run has
-    # delivered a gate PR, "ratified" has a mechanical meaning — the PR is
-    # MERGED on the forge and the local base contains the merge. Cleanup
-    # (worktree removal, branch deletion) before that point would destroy the
-    # very branch the open PR points at, so this refuses (exit 3, nothing
-    # mutated) until both facts hold.
-    if args.reason == "gate-ratified" and state.get("gate_pr"):
-        pr = state["gate_pr"]
-        ref = str(pr.get("number") or pr.get("url") or "")
-        rc_v, o = gh(state["loop_repo"], "pr", "view", ref,
-                     "--json", "state,mergeCommit")
-        if rc_v != 0:
-            out({"ok": False, "pr": pr,
-                 "hint": "cannot verify the gate PR merged (`gh pr view` "
-                         "failed: " + o + ") — gate-ratified requires a "
-                         "merged PR; fix gh/auth and re-run"})
+    # COMPATIBILITY ONLY (owner ruling 2026-07-17, delivery boundary): the
+    # loop ends at delivery and settlement is DERIVED — no human runs a
+    # closing command, and no workflow documents this reason for a delivered
+    # run. The guard is kept so an existing script invoking it cannot mark a
+    # run ratified against forge reality: it derives the same settlement the
+    # read-only surfaces use and refuses unless the work verifiably landed.
+    if args.reason == "gate-ratified" and \
+            (state.get("delivered") or state.get("gate_pr")):
+        s = derive_settlement(state)
+        if not (s and s.get("result") == "landed" and s.get("local_synced")):
+            out({"ok": False, "settlement": s,
+                 "hint": "compatibility guard: gate-ratified is no longer a "
+                         "workflow step — settlement is derived "
+                         "(status/init/unresolved). It still refuses here "
+                         "because the delivered work is not verifiably "
+                         "landed in the local base"})
             sys.exit(3)
-        try:
-            v = json.loads(o)
-        except ValueError:
-            v = {}
-        if v.get("state") != "MERGED":
-            out({"ok": False, "pr": pr, "pr_state": v.get("state"),
-                 "hint": "the gate PR is not merged — the Human Gate is PR "
-                         "approval + merge on the forge; finish "
-                         "--reason gate-ratified runs only after it lands "
-                         "(the loop never merges it for you)"})
-            sys.exit(3)
-        # Local synchronization: prefer the merge commit (correct for every
-        # merge method); fall back to the delivered head (merge-commit method
-        # only) when the forge omits it.
-        target_sha = (v.get("mergeCommit") or {}).get("oid") \
-            or pr.get("head_sha") or state.get("head_expected")
-        rc_a, _ = git(state["loop_repo"], "merge-base", "--is-ancestor",
-                      target_sha, state["base"])
-        if rc_a != 0:
-            out({"ok": False, "pr": pr, "merged_sha": target_sha,
-                 "hint": f"the PR is merged on the remote but local "
-                         f"'{state['base']}' does not contain "
-                         f"{target_sha[:12]} — sync it first (git -C "
-                         f"{state['loop_repo']} pull --ff-only), then re-run "
-                         "finish"})
-            sys.exit(3)
-        audit(state, f"gate-pr verified: PR #{pr.get('number')} merged "
-                     f"({target_sha[:12]}) and local '{state['base']}' "
-                     "contains it — ratification confirmed")
+        audit(state, f"finish gate-ratified (compatibility): settlement "
+                     f"derived as landed — {s.get('detail')}")
     # A run can be finished twice by design (e.g. `cap` at the end of the
     # unattended run, then `gate-ratified` after the morning gate). Surface the
     # prior close rather than overwriting it silently, so a double-close is
@@ -2145,6 +2271,23 @@ def _health(state, driving, unmatched):
     gate_note = f"; {' + '.join(pend)} await your ruling" if pend else ""
     fin = state.get("finished")
     if fin:
+        # A delivered run's health follows its DERIVED settlement (owner
+        # ruling 2026-07-17): "cap" on a delivered run is not an unopened
+        # gate, and nobody restates the forge's decision to flip this line.
+        d = state.get("delivered")
+        if d:
+            s = derive_settlement(state) or {}
+            r = s.get("result")
+            return {"landed": f"DONE — delivered as PR #{d.get('pr')} and "
+                              "landed (reachable from the base)",
+                    "pending": f"OK — delivered as PR #{d.get('pr')}; "
+                               "awaiting review on the forge",
+                    "declined": f"ATTENTION — PR #{d.get('pr')} closed "
+                                "without merging; the branch holds unlanded "
+                                f"work{gate_note}",
+                    }.get(r, f"ATTENTION — delivered as PR #{d.get('pr')} "
+                             "but settlement is unknown (forge unreachable, "
+                             "no prior observation)")
         return {"gate-ratified": "DONE — ratified at the morning gate",
                 "converged": f"OK — converged; run the morning gate{gate_note}",
                 "cap": "ATTENTION — cap hit without convergence; run the "
@@ -2520,6 +2663,30 @@ def cmd_dashboard(args):
         else:
             lines.append(f"  NEXT: iteration {n_done + 1} of {state['cap']} — "
                          "no action needed from you")
+        if at_gate and state.get("delivered"):
+            # Delivered runs (owner ruling 2026-07-17): the loop ended at the
+            # Draft PR; the decision lives on the forge, and the dashboard
+            # reports the derived settlement instead of the local gate steps.
+            at_gate = False
+            d = state["delivered"]
+            s = derive_settlement(state) or {}
+            lines.append(f"  DELIVERED: PR #{d.get('pr')} ({d.get('url')})")
+            lines.append(f"  SETTLEMENT: {s.get('result', '?')} — "
+                         f"{s.get('detail', '')}"
+                         + (f" [last observed {s.get('observed_at')}]"
+                            if s.get("stale") else ""))
+            n_rule = len(state.get("deferred", [])) + len(state.get("frozen", []))
+            if s.get("result") == "pending":
+                lines.append("  NEXT: review + merge the Draft PR on the "
+                             "forge (merge commit, don't squash)"
+                             + (f"; rule on {n_rule} deferred/frozen item(s)"
+                                if n_rule else ""))
+            elif s.get("result") == "declined":
+                lines.append("  NEXT: the branch holds unlanded work — "
+                             "`reconcile` classifies it")
+            elif n_rule:
+                lines.append(f"  NEXT: rule on {n_rule} deferred/frozen "
+                             "item(s) — reasons listed above")
         if at_gate:
             rc, ncommits = git(state["loop_repo"], "rev-list", "--count",
                                f"{state['base_sha']}..{state['head_expected']}")
@@ -2553,9 +2720,18 @@ def run_verdict(state):
     """
     fin = state.get("finished")
     if fin:
-        return {"state": "finished", "reason": fin.get("reason"),
-                "at": fin.get("at"),
-                "summary": f"finished: {fin.get('reason')}"}
+        v = {"state": "finished", "reason": fin.get("reason"),
+             "at": fin.get("at"),
+             "summary": f"finished: {fin.get('reason')}"}
+        # A delivered run's terminal fact is the delivery (owner ruling
+        # 2026-07-17); the verdict names it so "finished: cap" on a delivered
+        # run cannot read as an unopened gate. Settlement itself is derived —
+        # see the status payload's `settlement` field.
+        d = state.get("delivered")
+        if d:
+            v["delivered"] = {"pr": d.get("pr"), "at": d.get("at")}
+            v["summary"] += f" · delivered: PR #{d.get('pr')}"
+        return v
     lb = state.get("last_breaker")
     if lb:
         s = {"state": "stopped", "reason": lb.get("reason"), "at": lb.get("at"),
@@ -2597,6 +2773,12 @@ def cmd_status(args):
         "base_sha": state.get("base_sha"),
         "last_breaker": state.get("last_breaker"),
         "finished": state.get("finished"),
+        # Delivery + derived settlement (owner ruling 2026-07-17): the loop's
+        # record ends at "delivered"; whether the PR landed is derived here,
+        # live from the forge and the current base — never restated by a
+        # closing command. None for a run that was never delivered.
+        "delivered": state.get("delivered"),
+        "settlement": derive_settlement(state),
         # F107: iterations_done counted iterations that were still OPEN, so "2"
         # could mean two closed or one closed and one in flight — ambiguous
         # exactly where the morning gate skims it. Report closed only, with the
@@ -2818,9 +3000,15 @@ def main():
             "final tests passed on the current integration HEAD, and `gh` is "
             "available. Idempotent — an existing PR for the head branch is "
             "reused, never duplicated; any failure leaves the local "
-            "integration branch and run state intact. After the operator "
-            "merges the PR, `finish --reason gate-ratified` verifies the "
-            "merge landed and local base contains it before cleanup."))
+            "integration branch and run state intact. Delivery is the "
+            "loop's BOUNDARY (owner ruling 2026-07-17): the run is recorded "
+            "as delivered {pr, head_sha, base_sha} and nothing here waits "
+            "for the outcome. Settlement is derived later — by status, "
+            "init, and unresolved — from the forge and the current base; "
+            "no human closing command exists. Branch and worktree removal "
+            "belong to /repo-cleanup (or the next init's reachability "
+            "backstop), only after the work verifiably landed or an "
+            "attended decision discards it."))
     sp.add_argument("--title", default=None,
                     help="PR title (default: run id + iteration count)")
     sp.add_argument("--body-file", default=None,
@@ -2837,7 +3025,11 @@ def main():
     # silently accepted; choices= also lists them in --help.
     sp.add_argument("--reason", required=True,
                     choices=["converged", "cap", "aborted", "gate-ratified"],
-                    help="terminal reason for the run (machine-readable)")
+                    help="terminal reason for the run (machine-readable). "
+                         "gate-ratified is COMPATIBILITY ONLY (owner ruling "
+                         "2026-07-17): a delivered run needs no closing "
+                         "command — settlement is derived; if invoked anyway "
+                         "it refuses unless the delivery verifiably landed")
     sp = sub.add_parser("dashboard")
     sp.add_argument("--follow", type=int, default=None)
     sub.add_parser("status")
