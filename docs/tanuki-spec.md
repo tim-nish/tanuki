@@ -204,6 +204,15 @@ said yes — issue filed or will-fix; recurrence still tracked so a later run
 *verifies the fix landed* when it stops recurring) or `dismissed` (human said
 no; kept for dedupe so it never resurfaces as new).
 
+The arrow path is the **canonical operator path, not a tool-enforced state
+machine**: `set-status` records any of the four states and sequencing belongs
+to the command layer (the decision pass promotes before it asks). Two direct
+transitions are expected and legitimate — `open` → `accepted` (accepting a
+below-bar finding straight off the watching list) and `accepted` → `open`
+(re-opening when a verified-fixed finding recurs). On any non-canonical
+transition, `set-status` prints a one-line notice naming the skipped state;
+it never rejects.
+
 **Priority** is deterministic display logic, not judgment: P1 = chronic
 (recurrence ≥3) or cross-scenario; P2 = recurrence 2 or kind `gap`; P3 =
 the rest.
@@ -336,7 +345,14 @@ proposals → labeled issues.) Fix verification needs no back-channel either:
 an accepted finding is verified by its *absence* in later runs, regardless of
 who implemented the fix or how.
 
-## Command — `/tanuki [target] [scenarios… | init | --brief | --status | --history | --mine-only <run> | --ingest "<feedback>" | "<ad-hoc free text>"]`
+## Command — `/tanuki [target] [scenarios… | "<ad-hoc free text>" | init | decide | status | history | view | mine <run> | ingest "<feedback>"]`
+
+**Command shape (the rule):** a bare word selects a mode that **does not
+drive**; flags modify a drive; the bare default is driving. Ratified in
+`specs/spec-short-command-surface/SPEC.md` D6 (issue #74) and applied
+surface-wide. The previously documented flag spellings are retained as
+aliases: `--brief` → `decide`, `--status`, `--history`, `--mine-only` →
+`mine`, `--ingest` → `ingest`.
 
 (`commands/tanuki.md` is authoritative for the full argument grammar —
 including `init` onboarding, `--history`, and ad-hoc free-text scenarios from
@@ -366,9 +382,15 @@ decision pass. UX rules, from dogfooding Tanuki itself:
 - **Cost is displayed as time and turns, never dollars.** USD figures stay in
   manifests as estimate history; user-facing surfaces (plan gate, progress,
   brief) show duration and turn counts.
-- **`/tanuki <target> --brief`** reprints the latest brief;
-  **`/tanuki <target> --status`** runs the ledger's `status` view. Both are
-  read-only re-entry points into an unfinished human gate.
+- **`/tanuki <target> decide`** is the decision pass: the complete,
+  **ledger-anchored** path from whatever the ledger holds decidable to
+  labeled issues — consolidation before presentation, then promote → decide →
+  file (spec-short-command-surface D1). It orients off `status`/`next` and
+  needs no recent run or brief; a brief is reprinted as context when one
+  exists. **`--brief`** is an alias that reprints the latest brief and
+  continues into the same pass — the artifact is what its name promises,
+  never the gate. **`/tanuki <target> status`** runs the ledger's `status`
+  view and stays read-only.
 - **`/tanuki <target> --ingest "<feedback>"`** records human feedback in
   natural language (see "Human feedback ingest") and runs extraction + dedupe
   on it immediately, reporting the delta (bumped vs new) like any run.
@@ -376,6 +398,28 @@ decision pass. UX rules, from dogfooding Tanuki itself:
   never the session temp dir, never the target repos. The brief's canonical
   home stays `~/.tanuki` (writing it into a repo would pollute it); the
   in-session presentation + `--brief` are the access path.
+
+## The decision pass — `/tanuki [target] decide` (alias `--brief`)
+
+(`specs/spec-short-command-surface/SPEC.md` D1 is authoritative for the pass
+and its entry points; `specs/spec-tanuki-solve/SPEC.md` D1/D3 remain
+authoritative for the consolidation taxonomy; `commands/tanuki.md`
+implements both. Folded 2026-07-17, issue #72 — this was `/tanuki-solve`, a
+separate command, until consolidation moved into the pass itself and the
+separate surface was retired; its capability, one attended command from open
+findings to labeled issues with no raw ledger invocations, is preserved
+here.) The consolidate-then-decide pass: promote → **consolidate**
+(deterministic candidate groups from `tanuki-ledger consolidate`, judged and
+classified as merge / conflict / dependency at the command layer) → decision
+pass over the consolidated plan → confirmed filing → watching list. A
+conflict group is presented as ONE multi-outcome question naming the
+branches; a filed issue from a resolved conflict records the rejected
+alternative in its body. With fewer than two candidate items there is nothing
+to consolidate and the stage is skipped. Disposition mechanics, the promotion
+bar, and the downstream boundary are unchanged by the fold — the pipeline
+still ends at the labeled issue, and no downstream tooling is invoked, named,
+or configured (an operator's decide→file→triage chain composes outside this
+repo, on the far side of the label boundary).
 
 ## Files
 

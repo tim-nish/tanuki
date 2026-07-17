@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Fixture for tanuki-ledger's consolidate pre-clustering
+# (specs/spec-tanuki-solve D2/D4):
+#   - two findings with contradictory proposals for the SAME behavior
+#     (shared --target subject + shared scenario) land in ONE candidate
+#     group — the incident class the spec exists to make unrepresentable;
+#   - an unrelated finding never joins a group;
+#   - scenario overlap ALONE never groups;
+#   - subject tokens generic within the candidate set are dropped and named;
+#   - consolidate is read-only: ledger.json stays byte-identical;
+#   - --status filters the candidate set.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
+export TANUKI_ROOT="$root"
+L=("$here/tanuki-ledger" --target t)
+ledger="$root/t/ledger.json"
+
+"${L[@]}" init >/dev/null
+
+# F1/F2: the #68/#70 shape — same behavior (--target accepts path-like
+# values), contradictory proposals, seen by overlapping scenarios.
+"${L[@]}" upsert-finding --title "ledger --target absolute-path support is an undocumented accidental os.path.join side effect" \
+  --kind gap --evidence "r001/ledger-lifecycle#1" >/dev/null
+"${L[@]}" upsert-finding --title "Path-like --target fails deep inside git worktree add instead of failing up-front slug validation" \
+  --kind friction --evidence "r001/ledger-lifecycle#2,r002/loop-doctor-cold#1" >/dev/null
+# F3: unrelated defect, DIFFERENT scenario, no shared subject.
+"${L[@]}" upsert-finding --title "Dashboard iterations line omits the rolled-back count" \
+  --kind papercut --evidence "r001/dashboard-cold-read#1" >/dev/null
+# F4: same scenario as F1/F2 but unrelated subject and prose — must NOT group
+# (scenario overlap alone never groups).
+"${L[@]}" upsert-finding --title "set-status silently allows lifecycle-skipping transitions with no warning" \
+  --kind gap --evidence "r001/ledger-lifecycle#3" >/dev/null
+
+# --- read-only + the incident group -----------------------------------------
+before="$(sha256sum "$ledger")"
+out="$("${L[@]}" consolidate 2>/tmp/consolidate-note.$$)"
+note="$(cat /tmp/consolidate-note.$$)"; rm -f /tmp/consolidate-note.$$
+after="$(sha256sum "$ledger")"
+[ "$before" = "$after" ] || fail "consolidate changed ledger.json"
+pass "consolidate is read-only"
+
+group_count="$(echo "$out" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["candidates"]))')"
+[ "$group_count" = "1" ] || fail "expected exactly 1 candidate group, got $group_count"
+ids="$(echo "$out" | python3 -c 'import json,sys; print(",".join(json.load(sys.stdin)["candidates"][0]["ids"]))')"
+[ "$ids" = "F1,F2" ] || fail "expected the contradictory pair F1,F2 in one group, got: $ids"
+pass "contradictory-proposal pair (#68/#70 shape) surfaces as one candidate group"
+
+echo "$out" | grep -q "subject-overlap" || fail "group lacks a subject-overlap signal"
+echo "$out" | grep -q '"pair"' || fail "group lacks per-pair signal attribution"
+pass "group carries mechanical reasons (subject overlap, per-pair signals)"
+
+# F3 and F4 must be in no group (F4 shares a scenario with F1/F2 but nothing else).
+echo "$ids" | grep -qv "F3" || fail "unrelated F3 was grouped"
+echo "$out" | python3 -c '
+import json,sys
+g = json.load(sys.stdin)["candidates"]
+ids = {i for grp in g for i in grp["ids"]}
+assert "F4" not in ids, "scenario-only overlap grouped F4"
+' || fail "scenario overlap alone grouped F4"
+pass "scenario overlap alone never groups; unrelated findings stay out"
+
+# --- --status filter ----------------------------------------------------------
+"${L[@]}" set-status --id F1 --status dismissed >/dev/null
+filtered="$("${L[@]}" consolidate --status open 2>/dev/null)"
+fcount="$(echo "$filtered" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["candidates"]))')"
+[ "$fcount" = "0" ] || fail "dismissed finding still grouped under --status open"
+pass "--status filters the candidate set (dismissed F1 excluded, group dissolves)"
+
+echo "ALL PASS"
