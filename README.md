@@ -73,8 +73,10 @@ CONSOLIDATOR                    promotion by thresholds (code), then the
   (frontier + code)             brief: ≤10 ranked proposals, watching list,
         │                       lesson candidates
         ▼
-DECISION PASS (in-session)      each proposal: accept / dismiss / defer —
-                                a run ends in decisions, not a report
+DECISION PASS (in-session)      consolidate first (merge duplicates, surface
+                                contradictory fixes as ONE choice), then each
+                                item: accept / dismiss / defer — a run ends in
+                                decisions, not a report
 ```
 
 ## Install
@@ -102,23 +104,30 @@ cd ~/work/my-plugin
 That's the whole loop. After a run, useful entry points:
 
 ```
-/tanuki my-plugin --status              # what's still waiting on my decision?
-/tanuki my-plugin --brief               # reopen the latest brief, resume deciding
-/tanuki my-plugin --ingest "…"          # log friction YOU hit, in plain words
+/tanuki my-plugin status                # what's still waiting on my decision?
+/tanuki my-plugin decide                # decide what's pending, and file the issues
+/tanuki my-plugin ingest "…"            # log friction YOU hit, in plain words
+/tanuki my-plugin history               # the long view: what's been explored
 /tanuki "try the export flow with a huge file"   # one-off ad-hoc scenario
 /tanuki-loop                            # unattended overnight mode (below)
 ```
 
+**One rule for the grammar:** a **bare word** is a mode that doesn't drive
+(`init`, `decide`, `status`, `history`, `ingest`, `mine`); flags modify a
+drive; the bare default *is* driving. The older spellings — `--brief`,
+`--status`, `--history`, `--ingest`, `--mine-only` — still work as aliases,
+so nothing in your fingers breaks.
+
 Every run ends with a **delta report** — which known problems recurred and
 what's new — so you never need to remember previous runs.
 
-## Reporting friction you found yourself (`--ingest`)
+## Reporting friction you found yourself (`ingest`)
 
 You'll keep using your own plugin, and you'll keep hitting things. Instead of
 a TODO list you'll lose, hand the observation to Tanuki in plain language:
 
 ```
-/tanuki my-plugin --ingest "The README says to look for the fact-sheet,
+/tanuki my-plugin ingest "The README says to look for the fact-sheet,
 but I couldn't tell where it was written."
 ```
 
@@ -131,19 +140,36 @@ it's new, a new finding is created. Either way you get the same bumped-vs-new
 delta report. It's instant and costs nothing — use it the moment friction
 bites.
 
-## The decision pass (the human gate)
+## The decision pass (the human gate) — `/tanuki <target> decide`
 
 A run doesn't end with "here's a report." Tanuki walks you through each
 promoted proposal — shown as **Problem → Proposed fix**, with evidence
 collapsed to a pointer line you'll rarely need — and records one disposition
-each:
+each.
+
+It runs at the end of a normal run, or on its own with `decide` — which is
+**ledger-anchored**, not brief-anchored: open findings and no recent run is a
+normal way to start, not an error.
+
+**Nothing reaches the approval screen unanalyzed.** Before the first question,
+the pass consolidates: findings describing the same defect from different
+scenarios merge into one item; findings whose fixes **cannot both hold**
+surface as ONE multi-outcome question naming each branch, never as two
+independent yes/no gates. That stage exists because the alternative shipped:
+two findings proposing opposite fixes for the same defect were filed as
+separate issues in one sitting, and the contradiction had to be reconciled by
+hand across two issue threads afterwards. Filing an issue whose conflict with
+another was detectable from the ledger is a defect of the tool, not of your
+attention.
+
+Dispositions:
 
 - **accept** — optionally file the prepared GitHub issue right then (its own
   explicit confirmation; nothing is ever auto-filed). A filed issue carries
   exactly one label, `tanuki:<kind>` — the only machine-readable trace Tanuki
   leaves; the prefix inside the kind label is the provenance marker.
 - **dismiss** — it never resurfaces as new (but stays deduplicated against).
-- **defer** — stays pending; `--status` keeps it visible until you decide.
+- **defer** — stays pending; `status` keeps it visible until you decide.
 
 Accepted findings keep their recurrence tracking, which gives you a free
 regression check: after you ship a fix, run Tanuki again — the finding's
@@ -185,6 +211,36 @@ gate, run after every iteration. A failing gate stops the loop immediately.
 On the first run without one configured, Tanuki derives a candidate from
 your repo and asks you to confirm it.
 
+### When you don't merge the batch
+
+The morning gate has two outcomes, and the second one has a cost. If you
+decline the merge — or merge some runs and not others — the integration
+branch survives with real work on it and nowhere to go. Then `main` moves,
+you fix the same things by hand, and eventually the branch's answer and
+`main`'s answer *contradict each other*. That is not a hypothetical: two
+branches once accumulated 25 unmerged commits and had resolved two findings
+in exactly the opposite direction to the attended sitting — discovered only
+after both had shipped.
+
+So the loop tells you, and then helps:
+
+```
+/tanuki-loop my-plugin unresolved   # which branches never merged, and how stale
+/tanuki-loop my-plugin reconcile    # classify their work, then land it
+```
+
+`/tanuki-loop` mentions unresolved branches on its own when they exist (one
+line, never blocking), and `~/.tanuki/<target>/unresolved.md` is a brief you
+can open cold.
+
+`reconcile` is **report-first**: it produces a landing plan and stops until
+you open the gate. It classifies **per change, not per commit** — one commit
+routinely mixes work that already landed, work that's been superseded, work
+that contradicts a decision you've made, and work still worth having, and its
+subject line describes at most one of them. Clean, self-contained commits are
+cherry-picked; entangled ones are ported by hand; anything that contradicts a
+contract is reported for you to decide, never merged quietly.
+
 ## Vocabulary
 
 Three words carry the whole design; everything flows one way through them:
@@ -196,7 +252,7 @@ Three words carry the whole design; everything flows one way through them:
 | **Proposal** | a finding that crossed the promotion bar and now awaits your decision. |
 
 Events → Findings → Proposals → (your call) labeled GitHub issues. Nothing
-skips a step, including your own `--ingest` feedback.
+skips a step, including your own `ingest` feedback.
 
 ## What's in this repo
 
