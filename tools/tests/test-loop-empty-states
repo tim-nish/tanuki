@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# Fixture for the D3 empty-state enumeration (specs/spec-tanuki-view D3;
+# OPEN-1 resolved 2026-07-17; issue #66 / F47 is its first instance).
+#
+# Every dashboard section that can render empty resolves to exactly ONE member
+# of a closed set, each carrying an expected-vs-gap verdict and a reason. This
+# fixture holds ONE CASE PER MEMBER — that is the whole point of the rule: the
+# class has been reported three times (F5, F47/#66, F46/#65) because the text
+# was prose no test could check. A new member without a case here, or a
+# regression in an existing one, must fail loudly.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+loop="$here/tanuki-loop"
+root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
+export TANUKI_ROOT="$root"
+L=("$loop" --target t)
+jget() { python3 -c "import json,sys;print(json.load(sys.stdin)$1)"; }
+
+repo="$root/repo"; git init -q "$repo"
+git -C "$repo" config user.email a@b.c; git -C "$repo" config user.name t
+echo v0 > "$repo/f"; git -C "$repo" add -A; git -C "$repo" commit -qm base
+
+wt="$("${L[@]}" init --loop-repo "$repo" --cap 5 | jget '["worktree"]')"
+
+# --- the enumeration is closed and every member is covered here ---------------
+# Read the members out of the tool itself, so ADDING one without a case below
+# fails this fixture rather than shipping unchecked prose.
+members="$(python3 - "$loop" <<'EOF'
+import re, sys
+src = open(sys.argv[1]).read()
+block = re.search(r"EMPTY_STATES = \{(.*?)\n\}\n", src, re.S).group(1)
+print("\n".join(sorted(re.findall(r'"([a-z]+:[a-z-]+)": dict\(', block))))
+EOF
+)"
+covered="drive:iteration-open-not-driven
+drive:iterations-ran-none-drove
+drive:no-iteration-started
+run:no-iteration-started
+scheduler:never-synced-after-runs
+scheduler:never-synced-fresh"
+[ "$members" = "$covered" ] || fail "EMPTY_STATES membership changed — add a case below.
+tool:    $(echo "$members" | tr '\n' ' ')
+fixture: $(echo "$covered" | tr '\n' ' ')"
+pass "the enumeration is closed and every member has a case in this fixture"
+
+# --- fresh target: three EXPECTED members ------------------------------------
+out="$("${L[@]}" dashboard)"
+
+# drive:no-iteration-started
+grep -q "latest drive: no iteration has started yet — expected" <<<"$out" \
+  || fail "drive:no-iteration-started must read as expected: $(grep 'latest drive' <<<"$out")"
+grep -q "A drive is one tanuki-drive pipeline run" <<<"$out" \
+  || fail "the 'drive' term must stay defined for a cold reader (F46)"
+pass "drive:no-iteration-started — expected, term defined"
+
+# run:no-iteration-started
+grep -q "this run: no ledger movement yet — no iteration has started" <<<"$out" \
+  || fail "run:no-iteration-started missing: $(grep 'this run' <<<"$out")"
+pass "run:no-iteration-started — expected"
+
+# scheduler:never-synced-fresh — issue #66 / F47, the first instance of D3.
+sched="$(grep 'scheduler decisions' <<<"$out")"
+grep -q "expected on a fresh target" <<<"$sched" \
+  || fail "#66: a fresh target's empty scheduler state must read as EXPECTED: $sched"
+grep -q "GAP" <<<"$sched" && fail "#66: a fresh target is not a gap: $sched"
+# The command it names must be explained where it is named.
+grep -q "reads the scenarios file" <<<"$sched" \
+  || fail "#66: 'tanuki-scheduler sync' must be explained, not just named: $sched"
+grep -q "you do not run it by hand" <<<"$sched" \
+  || fail "#66: must say the operator does not run sync themselves: $sched"
+pass "scheduler:never-synced-fresh — #66: expected, and the command is explained"
+
+# --- iteration open: drive:iteration-open-not-driven --------------------------
+"${L[@]}" iter-start >/dev/null
+out2="$("${L[@]}" dashboard)"
+grep -q "iteration 1 started but its drive has not begun yet" <<<"$out2" \
+  || fail "drive:iteration-open-not-driven missing: $(grep 'latest drive' <<<"$out2")"
+grep -q "latest drive: GAP" <<<"$out2" && fail "mid-bracket is expected, not a gap"
+pass "drive:iteration-open-not-driven — expected mid-bracket"
+
+# --- after an iteration ran: two GAP members ---------------------------------
+echo v1 > "$wt/f"; git -C "$wt" commit -qam iter1
+"${L[@]}" iter-verify >/dev/null
+out3="$("${L[@]}" dashboard)"
+
+# drive:iterations-ran-none-drove
+d="$(grep 'latest drive' <<<"$out3")"
+grep -q "GAP" <<<"$d" || fail "iterations ran with no drive is a GAP: $d"
+grep -q "1 iteration(s) ran and none recorded a drive" <<<"$d" \
+  || fail "drive:iterations-ran-none-drove reason wrong: $d"
+pass "drive:iterations-ran-none-drove — GAP"
+
+# scheduler:never-synced-after-runs — the case #66's prose could not express.
+s3="$(grep 'scheduler decisions' <<<"$out3")"
+grep -q "GAP" <<<"$s3" \
+  || fail "#66: no matrix AFTER runs is a gap, not 'expected': $s3"
+grep -q "cannot have chosen anything" <<<"$s3" \
+  || fail "the gap reason must say why it matters: $s3"
+pass "scheduler:never-synced-after-runs — GAP (the distinction #66 asked for)"
+
+# --- the expected/gap verdict is the whole point ------------------------------
+# Same section, same absent substrate, opposite verdicts depending on state.
+# That is what "expected vs gap" means and what prose kept failing to carry.
+grep -q "expected on a fresh target" <<<"$out" \
+  || fail "fresh scheduler state should be expected"
+grep -q "GAP" <<<"$s3" || fail "post-run scheduler state should be a gap"
+pass "one absent substrate, two verdicts — expected on a fresh target, GAP after runs"
+
+# --- an unenumerated state is a bug, not an invented string -------------------
+python3 - "$loop" <<'EOF'
+import importlib.util, sys
+spec = importlib.util.spec_from_loader("tl", loader=None)
+m = importlib.util.module_from_spec(spec)
+src = open(sys.argv[1]).read()
+# Pull just the table + helper so we can exercise the KeyError contract.
+import re
+tbl = re.search(r"EMPTY_STATES = \{.*?\n\}\n", src, re.S).group(0)
+fn = re.search(r"def empty_state\(.*?\n\n\n", src, re.S).group(0)
+exec(tbl + "\n" + fn, m.__dict__)
+try:
+    m.empty_state("scheduler:invented-on-the-spot", "t")
+except KeyError:
+    sys.exit(0)
+sys.exit("an unenumerated empty state must raise, not render")
+EOF
+[ "$?" = "0" ] || fail "empty_state() accepted an unenumerated member"
+pass "an unenumerated empty state raises — it cannot be invented at a call site"
+
+echo "ALL PASS"

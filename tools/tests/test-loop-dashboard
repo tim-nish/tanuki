@@ -31,9 +31,12 @@ grep -q "NEXT:" <<<"$out"                    || fail "section 6 (NEXT) missing"
 pass "all six sections render on an init-only run"
 
 # --- missing substrate degrades to a stated reason, never silent absence -----
-grep -q "latest drive: none yet" <<<"$out"                    || fail "drive degradation reason missing"
-grep -q "this run: no ledger movement yet" <<<"$out"          || fail "this-run degradation reason missing"
-grep -q "no scheduler state for this target" <<<"$out"        || fail "scheduler degradation reason missing"
+# The exact wording is the D3 enumeration's business (tools/tests/
+# test-loop-empty-states, one case per member); this fixture asserts only the
+# skeleton rule: the section is present AND states a reason.
+grep -qE "latest drive: .+—" <<<"$out"                        || fail "drive degradation reason missing"
+grep -qE "this run: .+—" <<<"$out"                            || fail "this-run degradation reason missing"
+grep -qE "scheduler decisions: .+—" <<<"$out"                 || fail "scheduler degradation reason missing"
 pass "missing substrate degrades to a stated reason"
 
 # --- fixed order: the section headings appear in the contract's order --------
@@ -101,10 +104,12 @@ pass "issue #63: a nonzero rolled-back count is stated and still consumes the ca
 # "none yet — no iteration has started a drive" was simply FALSE once an
 # iteration had run. The rollback above closed iteration 1, so iterations HAVE
 # run here and none recorded a drive — exactly the state that used to lie.
+# The member's wording is asserted in test-loop-empty-states; here we only
+# check that this state is not reported as the no-iteration one.
 out5="$("${L[@]}" dashboard)"
-grep -q "no iteration has started a drive" <<<"$out5" \
+grep -q "no iteration has started" <<<"$out5" \
   && fail "post-iteration empty state still claims no iteration started (F46)"
-grep -qE "latest drive: none recorded — [0-9]+ iteration\(s\) ran without a drive" <<<"$out5" \
+grep -qE "latest drive: .*iteration\(s\) ran and none recorded a drive" <<<"$out5" \
   || fail "post-iteration empty state must say iterations ran without a drive: $(grep 'latest drive' <<<"$out5")"
 pass "issue #65: after an iteration ran, the empty state states that accurately"
 
