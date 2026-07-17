@@ -352,9 +352,11 @@ drive**; flags modify a drive; the bare default is driving. Ratified in
 `specs/spec-short-command-surface/SPEC.md` D6 (issue #74) and applied
 surface-wide. The previously documented flag spellings are retained as
 aliases: `--brief` → `decide`, `--status`, `--history`, `--mine-only` →
-`mine`, `--ingest` → `ingest`. `view` is **reserved but not yet implemented**
-(`specs/spec-tanuki-view/SPEC.md` is PROPOSED — D6 ratified only the word's
-shape); it appears in the grammar so no target or scenario claims the name.
+`mine`, `--ingest` → `ingest`. `view` is the **option-free door to every
+read-only view** (`specs/spec-tanuki-view/SPEC.md`): bare `view` opens the
+view picker; `view <name>` jumps to one of the closed catalog — `status`,
+`live`, `history`, `coverage`, `trajectory`. The surface reads and renders;
+the tools stay the computing substrate, and no view ever writes.
 
 (`commands/tanuki.md` is authoritative for the full argument grammar —
 including `init` onboarding, `--history`, and ad-hoc free-text scenarios from

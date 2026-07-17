@@ -133,8 +133,9 @@ repeated renames):
 The documented spellings are retained as **aliases** (`--brief` → `decide`,
 `--status`, `--history`, `--mine-only`, `--ingest`), so nothing in an
 operator's fingers breaks. `view` is specified separately
-(`specs/spec-tanuki-view/SPEC.md`, PROPOSED); this deliverable ratifies its
-*shape*, resolving that spec's OPEN-3, not its content. D1's `decide`
+(`specs/spec-tanuki-view/SPEC.md`, since IMPLEMENTED); this deliverable
+ratified its *shape*, resolving that spec's OPEN-3, not its content. D1's
+`decide`
 spelling is ratified here and lands with this rule, not ahead of it.
 
 ### D2 — `next` derived from enumerated ledger states (fixes F24, F36, F76)

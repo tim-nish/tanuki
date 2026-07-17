@@ -1,10 +1,15 @@
 # Spec: /tanuki view — one human-facing surface for every read-only view
 
-Status: PROPOSED 2026-07-17 (drafted on the operator's order as a **new
-design exercise**, grounded in the current repository — not a transcription
-of a previously ratified discussion); **D3 AMENDED and OPEN-1 RESOLVED
+Status: IMPLEMENTED 2026-07-17 (D1/D2 landed in `commands/tanuki.md` and
+`docs/tanuki-spec.md` on the operator's order; D3 had already landed ahead of
+them — `EMPTY_STATES` in `tools/tanuki-loop` with
+`tools/tests/test-loop-empty-states` — and D4 stands as the acceptance rule.
+**OPEN-2 RESOLVED 2026-07-17 by operator ruling**: view vocabulary is
+target-local in v1 — see OPEN-2. Drafted PROPOSED 2026-07-17 as a **new design
+exercise**, grounded in the current repository — not a transcription of a
+previously ratified discussion; **D3 AMENDED and OPEN-1 RESOLVED
 2026-07-17** — the empty state is a closed enumeration, typed and tested (see
-D3), and D3 now lands ahead of D1/D2 with issue #66 as its first instance.
+D3), and D3 landed ahead of D1/D2 with issue #66 as its first instance.
 Touches `commands/tanuki.md`, `docs/tanuki-spec.md`, and — per OPEN-1's
 resolution — `tools/tanuki-loop` (the dashboard's empty states gain typed
 `{state, expected, reason, next}` alongside the prose they already print; an
@@ -12,9 +17,8 @@ additive change, no subcommand/flag/existing-field altered). `tools/tanuki-
 scheduler` and `tools/tanuki-ledger` are unchanged: the tools stay the
 deterministic machine substrate and this spec adds a presentation surface
 over them. No change to the pipeline contract (events → findings → proposals
-→ labeled issues) or to any isolation/safety property. **OPEN-2** remains
-open and is marked as such; OPEN-1 and OPEN-3 are resolved in place with the
-reasoning kept.
+→ labeled issues) or to any isolation/safety property. OPEN-1, OPEN-2, and
+OPEN-3 are resolved in place with the reasoning kept.
 
 ## Problem
 
@@ -204,12 +208,26 @@ should say so:
 enumeration rather than a prose patch, which is why the two could not be
 resolved independently.
 
-**OPEN-2 — axis vocabulary.** `axes` are per-target and author-declared: the
-generation pass ratifies them at the plan gate, and
-`spec-tanuki-scenario-lifecycle` is explicit that "tools never invent,
-rename, or extend axes; they only compute over what generation ratified".
-The view surface renders that vocabulary verbatim, which raises questions
-this spec does not answer:
+**~~OPEN-2 — axis vocabulary.~~ RESOLVED 2026-07-17 (operator ruling).**
+**View vocabulary is target-local in v1.** A view renders the selected
+target's axis names exactly as emitted by its substrate. Tanuki does not
+normalize axes and does not claim comparability across targets.
+Cross-target comparison is out of scope and requires a separate future
+specification. Applied to the questions as originally posed:
+
+- *Is cross-target comparison a goal at all?* No — out of scope in v1;
+  pursuing it is a new spec, not an amendment here.
+- *May the surface display an axis differently from its declared key?* No —
+  "exactly as emitted" settles presentation too: no titlecasing, no
+  substitutions, no note-derived retitling. The lifecycle spec's no-rename
+  rule and this ruling now cover stored state and presentation alike.
+- *A recommended starter vocabulary?* None is owned or enforced by this
+  spec; nothing in v1 normalizes toward one.
+- *The residue of OPEN-1's partial answer* — whether the axis vocabulary
+  that empty states are reported in is comparable across targets — is
+  answered by the same ruling: it is not, and no view may imply it is.
+
+The original questions, kept for the record:
 
 - With no shared vocabulary, two targets may name the same concept
   differently (`error_path` vs `failure_mode`) and a `coverage` view is
@@ -269,6 +287,11 @@ only — the catalog (D2) and everything else here remain PROPOSED.
   explicit-flags/config contract and never acquire a view dependency.
 - **No downstream awareness.** The pipeline still ends at the labeled issue;
   no view invokes, names, or configures downstream tooling.
+- **No cross-target vocabulary (v1).** View vocabulary is target-local: a
+  view renders the selected target's axis names exactly as its substrate
+  emits them — no normalization, no comparability claim across targets.
+  Cross-target comparison is a separate future specification (OPEN-2's
+  resolution).
 - **No second vocabulary.** Views render the existing status set, the
   existing coverage states, and the declared axes. No view introduces a term
   its substrate rejects (the F99/F25 class — a view teaching a vocabulary a
@@ -281,12 +304,15 @@ unblocked** (OPEN-1 resolved 2026-07-17) and lands *ahead of* D1/D2: its
 enumeration applies to the dashboard's empty states, which exist today and
 have produced every report of this class, and issue #66 is its first
 instance. D4 is a standing acceptance rule rather than a one-time change.
-**OPEN-2** blocks nothing in D1/D2 — `coverage` renders declared axes
-verbatim today — and is a prerequisite only for any cross-target coverage
-comparison.
+**OPEN-2** (resolved: target-local vocabulary) blocks nothing in D1/D2 —
+`coverage` renders declared axes verbatim, which is now the ruled behavior,
+not an interim one; any cross-target coverage comparison starts as a new
+spec.
 
-Sequencing against current work: this spec is **PROPOSED and unscheduled**.
-It follows the in-flight sequence (commit the #72/#73 spec changes → Story
-1.6 → Story 1.7); no story is created from it in this sitting, and its
-`live` view's substrate description should be re-checked against Story 1.7's
-outcome, which changes what the decision pass is called.
+Sequencing against current work: originally **PROPOSED and unscheduled**,
+following the in-flight sequence (commit the #72/#73 spec changes → Story
+1.6 → Story 1.7) with no story created in that sitting. **Superseded
+2026-07-17:** the operator ordered implementation directly; D1/D2 landed as
+the "Views" section of `commands/tanuki.md`. The `live` view's substrate
+description should still be re-checked against Story 1.7's outcome, which
+changes what the decision pass is called.

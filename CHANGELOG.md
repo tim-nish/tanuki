@@ -7,6 +7,18 @@ All notable changes to Tanuki are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `/tanuki <target> view [name]` — one option-free door to every read-only
+  view (`specs/spec-tanuki-view/SPEC.md` D1/D2): bare `view` opens a picker
+  over the closed catalog — `status`, `live`, `history`, `coverage`,
+  `trajectory` — each with a state-derived hint; `view <name>` jumps
+  straight there. `coverage` and `trajectory` gain named doors of their own
+  (previously reachable only as a conditional block inside `--history` and
+  the `--history <scenario>` flag overload). The surface reads and renders
+  only; the `tanuki-*` tools remain the fully-optioned computing substrate,
+  and no view writes. View vocabulary is target-local in v1: axis names
+  render exactly as the substrate emits them, with no normalization and no
+  cross-target comparability claim (spec OPEN-2, resolved by operator
+  ruling).
 - `tanuki-loop recover` — attended recovery from the external-modification
   breaker once the last iteration is closed: `--restore` resets the loop
   worktree to `head_expected` (discarded range audited), `--adopt`
