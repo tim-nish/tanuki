@@ -71,4 +71,68 @@ fcount="$(echo "$filtered" | python3 -c 'import json,sys; print(len(json.load(sy
 [ "$fcount" = "0" ] || fail "dismissed finding still grouped under --status open"
 pass "--status filters the candidate set (dismissed F1 excluded, group dissolves)"
 
+# --- notes[] + run-id signals (story 1.6 / issue #73) -------------------------
+# Fresh namespace: the cases above dismissed F1 and tuned titles for the
+# title-token path. These exercise the signals D2 named but the tool ignored.
+M=("$here/tanuki-ledger" --target t2)
+"${M[@]}" init >/dev/null
+
+# G1/G2: titles share NO content tokens; the notes describe the same defect.
+# Title-token clustering alone misses this pair — the recall gap #73 reports.
+same_note="the empty state cannot distinguish expected emptiness from a real gap; the operator needs an expected-versus-gap signal before acting"
+"${M[@]}" upsert-finding --title "Coverage block renders nothing for a fresh namespace" \
+  --kind gap --evidence "r100/coverage-cold#1" --note "$same_note" >/dev/null
+"${M[@]}" upsert-finding --title "Scheduler decisions section names an unmet command" \
+  --kind gap --evidence "r200/dashboard-cold#1" --note "$same_note" >/dev/null
+
+nout="$("${M[@]}" consolidate 2>/dev/null)"
+echo "$nout" | python3 -c '
+import json,sys
+g = json.load(sys.stdin)["candidates"]
+assert any(set(grp["ids"]) >= {"F1","F2"} for grp in g), \
+    f"notes-only pair not grouped; candidates={g}"
+' || fail "findings whose notes describe the same defect were not grouped"
+echo "$nout" | grep -q "notes-text similarity" \
+  || fail "group reason does not name the notes-text signal"
+pass "notes-only match groups and the reason names the notes-text signal"
+
+# F3/F4: shared precise subject, DIFFERENT scenarios, same run r300 — the run
+# corroborates what the subject already suggested.
+"${M[@]}" upsert-finding --title 'promote --dry-run prints no active thresholds' \
+  --kind gap --evidence "r300/promote-preview#1" >/dev/null
+"${M[@]}" upsert-finding --title 'promote --dry-run listing omits the breadth bar' \
+  --kind gap --evidence "r300/gate-walkthrough#1" >/dev/null
+rout="$("${M[@]}" consolidate 2>/dev/null)"
+echo "$rout" | python3 -c '
+import json,sys
+g = json.load(sys.stdin)["candidates"]
+assert any(set(grp["ids"]) >= {"F3","F4"} for grp in g), \
+    f"subject+run pair not grouped; candidates={g}"
+' || fail "shared subject corroborated by a shared run did not group"
+echo "$rout" | grep -q "run-overlap: r300" \
+  || fail "group reason does not name the run-overlap signal"
+pass "shared run corroborates a shared subject; the reason names it"
+
+# F5/F6: same run r400, nothing else in common — run overlap alone must NOT
+# group (one run legitimately yields many unrelated findings).
+"${M[@]}" upsert-finding --title "Brief cost line shows dollars instead of turns" \
+  --kind papercut --evidence "r400/brief-render#1" >/dev/null
+"${M[@]}" upsert-finding --title "Worktree cleanup leaves an orphaned lockfile behind" \
+  --kind friction --evidence "r400/loop-recover#1" >/dev/null
+aout="$("${M[@]}" consolidate 2>/dev/null)"
+echo "$aout" | python3 -c '
+import json,sys
+g = json.load(sys.stdin)["candidates"]
+for grp in g:
+    ids = set(grp["ids"])
+    assert not ({"F5","F6"} <= ids), f"run overlap alone grouped F5/F6: {grp}"
+' || fail "run overlap alone formed a group"
+pass "run overlap alone never groups (corroborating signal only)"
+
+# Determinism: same ledger content, byte-identical output.
+d1="$("${M[@]}" consolidate 2>/dev/null)"
+d2="$("${M[@]}" consolidate 2>/dev/null)"
+[ "$d1" = "$d2" ] || fail "consolidate output is not deterministic across runs"
+pass "consolidate is deterministic (fixed tokenizer, fixed thresholds)"
+
 echo "ALL PASS"

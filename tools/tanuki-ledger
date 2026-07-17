@@ -413,6 +413,19 @@ def _content_tokens(title):
     return {t for t in _words(title) if len(t) >= 3 and t not in _STOPWORDS}
 
 
+def _notes_text(finding):
+    """A finding's notes[] joined for tokenizing. notes often carry the
+    proposal nuance that relates or distinguishes two findings, so titles
+    alone under-cluster (spec-tanuki-solve D2)."""
+    return " ".join(finding.get("notes", []) or [])
+
+
+def _run_ids(finding):
+    """Run ids a finding was seen in, from its evidence pointers. Evidence is
+    capped (bounded exemplars), so this is a bounded set by construction."""
+    return {r for r in (run_of(e) for e in finding.get("evidence", [])) if r}
+
+
 def _jaccard(a, b):
     return len(a & b) / len(a | b) if a or b else 0.0
 
@@ -431,9 +444,15 @@ def cmd_consolidate(args, ledger):
     cands = [f for f in ledger["findings"]
              if f["status"] in statuses and not f.get("tombstone")]
 
-    subj = {f["id"]: _subject_tokens(f["title"]) for f in cands}
+    subj = {f["id"]: _subject_tokens(f["title"] + " " + _notes_text(f))
+            for f in cands}
     cont = {f["id"]: _content_tokens(f["title"]) for f in cands}
+    # Title + notes: notes carry the nuance that relates findings whose
+    # titles diverge (spec-tanuki-solve D2).
+    full = {f["id"]: cont[f["id"]] | _content_tokens(_notes_text(f))
+            for f in cands}
     scen = {f["id"]: set(f.get("scenarios", [])) for f in cands}
+    runs = {f["id"]: _run_ids(f) for f in cands}
 
     # Drop subject tokens generic within THIS candidate set (e.g. the tool's
     # own name appearing in half the titles) — deterministic and self-scaling.
@@ -450,24 +469,37 @@ def cmd_consolidate(args, ledger):
     for i, a in enumerate(ids):
         for b in ids[i + 1:]:
             sim = _jaccard(cont[a], cont[b])
+            sim_full = _jaccard(full[a], full[b])
             shared_subj = subj[a] & subj[b]
             shared_scen = scen[a] & scen[b]
+            shared_runs = runs[a] & runs[b]
             signals = []
             # Edge rules (fixed, documented in --help): strong title
-            # similarity alone, or a shared precise subject corroborated by
-            # weak title similarity or a shared scenario. Scenario overlap
-            # alone never groups (one scenario legitimately yields many
-            # unrelated findings).
+            # similarity alone; or strong title+notes similarity alone (notes
+            # carry the nuance a diverging title hides); or a shared precise
+            # subject corroborated by weak title similarity, a shared
+            # scenario, or a shared run. Scenario overlap and run overlap
+            # NEVER group alone — one scenario, and one run, legitimately
+            # yield many unrelated findings; they only corroborate.
             if sim >= min_sim:
                 signals.append(
                     f"title-similarity {sim:.2f} "
                     f"(shared: {', '.join(sorted(cont[a] & cont[b]))})")
-            if shared_subj and (sim >= min_sim / 3 or shared_scen):
+            elif sim_full >= min_sim:
+                notes_only = sorted((full[a] & full[b]) - (cont[a] & cont[b]))
+                signals.append(
+                    f"notes-text similarity {sim_full:.2f} "
+                    f"(shared via notes: {', '.join(notes_only)})")
+            if shared_subj and (sim_full >= min_sim / 3 or shared_scen
+                                or shared_runs):
                 signals.append(
                     f"subject-overlap: {', '.join(sorted(shared_subj))}")
                 if shared_scen:
                     signals.append(
                         f"scenario-overlap: {', '.join(sorted(shared_scen))}")
+                if shared_runs:
+                    signals.append(
+                        f"run-overlap: {', '.join(sorted(shared_runs))}")
             if signals:
                 edges[(a, b)] = signals
 
@@ -989,15 +1021,20 @@ def main():
         description=(
             "Pre-cluster the decision pass's candidate findings "
             "(spec-tanuki-solve D2). Deterministic signals only: title-token "
-            "Jaccard similarity, shared precise subject tokens (backtick "
-            "spans, --flags, dotted names, tanuki-* names; tokens generic "
-            "within the candidate set are dropped), and scenario overlap as "
-            "corroboration. Edge rules: similarity >= --min-similarity alone; "
-            "or a shared subject token corroborated by weak similarity "
-            "(>= min/3) or a shared scenario. Scenario overlap alone never "
-            "groups. Output groups are CANDIDATES for the command layer's "
-            "judgment (merge / conflict / dependency / discard) — this tool "
-            "never classifies and never writes."))
+            "Jaccard similarity, title+notes similarity (notes[] carry the "
+            "nuance a diverging title hides), shared precise subject tokens "
+            "(backtick spans, --flags, dotted names, tanuki-* names, over "
+            "title and notes; tokens generic within the candidate set are "
+            "dropped), and scenario overlap plus shared run ids (from "
+            "evidence pointers) as corroboration. Edge rules: title "
+            "similarity >= --min-similarity alone; or title+notes similarity "
+            ">= --min-similarity alone; or a shared subject token "
+            "corroborated by weak similarity (>= min/3), a shared scenario, "
+            "or a shared run. Scenario overlap and run overlap NEVER group "
+            "alone — one scenario, and one run, legitimately yield many "
+            "unrelated findings. Output groups are CANDIDATES for the "
+            "command layer's judgment (merge / conflict / dependency / "
+            "discard) — this tool never classifies and never writes."))
     sp.add_argument("--status", default="proposed,open",
                     help="comma list of statuses to consider "
                          f"(default proposed,open; each one of {STATUSES})")
