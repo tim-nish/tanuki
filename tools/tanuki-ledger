@@ -812,7 +812,11 @@ def render_next(state, target, ledger):
             "'promote --min-recurrence N', then decide them: "
             f"/tanuki {target} --brief"),
         "all-decided": (
-            "all findings are decided (accepted/dismissed/compacted) — "
+            # "compacted" is NOT a status — a tombstoned finding is still
+            # accepted or dismissed (issue #62 / F25; the F99 regression was
+            # naming it here as a peer, which `findings --status compacted`
+            # then rejects).
+            "all findings are decided (accepted/dismissed, some tombstoned) — "
             f"re-run the pipeline (/tanuki {target}) to surface any new ones"),
     }
     if state not in hints:
@@ -842,13 +846,29 @@ def cmd_status(args, ledger):
 
     by = {s: [f for f in ledger["findings"] if f["status"] == s]
           for s in STATUSES}
+
+    # Tombstone is a MODIFIER on a stored status, never a status of its own
+    # (F25 / issue #62). A compacted finding keeps status accepted|dismissed
+    # plus tombstone:true, so labelling a "compacted" bucket here would teach
+    # a vocabulary `findings --status` rejects — the F99 regression. Report
+    # the marker alongside the real status instead.
+    def tomb(items):
+        return sum(1 for f in items if f.get("tombstone"))
+
+    counts = " / ".join(
+        f"{s} {len(by[s])}" + (f" ({tomb(by[s])} tombstoned)" if tomb(by[s])
+                               else "")
+        for s in STATUSES)
+    total_tomb = tomb(ledger["findings"])
     print(f"tanuki status — {args.target}")
     print(f"  runs: {len(runs)}" + (f" (latest: {runs[-1]})" if runs else ""))
     print(f"  latest brief: {os.path.join(briefs_dir, briefs[-1])}"
           if briefs else "  latest brief: none")
-    print(f"  findings: {len(ledger['findings'])} "
-          f"(open {len(by['open'])} / proposed {len(by['proposed'])} / "
-          f"accepted {len(by['accepted'])} / dismissed {len(by['dismissed'])})")
+    print(f"  findings: {len(ledger['findings'])} ({counts})")
+    if total_tomb:
+        print(f"  tombstoned: {total_tomb} — compacted to one-line records "
+              f"(terminal: verified-fixed or dismissed); they keep their "
+              f"status for dedupe and are not awaiting anything")
 
     if by["proposed"]:
         print("\n  AWAITING YOUR DECISION (proposed — accept or dismiss):")
@@ -967,13 +987,24 @@ def emit_policy_lines(root, sha, files):
 
 def cmd_stats(args, ledger):
     by_status = {}
+    # Tombstone is a modifier on a stored status, not a status (F25 / issue
+    # #62): a compacted finding still counts under accepted|dismissed, and
+    # tombstoned_by_status says how many of each are terminal. No "compacted"
+    # key — that would be a vocabulary `findings --status` rejects (F99).
+    tombstoned_by_status = {}
     for f in ledger["findings"]:
         by_status[f["status"]] = by_status.get(f["status"], 0) + 1
+        if f.get("tombstone"):
+            tombstoned_by_status[f["status"]] = \
+                tombstoned_by_status.get(f["status"], 0) + 1
     print(json.dumps({
         "events": len(ledger["events"]),
         "event_occurrences": sum(e["count"] for e in ledger["events"].values()),
         "findings": len(ledger["findings"]),
         "by_status": by_status,
+        "tombstoned": sum(tombstoned_by_status.values()),
+        "tombstoned_by_status": tombstoned_by_status,
+        "live": len(ledger["findings"]) - sum(tombstoned_by_status.values()),
     }, indent=2))
 
 

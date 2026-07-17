@@ -155,4 +155,53 @@ echo "$out" | grep -q "tombstoned F1 (fixed)" \
   || fail "accepted finding not verified after 3 driven-and-absent replays: $out"
 pass "verify-by-absence requires driven-and-absent replays, not mere elapsed runs"
 
+# --- tombstones are visible in status/stats (issue #62 / F25) ------------------
+# A compact-tombstoned finding used to read identically to a live one: only the
+# raw findings JSON revealed tombstone:true, so `accepted: 1` after compact gave
+# no terminal indication. The marker rides ALONGSIDE the stored status — a
+# tombstone is a modifier, never a status of its own.
+st="$("${D[@]}" status)"
+echo "$st" | grep -qE "accepted 1 \(1 tombstoned\)" \
+  || fail "status must mark tombstoned findings within their status: $st"
+echo "$st" | grep -q "tombstoned: 1" \
+  || fail "status must state the tombstoned total: $st"
+pass "issue #62: status distinguishes a tombstoned finding from a live one"
+
+sj="$("${D[@]}" stats)"
+echo "$sj" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["tombstoned"] == 1, f"stats tombstoned count wrong: {d}"
+assert d["tombstoned_by_status"] == {"accepted": 1}, \
+    f"stats must attribute tombstones to their stored status: {d}"
+assert d["live"] == d["findings"] - d["tombstoned"], f"live count wrong: {d}"
+# The F99 trap: a tombstone must NOT become a status. by_status is the
+# STATUSES enum only, so `findings --status <k>` accepts every key here.
+extra = set(d["by_status"]) - {"open", "proposed", "accepted", "dismissed"}
+assert not extra, f"stats invented a status outside the enum: {extra}"
+' || fail "stats tombstone contract"
+pass "issue #62: stats reports tombstoned/live without inventing a status"
+
+# Vocabulary consistency (the F99 regression this fix must not repeat): every
+# bucket status/stats name is one `findings --status` actually accepts.
+for s in open proposed accepted dismissed; do
+  "${D[@]}" findings --status "$s" >/dev/null 2>&1 \
+    || fail "findings --status $s rejected — status/stats vocabulary diverged"
+done
+# status output (its `next:` line included) must never present "compacted" as
+# a decided state alongside real statuses: it is not in STATUSES, and
+# `findings --status compacted` matches nothing — so naming it as a peer
+# teaches a vocabulary the tool cannot honor. This is the exact shape F99
+# reported as a regression of the F25 fix.
+# (Separate, NOT covered here: `findings --status` does not validate its
+# argument at all — any value silently yields []. That is F99's other half
+# and needs its own issue; #62 is about status/stats surfacing tombstones.)
+"${D[@]}" status | grep -q "accepted/dismissed/compacted" \
+  && fail "status names 'compacted' as a peer of real statuses (F99 regression)"
+[ "$("${D[@]}" findings --status compacted | tr -d '[:space:]')" = "[]" ] \
+  || fail "compacted matches no finding — it is a modifier, not a status"
+n="$("${D[@]}" findings --status accepted | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+[ "$n" = "1" ] || fail "a tombstoned finding must keep its stored status for findings --status"
+pass "issue #62: status/stats teach no vocabulary findings --status rejects (F99)"
+
 echo "all checks passed"
