@@ -1042,10 +1042,18 @@ def cmd_doctor(args):
     #    regression. Run in a throwaway detached worktree, removed afterward:
     #    the operator's tree is never touched and the repo nets zero change.
     if not cfg["test_cmd"]:
+        # derived_from marks this as a CONSEQUENCE of loop-config, not an
+        # independent fault (F112): with no test_cmd there is nothing to run,
+        # so fixing loop-config fixes this too. The breaker summary reads this
+        # field and names only root causes, so the operator sees one problem to
+        # fix rather than two unrelated ones.
         checks.append({"check": "baseline-test", "ok": False,
+                       "derived_from": "loop-config",
                        "detail": "no test_cmd to check — configure one first "
                                  "(the loop's test breaker is the headless "
-                                 "run's only regression gate)"})
+                                 "run's only regression gate). This check "
+                                 "fails only because loop-config is "
+                                 "incomplete — fixing that fixes this."})
         # Report the artifact check even when it cannot run. A check that shows
         # up only in the ready report looks like it appeared from nowhere
         # between two runs (F91) — the fixed skeleton the dashboard already
@@ -1162,12 +1170,27 @@ def cmd_doctor(args):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     failed = [c["check"] for c in checks if not c["ok"]]
+    # Cause before consequence (F112). A derived check fails only because the
+    # check it names failed; listing the two as peers reads as two unrelated
+    # problems. Derived entries are still reported in full under "checks" —
+    # they are demoted in the SUMMARY, never hidden.
+    derived = {c["check"]: c["derived_from"] for c in checks
+               if not c["ok"] and c.get("derived_from")
+               and c["derived_from"] in failed}
+    roots = [c for c in failed if c not in derived]
     report = {"phase": args.phase, "target": args.target, "base": base,
               "base_sha": base_sha, "ready": not failed, "checks": checks}
     if failed:
-        report["breaker"] = (f"doctor: {len(failed)} check(s) failed "
-                             f"({', '.join(failed)}) — not ready for "
+        tail = ""
+        if derived:
+            tail = ("; " + ", ".join(f"{c} follows from {r}"
+                                     for c, r in derived.items()))
+        report["breaker"] = (f"doctor: {len(roots)} check(s) failed "
+                             f"({', '.join(roots)}){tail} — not ready for "
                              f"phase {args.phase} headless execution")
+        report["root_causes"] = roots
+        if derived:
+            report["derived_failures"] = derived
         # Surface the exit-code contract in the payload so a scripted headless
         # caller learns it from the tool, not only from commands/tanuki-loop.md
         # (F34): exit 3 == not ready / breaker; exit 0 == ready.
@@ -1238,6 +1261,19 @@ def committed_artifacts(wt, start, head):
 
 
 def cmd_iter_start(args):
+    """Open an iteration, tripping any breaker that should stop the run first.
+
+    Check PRECEDENCE, which is observable and worth knowing (F93): sequencing,
+    then cap, then wall-time, then external modification. The order matters
+    because the first match wins and stops the run — so once a run reaches its
+    cap, `cap reached` shadows the external-modification check permanently, and
+    an external edit to a capped run's worktree is never reported. That is
+    deliberate (a capped run is over; it has no next iteration to protect) but
+    it means a capped run's worktree is NOT guarded — re-`init` to get a fresh
+    guarded run rather than continuing to edit a capped one. Rolled-back
+    iterations consume cap slots, so a run can reach this state earlier than
+    its landed-commit count suggests (F27).
+    """
     state = load_state(args.target, args.run)
     if state["iterations"] and state["iterations"][-1].get("phase") == "started":
         breaker(state, "sequencing violation: previous iteration was never "
