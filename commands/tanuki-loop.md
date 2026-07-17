@@ -427,23 +427,35 @@ Sections:
   anomalous result classified against the ledger: `known: F2 deferred, …`
   (expected — already ruled on) vs `UNMATCHED` (new problem or mining not
   done — the only class that needs eyes mid-run).
-- **this run** — run-scoped deltas (new / fixed / recurred findings,
-  deferred/frozen with their reasons inline); cumulative lifetime counts are
-  a single pointer line to `--history`, where they belong.
+- **this run** — run-scoped deltas (newly observed / status→accepted /
+  recurred findings, deferred/frozen with their reasons inline); every label
+  is a ledger fact, never a commit count (`fixed` was retired — it read as
+  one); cumulative lifetime counts are a single pointer line to `--history`,
+  where they belong.
 - **scheduler decisions** — from the iteration's persisted plan: what is
   being verified (replaying accepted fixes), what was picked for exploration,
   the active rotation, what is waiting for future iterations, and whether the
   exploration quota was met (runs predating persisted plans degrade to
   per-state pools with a note).
 - **convergence** — the definition spelled out (no new actionable finding +
-  no patch + quota met), which conditions held last cycle, and what is still
-  required (`one more quiet cycle ends the run`).
-- **why stopped / NEXT** — a breaker points at the audit trail; a
-  converged/capped run lists the morning gate's concrete decisions (review
-  the N-commit diff, rule on the deferred/frozen items, approve the merge).
+  no patch commit produced + quota met), which conditions held last cycle,
+  and what is still required (`one more quiet cycle ends the run`).
+- **why stopped / NEXT** — two separated facts (spec-tanuki-loop "Stop
+  reason vs delivery settlement"): the **computational stop reason**
+  (cap | converged | breaker | cancelled — never a settlement) and, on its
+  own line, the **delivery with its derived settlement** (landed | pending |
+  declined | unknown, with the PR when one exists — the delivery-boundary
+  ruling's derivation, stale-marked when served from cache). A breaker
+  points at the audit trail; a converged/capped run lists the morning
+  gate's concrete decisions (review the N-commit diff, rule on the
+  deferred/frozen items, approve the merge).
+The header's elapsed figure is **execution time**: it freezes at the run's
+first close, and time waiting for PR review or merge never accrues to it.
 Add `--follow 10` for a self-refreshing terminal view during an unattended
 run — it reads only state files, so it's always safe to run alongside the
-loop.
+loop. Add `--live` (the substrate of `/tanuki <t> view live`) to render
+only while the run is active: a closed run degrades to the typed empty
+state plus one historical line, never the full dashboard.
 The dashboard is the live view; for the cross-run long view (per-scenario
 execution history, transitions, coverage, selection history) use
 `tanuki-scheduler --target <t> history` (surfaced as `/tanuki <t> history`).

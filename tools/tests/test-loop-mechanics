@@ -134,7 +134,7 @@ cat > "$TANUKI_ROOT/t/scheduler.json" <<'EOF'
                "s3": {"state": "regression"}}, "runs_recorded": []}
 EOF
 "${L[@]}" dashboard > /tmp/dash.txt
-grep -q "STOPPED: cap" /tmp/dash.txt || fail "dashboard missing finish reason"
+grep -q "STOPPED — stop reason: cap" /tmp/dash.txt || fail "dashboard missing finish reason"
 grep -q "findings: " /tmp/dash.txt || fail "dashboard missing findings summary"
 grep -q "iterations: 0/3" /tmp/dash.txt || fail "dashboard missing iteration count"
 grep -q "scenarios: active 1 · regression 1 · unexplored 1" /tmp/dash.txt \
@@ -168,12 +168,12 @@ pass "record-cycle gates quiet on the persisted plan's exploration quota"
 
 "${L[@]}" dashboard > /tmp/dash2.txt
 grep -q "health: " /tmp/dash2.txt || fail "dashboard missing health verdict"
-grep -q "this run: new findings" /tmp/dash2.txt || fail "dashboard missing run deltas"
+grep -q "this run: newly observed" /tmp/dash2.txt || fail "dashboard missing run deltas"
 grep -q "scheduler decisions (iter 2 plan — exploration quota met)" /tmp/dash2.txt \
   || fail "dashboard missing scheduler decisions from the persisted plan"
 grep -q "verifying fixes (replay): s1" /tmp/dash2.txt || fail "dashboard missing verify set"
 grep -q "exploring (never driven): s2" /tmp/dash2.txt || fail "dashboard missing exploration pick"
-grep -q "last cycle (iter 2): quiet — no new findings · no patch · quota met" /tmp/dash2.txt \
+grep -q "last cycle (iter 2): quiet — no new findings · no patch commits · quota met" /tmp/dash2.txt \
   || fail "dashboard missing convergence explanation"
 pass "dashboard: health verdict, run deltas, scheduler decisions, convergence explanation"
 

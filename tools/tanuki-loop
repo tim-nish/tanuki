@@ -82,7 +82,14 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
                                  — settlement is derived, owner ruling
                                  2026-07-17) — machine-readable; also deletes
                                  merged integration branches for the target
-                                 (unmerged tips kept) — issue #6
+                                 (unmerged tips kept) — issue #6.
+                                 The FIRST computational close (converged/cap/
+                                 aborted) is recorded as the run's STOP REASON
+                                 and never overwritten (aborted is recorded as
+                                 `cancelled`); settlement is derived, never a
+                                 stop reason — the two are separate facts.
+                                 Execution time ends at the first close
+                                 (wall_end); review/merge wait never accrues
   recover --restore | --adopt    ATTENDED recovery from the external-modification
                                  breaker (the one breaker `rollback` cannot clear:
                                  it needs an open iteration, and the breaker fires
@@ -93,14 +100,22 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
                                  current HEAD as head_expected. Never automatic —
                                  the operator chooses.
   status                         JSON summary for the morning gate
-  dashboard [--follow SECS]      operational status, one screen: health verdict,
-                                 latest drive with each anomaly classified against
-                                 the ledger (known/deferred/frozen vs unmatched),
-                                 this-run deltas (new/fixed/recurred findings),
+  dashboard [--follow SECS] [--live]   operational status, one screen: health
+                                 verdict, latest drive with each anomaly
+                                 classified against the ledger (known/deferred/
+                                 frozen vs unmatched), this-run deltas (newly
+                                 observed / status→accepted / recurred),
                                  the scheduler's actual decisions (verify/explore/
                                  rotation/waiting), convergence conditions met vs
-                                 missing, stop reason, and the concrete decisions
-                                 the morning gate will ask for
+                                 missing, the computational stop reason (cap |
+                                 converged | breaker | cancelled — never
+                                 gate-ratified, which is a delivery settlement
+                                 shown on its own line), and the concrete
+                                 decisions the morning gate will ask for.
+                                 --live renders only while the run is ACTIVE;
+                                 a closed run degrades to the typed empty state
+                                 plus one historical line — the substrate of
+                                 `/tanuki <t> view live`
 
 Sequencing is guarded: each iteration must move started -> (verified |
 rolled_back) before the next iter-start, and record-cycle refuses an open
@@ -729,7 +744,7 @@ def gh(repo, *args):
     return r.returncode, (text or "").strip()
 
 
-def derive_settlement(state, save=True):
+def derive_settlement(state, save=True, offline=False):
     """Derive a delivered run's settlement from the forge and the current base
     (owner ruling 2026-07-17, delivery boundary): the loop's own record stops
     at delivery, and no human restates the forge's decision — surfaces that
@@ -748,7 +763,12 @@ def derive_settlement(state, save=True):
     its timestamp) so offline views can show the LAST OBSERVED result; a
     cache served in place of a live answer always carries `stale: true` and
     the observation time — it is never presented as current truth. Returns
-    None for a run that was never delivered."""
+    None for a run that was never delivered.
+
+    offline=True skips the forge entirely (spec-tanuki-view: a read-only
+    view never polls a PR): local reachability still answers `landed`;
+    anything else is the stale-marked last observation, or `unknown` — the
+    same never-optimistic fallback."""
     d = state.get("delivered") or state.get("gate_pr")
     if not d:
         return None
@@ -761,7 +781,7 @@ def derive_settlement(state, save=True):
             state["settlement_observed"] = obs
             save_state(state)
         return {**obs, **(extra or {}),
-                "pr": d.get("number"), "url": d.get("url")}
+                "pr": d.get("number") or d.get("pr"), "url": d.get("url")}
 
     # Local reachability first: answerable offline, and the strict test that
     # finding verification / recurrence accounting is allowed to use.
@@ -769,8 +789,20 @@ def derive_settlement(state, save=True):
     if sha and git(repo, "merge-base", "--is-ancestor", sha, base)[0] == 0:
         return observed("landed", f"delivered tip {sha[:12]} is reachable "
                                   f"from local '{base}'",
-                        {"local_synced": True})
-    ref = str(d.get("number") or d.get("url") or "")
+                        {"local_synced": True}, cache=not offline)
+    if offline:
+        prior = state.get("settlement_observed")
+        if prior:
+            return {**prior, "stale": True,
+                    "pr": d.get("number") or d.get("pr"), "url": d.get("url"),
+                    "detail": (prior.get("detail", "") +
+                               f" — LAST OBSERVED {prior.get('observed_at')}; "
+                               "offline view, forge not consulted")}
+        return {"result": "unknown", "observed_at": now,
+                "pr": d.get("number") or d.get("pr"), "url": d.get("url"),
+                "detail": "offline view — forge not consulted and no prior "
+                          "observation; never assumed merged"}
+    ref = str(d.get("number") or d.get("pr") or d.get("url") or "")
     rc, o = gh(repo, "pr", "view", ref, "--json", "state,mergeCommit")
     if rc == 0:
         try:
@@ -803,12 +835,12 @@ def derive_settlement(state, save=True):
     prior = state.get("settlement_observed")
     if prior:
         return {**prior, "stale": True,
-                "pr": d.get("number"), "url": d.get("url"),
+                "pr": d.get("number") or d.get("pr"), "url": d.get("url"),
                 "detail": (prior.get("detail", "") +
                            f" — LAST OBSERVED {prior.get('observed_at')}; "
                            "the forge is unreachable now")}
     return {"result": "unknown", "observed_at": now,
-            "pr": d.get("number"), "url": d.get("url"),
+            "pr": d.get("number") or d.get("pr"), "url": d.get("url"),
             "detail": "forge unreachable and no prior observation — never "
                       "assumed merged"}
 
@@ -2136,8 +2168,23 @@ def cmd_finish(args):
     # prior close rather than overwriting it silently, so a double-close is
     # visible, not accidental (F32).
     prev_finished = state.get("finished")
-    state["finished"] = {"reason": args.reason,
-                         "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    now_str = time.strftime("%Y-%m-%d %H:%M:%S")
+    # Stop reason vs settlement — two separated facts (spec-tanuki-loop "Stop
+    # reason vs delivery settlement"; spec-tanuki-view D2 `live`). The FIRST
+    # computational close is the run's stop reason and is never overwritten:
+    # ratification/settlement is what became of the delivery, never a reason
+    # execution stopped, so a run stopped at `cap` and merged later still
+    # stopped at `cap`. `aborted` is recorded under its lifecycle name,
+    # `cancelled`. Settlement itself is DERIVED (derive_settlement, owner
+    # ruling 2026-07-17) — finish records nothing about it.
+    if args.reason in ("converged", "cap", "aborted"):
+        state.setdefault("stop", {
+            "reason": "cancelled" if args.reason == "aborted" else args.reason,
+            "at": now_str})
+    # Execution time ends at the first close and never grows again — time the
+    # run spends waiting for PR review or merge is not execution time.
+    state.setdefault("wall_end", time.time())
+    state["finished"] = {"reason": args.reason, "at": now_str}
     # Host drift note (spec-host-snapshot): the ONE permitted post-init read of
     # the live host — read-only `git rev-parse`, informational only. It never
     # blocks, aborts, or reconciles; the run mined against the init-time
@@ -2250,9 +2297,12 @@ def _run_deltas(state, findings):
     cur = {fd["id"]: fd for fd in findings}
     return {
         "new": [i for i in cur if i not in before],
-        "fixed": [i for i, b in before.items() if b and i in cur
-                  and b.get("status") in ("open", "proposed")
-                  and cur[i].get("status") == "accepted"],
+        # Status transitions open/proposed -> accepted this run. Previously
+        # keyed (and rendered) as "fixed", which read as a commit count beside
+        # the convergence line's patch fact — it never was one.
+        "accepted": [i for i, b in before.items() if b and i in cur
+                     and b.get("status") in ("open", "proposed")
+                     and cur[i].get("status") == "accepted"],
         "recurred": [i for i, b in before.items() if b and i in cur
                      and cur[i].get("recurrence", 1) > b.get("recurrence", 1)],
         "legacy": legacy,
@@ -2370,6 +2420,18 @@ EMPTY_STATES = {
                "the first `init`; there are no integration branches to hold a "
                "debt",
         next="tanuki-loop --target {t} init --loop-repo <repo>"),
+    # -- the live view (spec-tanuki-view D2 `live`): live means an ACTIVE run -
+    "live:never-initialized": dict(
+        expected=True,
+        reason="no loop run has ever been initialized for this target — "
+               "expected before the first `init` (init creates the run, its "
+               "worktree, and its state)",
+        next="tanuki-loop --target {t} init --loop-repo <repo>"),
+    "live:no-active-run": dict(
+        expected=True,
+        reason="no active loop — the latest run is closed; expected between "
+               "runs (`init` starts a new run)",
+        next="tanuki-loop --target {t} init --loop-repo <repo>"),
     # -- scheduler decisions (F47 / issue #66) --------------------------------
     "scheduler:never-synced-fresh": dict(
         expected=True,
@@ -2412,18 +2474,60 @@ def emit_drift_note(target, repo):
         print(note, file=sys.stderr)
 
 
+def _delivery_phrase(state, lifecycle):
+    """One phrase for the run's delivery, from persisted facts and the
+    OFFLINE-derived settlement only (a view never polls the forge): the
+    delivered PR with its settlement result, a merge-gate ratification, or
+    'none'. A stale (cached) observation carries its timestamp."""
+    d = lifecycle.get("delivered")
+    if d:
+        s = lifecycle.get("settlement") or {}
+        return (f"{s.get('result', 'unknown')} via PR #{d.get('pr')}"
+                + (f" [last observed {s.get('observed_at')}]"
+                   if s.get("stale") else ""))
+    fin = state.get("finished") or {}
+    if fin.get("reason") == "gate-ratified":
+        return "landed (ratified at the morning gate — local merge)"
+    return "none"
+
+
 def cmd_dashboard(args):
     """Operational status (plain text, one screen). Within seconds the
     operator can answer: is the loop healthy, did anything unexpected happen,
     what did THIS run change, what is the scheduler doing and why, how far is
     convergence, and what decision comes next. Cumulative/lifetime numbers are
     a single pointer line — the long view is `tanuki-scheduler history`.
-    --follow N re-renders every N seconds; reads state files only."""
+    --follow N re-renders every N seconds; reads state files only.
+
+    --live (spec-tanuki-view D2 `live`): render the dashboard ONLY while the
+    run is active (not closed). A closed run — however recent — is history,
+    never live: the view degrades to the typed empty state plus ONE line of
+    historical context (run id, stop reason, delivery settlement, frozen
+    execution time), with none of the closed run's detail sections."""
+    if args.live:
+        cur = os.path.join(TANUKI_ROOT, args.target, "loop", "current")
+        if not (args.run or os.path.exists(cur)):
+            body, _ = empty_state("live:never-initialized", args.target)
+            print(f"live — {body}")
+            return
     # Drift note once, before the first render — not inside the --follow loop,
     # which would repeat it every N seconds until it stopped being read.
     _noted = False
     while True:
         state = load_state(args.target, args.run)
+        if args.live and not run_lifecycle(state)["active"]:
+            # A closed run is history, never live — also the --follow exit:
+            # a run closing mid-follow ends the watch with the same line.
+            lc = run_lifecycle(state)
+            body, _ = empty_state("live:no-active-run", args.target)
+            print(f"live — {body}")
+            reason = lc["stop_reason"] + (
+                " (closed before stop/delivery separation — see audit.md)"
+                if lc["stop_reason"] == "unknown" else "")
+            print(f"  latest run: {state['run']} · stop reason: {reason} · "
+                  f"delivery: {_delivery_phrase(state, lc)} · "
+                  f"execution {int(lc['execution_s']) // 60}m")
+            return
         if not _noted:
             emit_drift_note(state["target"], state.get("loop_repo"))
             _noted = True
@@ -2434,7 +2538,10 @@ def cmd_dashboard(args):
         n_rolled_back = sum(1 for i in state["iterations"]
                             if i.get("phase") == "rolled_back")
         cur = state["iterations"][-1] if state["iterations"] else None
-        elapsed = int(time.time() - state["wall_start"])
+        lifecycle = run_lifecycle(state)
+        # Execution time, not wall-clock-since-init: frozen at the first close,
+        # so review/merge waiting never inflates it.
+        elapsed = int(lifecycle["execution_s"])
 
         # -- (section 2) latest drive — ALWAYS present (Fixed skeleton): a
         #    missing progress.json degrades to a stated reason, never absence.
@@ -2510,7 +2617,8 @@ def cmd_dashboard(args):
                  # many, so a reader could not tell where a nonzero count would
                  # show. Zero is stated too, so "none" is a fact, not a guess.
                  f"  iterations: {n_done}/{state['cap']} consumed "
-                 f"({n_rolled_back} rolled back) · elapsed {elapsed // 60}m"]
+                 f"({n_rolled_back} rolled back) · execution {elapsed // 60}m"
+                 + ("" if lifecycle["active"] else " (frozen at close)")]
         lines += drive_lines
 
         # -- (section 3) this run's ledger movement — ALWAYS present; lifetime
@@ -2522,18 +2630,20 @@ def cmd_dashboard(args):
                 return f"{label} {len(ids)}" + \
                     (f" ({_fmt_ids(ids)})" if ids else "")
             lines.append("  this run: " + " · ".join((
-                part("new findings", deltas["new"]),
-                part("fixed", deltas["fixed"]),
+                part("newly observed", deltas["new"]),
+                part("status→accepted", deltas["accepted"]),
                 part("recurred", deltas["recurred"]),
                 f"deferred {len(state.get('deferred', []))}",
                 f"frozen {len(state.get('frozen', []))}")))
-            # F6: define the counters inline — 'fixed' is a ledger transition,
-            # not a landed commit, so 'fixed 0' beside a patch isn't a paradox.
-            lines.append("    (fixed = findings that stopped recurring this "
-                         "run, not commits; recurred = recurrence bumped)")
+            # F6: define the counters inline. Every label is a ledger fact,
+            # never a commit count — 'fixed' was retired because 'fixed 0'
+            # beside a produced patch read as a contradiction.
+            lines.append("    (status→accepted = ledger status transitions "
+                         "this run, not patch commits; recurred = recurrence "
+                         "bumped)")
             if deltas["legacy"]:
                 lines.append("    (run predates status snapshots — "
-                             "fixed/recurred not computable)")
+                             "status→accepted/recurred not computable)")
             for fid in state.get("deferred", []):
                 lines.append(f"    deferred {fid}: "
                              f"{_short(reasons.get(fid, 'see queue.md'), pointer='queue.md')}")
@@ -2614,12 +2724,16 @@ def cmd_dashboard(args):
         # -- convergence: which conditions held last cycle, what's still needed
         lines.append(f"  convergence: quiet streak {state['quiet_streak']}/2 — "
                      "a cycle is quiet when it finds no new actionable "
-                     "finding, lands no patch, and met the exploration quota")
+                     "finding, produces no patch commit, and met the "
+                     "exploration quota")
         lc = state.get("last_cycle")
         if lc:
             held = [("no new findings" if lc["new_actionable"] == 0 else
                      f"{lc['new_actionable']} NEW actionable finding(s)"),
-                    ("no patch" if not lc["patched"] else "a patch LANDED"),
+                    # lc["patched"] = the iteration committed to the
+                    # integration branch — commits PRODUCED, nothing merged.
+                    ("no patch commits" if not lc["patched"] else
+                     "patch commit(s) PRODUCED (on the integration branch)"),
                     ("quota met" if lc.get("quota_met", True) else
                      "exploration quota NOT met")]
             lines.append(f"    last cycle (iter {lc['iter']}): "
@@ -2628,12 +2742,25 @@ def cmd_dashboard(args):
             if not state.get("finished") and state["quiet_streak"] == 1:
                 lines.append("    one more quiet cycle ends the run (converged)")
 
-        # -- why stopped / the concrete next decision
+        # -- why stopped / the concrete next decision. Two separated facts:
+        #    the computational stop reason (cap/converged/breaker/cancelled)
+        #    and the settlement — what became of the delivery is never a
+        #    reason execution stopped. Delivered runs get their DELIVERED/
+        #    SETTLEMENT lines below (live-derived); this line renders the
+        #    delivery phrase only when that block will not (e.g. a compat
+        #    gate-ratified refinish, or a merge-gate ratification).
         at_gate = False
         if state.get("finished"):
-            lines.append(f"  STOPPED: {state['finished']['reason']} "
-                         f"(at {state['finished']['at']})")
+            reason = lifecycle["stop_reason"]
+            if reason == "unknown":
+                reason += (" (closed before stop/delivery separation — "
+                           "see audit.md)")
+            lines.append(f"  STOPPED — stop reason: {reason} "
+                         f"(at {lifecycle['stopped_at']})")
             at_gate = state["finished"]["reason"] in ("converged", "cap")
+            if not (at_gate and state.get("delivered")):
+                lines.append(
+                    f"  delivery: {_delivery_phrase(state, lifecycle)}")
         elif state.get("last_breaker") and \
                 not state["last_breaker"].get("recovered"):
             lines.append(f"  STOPPED: breaker — "
@@ -2709,6 +2836,60 @@ def cmd_dashboard(args):
         time.sleep(args.follow)
 
 
+# The run's computational stop reasons — why execution ended. Settlement
+# (what became of the delivery — see derive_settlement's closed results)
+# never appears here: they are separate facts.
+STOP_REASONS = ("cap", "converged", "breaker", "cancelled")
+
+
+def execution_seconds(state):
+    """Wall-clock the loop actually executed. Frozen at the first close
+    (`wall_end`); review/merge waiting time never accrues here. Runs closed
+    before `wall_end` existed freeze at their recorded close timestamp."""
+    end = state.get("wall_end")
+    if end is None and state.get("finished"):
+        for rec in (state.get("stop"), state.get("finished")):
+            if rec and rec.get("at"):
+                try:
+                    end = time.mktime(
+                        time.strptime(rec["at"], "%Y-%m-%d %H:%M:%S"))
+                    break
+                except ValueError:
+                    pass
+    return round((end if end is not None else time.time())
+                 - state["wall_start"], 1)
+
+
+def run_lifecycle(state):
+    """Typed lifecycle answer the renders derive from — they never
+    re-classify: is loop execution still active, why did it stop
+    (computational only — cap | converged | breaker | cancelled; never a
+    settlement), how long execution actually ran, the delivery record, and
+    the settlement derived WITHOUT a forge call (offline — read-only views
+    must not poll a PR; spec-tanuki-view D2 `live`). A run closed as
+    `gate-ratified` with no recorded stop (legacy overwrite) reports its
+    stop reason as `unknown` — never a guess."""
+    fin = state.get("finished")
+    stop = state.get("stop")
+    lb = state.get("last_breaker")
+    breaker_open = bool(lb and not lb.get("recovered") and not fin)
+    if stop:
+        reason, at = stop.get("reason"), stop.get("at")
+    elif fin:
+        reason = {"cap": "cap", "converged": "converged",
+                  "aborted": "cancelled"}.get(fin.get("reason"), "unknown")
+        at = fin.get("at")
+    elif breaker_open:
+        reason, at = "breaker", lb.get("at")
+    else:
+        reason, at = None, None
+    return {"active": not fin, "breaker_open": breaker_open,
+            "stop_reason": reason, "stopped_at": at,
+            "execution_s": execution_seconds(state),
+            "delivered": state.get("delivered"),
+            "settlement": derive_settlement(state, save=False, offline=True)}
+
+
 def run_verdict(state):
     """The run's condition as ONE typed answer: running | stopped | finished.
 
@@ -2764,6 +2945,11 @@ def cmd_status(args):
     out({
         # Verdict leads: the condition is the question status exists to answer.
         "verdict": run_verdict(state),
+        # Typed lifecycle: active vs closed, the computational stop reason
+        # (never a settlement), frozen execution time, and the OFFLINE-derived
+        # settlement (views read this; the live-derived answer is the
+        # top-level `settlement` field below).
+        "lifecycle": run_lifecycle(state),
         "warning": warning,
         "build_artifacts_committed": swept or None,
         "run": state["run"], "integration_branch": state["integration_branch"],
@@ -2794,7 +2980,9 @@ def cmd_status(args):
         "cap": state["cap"],
         "quiet_streak": state["quiet_streak"], "frozen": state["frozen"],
         "attempts": state["attempts"],
-        "elapsed_s": round(time.time() - state["wall_start"], 1),
+        # Frozen at the first close (see execution_seconds) — review/merge
+        # waiting time never accrues here.
+        "elapsed_s": execution_seconds(state),
         "materialized": state["materialized"],
     })
 
@@ -3032,6 +3220,12 @@ def main():
                          "it refuses unless the delivery verifiably landed")
     sp = sub.add_parser("dashboard")
     sp.add_argument("--follow", type=int, default=None)
+    sp.add_argument("--live", action="store_true",
+                    help="render only while the run is ACTIVE; a closed run "
+                         "degrades to the typed empty state plus one "
+                         "historical line (run id, stop reason, delivery, "
+                         "frozen execution time) — the substrate of "
+                         "`/tanuki <t> view live`")
     sub.add_parser("status")
     sp = sub.add_parser(
         "unresolved",
