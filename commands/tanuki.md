@@ -185,6 +185,12 @@ needing a number no tool emits is a substrate change with its own spec and
 tests — never arithmetic done in prose here. No view introduces a term its
 substrate rejects, invokes downstream tooling, or modifies anything.
 
+**Vocabulary is target-local (v1 — spec-tanuki-view OPEN-2).** A view
+renders the selected target's axis names exactly as its substrate emits
+them: no normalization, no titlecasing, no substitutions, and no
+comparability claim across targets. Cross-target comparison is out of scope
+and requires a separate future specification.
+
 ## Ad-hoc scenarios (free text — "probe the present")
 
 Free text is never raw plugin input: wrap it as a one-off exploratory
