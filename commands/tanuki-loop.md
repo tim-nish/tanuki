@@ -44,6 +44,10 @@ live in the scenarios file's `"loop"` block, stored once, never retyped:
   not asked. No phase files issues overnight or merges to `main`. Before any
   Phase 2/3 run, validate readiness with `tanuki-loop doctor` (Preflight
   step 2) — it enforces the ceilings this section only asks for.
+- `<target> reconcile [branch…]`: **no driving** — audit the loop's own
+  unmerged integration branches and produce a landing plan (see
+  "Reconcile" below). A bare word because it does not drive
+  (spec-short-command-surface D6). Read-only until an explicit gate.
 
 ## 0. Preflight (once)
 
@@ -380,6 +384,111 @@ execution history, transitions, coverage, selection history) use
 
 The deferred queue is handed back for a normal attended triage sitting —
 the loop never decides a spec alternative on its own.
+
+## Reconcile (`/tanuki-loop <target> reconcile [branch…]`)
+
+The morning gate ends at a **merge**. When the operator declines it — or
+merges some runs and not others — the integration branch survives with real
+work on it and no destination. It then rots: `main` moves, the operator
+re-derives the same fixes by hand, and the branch's version of a finding and
+`main`'s version drift into **contradiction**. That is not hypothetical. On
+2026-07-17 two loop branches held 25 unmerged commits; reconciling them found
+that the loop and the attended sitting had resolved the same finding in
+opposite directions **twice** (F102/artifacts, F25→F99/compacted), and both
+had to be arbitrated in the spec lane after both had shipped.
+
+`reconcile` is the sitting that pays that debt down, and it is **attended,
+report-first, and hunk-level**.
+
+### The unit of classification is a semantic change unit, not a commit
+
+**A commit is not a verdict.** One commit routinely contains hunks with four
+different verdicts, and its subject line describes at most one of them:
+
+- `8f4d556` "render the module docstrings in `--help`" — its `tanuki-ledger`
+  hunk was not a docstring at all. It carried the compacted-bucket filter
+  from the commit beneath it, a design that had been **rejected**. Cherry-
+  picking the commit on its title silently reintroduced it; only a test
+  caught it.
+- `76a6e4f` bundled three separable things: a rejected design, a fix that had
+  already been re-implemented independently, and a genuinely good docs change
+  that existed **nowhere else**. Skipping the commit lost the third; taking it
+  smuggled the first.
+
+So: **never infer intent from the subject line, the commit message, or the
+finding ids it cites.** Read the diff. Classify each hunk.
+
+Per-hunk verdicts (closed set):
+- **already-landed** — `main` has this behavior. Semantic, never `git cherry`:
+  on 2026-07-17 all 25 commits were patch-non-equivalent and several were
+  already landed. Compare *behavior*, not patch text.
+- **superseded** — `main` solves the same finding differently. Say which is
+  better and why; sometimes `main`'s is (its F26 ignores a disagreeing
+  override where the branch honored it — stricter, and the documented rule
+  favors it). Sometimes the branch's is: that is what #87 concluded.
+- **conflicting** — contradicts a ratified spec or decision. **Never resolved
+  here.** Report it as a decision the operator owes, with the governing text
+  quoted and the file pointer — a conflict is a decision, not a merge. Where
+  that decision gets taken is the operator's business, not this command's
+  (spec-short-command-surface, Non-goals: no downstream awareness).
+- **still-applicable** — real, absent from `main`, no contract in the way.
+- **unrelated-but-worth-preserving** — orphaned work worth keeping, no home
+  yet. Report it; never land it silently.
+
+### Steps
+
+1. **Collect** (read-only). Loop integration branches (`tanuki-loop/<target>/
+   *`) with unique commits and no merged PR. Explicit `branch…` arguments
+   override the sweep. For each: commits ahead/behind — the behind-count is
+   the staleness signal and belongs in the report.
+2. **Classify** every hunk of every commit against **current `main`**, into
+   the verdicts above. This is judgment and stays at the command layer (the
+   routing principle: deterministic work → tools, judgment → here). Cite the
+   evidence per verdict — the code in `main` that makes it already-landed, the
+   spec text that makes it conflicting.
+3. **Report + landing plan** — the default output, and the whole point.
+   Per branch: staleness; per commit: its hunks' verdicts and whether the
+   commit is **atomic** (every hunk one verdict, applies cleanly) or
+   **entangled**. Then the plan, in execution order, one row per action:
+   cherry-pick / hand-port / route-to-spec-lane / skip-superseded / report.
+   Stop here unless the operator opens the gate.
+4. **Gate — one explicit confirmation, per plan, before any mutation.** No
+   per-item questions, no partial auto-apply. Declining leaves the repository
+   untouched; the report is still the deliverable.
+5. **Execute**, in plan order:
+   - **cherry-pick only an atomic, semantically-applicable commit** (`-x`, so
+     provenance survives). Atomic means every hunk shares one verdict *and*
+     it applies without conflict. Anything else is not a cherry-pick candidate
+     — this rule exists because `8f4d556` looked like one.
+   - **hand-port entangled changes**: apply the applicable hunks only, by
+     hand, dropping the rest. Name in the commit message what was dropped and
+     why — an entangled commit's good half is invisible otherwise.
+   - **route conflicts**: nothing is landed. The plan row states the decision
+     the operator owes, with the quoted contract text — never merge a
+     conflicting hunk to "fix it later", and never take the decision here.
+   - Run the suite after each landing group. A fixture that pins prose the
+     branch legitimately improved is a fixture to update, not a reason to drop
+     the change — say so in the plan.
+6. **Report** what landed, what was hand-ported (and what was dropped from
+   each), what was routed and where, what was skipped as superseded with the
+   reason, and what remains report-only. A branch is **reconciled** when
+   nothing unique remains; only then is it a `/repo-cleanup` deletion
+   candidate — and that command, not this one, deletes it.
+
+### Rules
+
+- **Report-first.** Mutation happens only past the step-4 gate. There is no
+  flag that skips it.
+- **Never delete a branch or a worktree.** `/repo-cleanup` owns that, and it
+  keeps a branch with unique commits as report-only precisely so this command
+  can find it.
+- **Never resolve a contract conflict here.** The spec lane owns that; this
+  command's job is to *detect* it and hand it over with the quote.
+- **Attended only.** No unattended phase reconciles: every verdict is
+  judgment, and this command's whole purpose is to catch what an unattended
+  run and an attended sitting decided differently.
+- **The subject line is never evidence.** Neither are the finding ids in the
+  message. Only the diff and `main` are.
 
 ## Rules
 
