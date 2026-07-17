@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
-# Fixture for the loop's build-artifact guard (story 1.4 / issue #71, ledger
-# finding F64). Regenerable output is not work product:
+# Fixture for the loop's build-artifact guard (story 1.4 / issue #71 + ledger
+# findings F64/F102; arbitration 2026-07-17). Regenerable output is not work
+# product:
 #   - untracked artifacts never make the worktree "dirty" (no false friction);
-#   - artifacts COMMITTED to the integration branch are a breaker AT the
-#     commit that introduced them, naming the paths and the root cause —
-#     not an unexplained not-clean breaker several iterations later;
+#   - artifacts COMMITTED to the integration branch are REPORTED at the commit
+#     that introduced them — named, with the cause, in iter-verify's output and
+#     in status — but are NEVER a breaker: halting there would add a fifth halt
+#     to the documented four-part integration invariant and would stop an
+#     unattended run over a merely-incomplete .gitignore;
+#   - gate-push REFUSES to push a merge carrying artifacts. That is the
+#     enforcement point: the last mechanical boundary before the remote, and an
+#     attended one. F102's incident was artifacts riding through the merge AND
+#     gate-push onto origin with nothing objecting anywhere on that path;
 #   - a clean bracket is unaffected (iter-start -> work -> iter-verify).
 set -euo pipefail
 
@@ -21,6 +28,11 @@ repo="$root/repo"; mkdir -p "$repo"
 git init -q "$repo"; git -C "$repo" config user.email a@b.c
 git -C "$repo" config user.name t
 echo x > "$repo/f.py"; git -C "$repo" add -A; git -C "$repo" commit -qm init
+# gate-push needs a real upstream to refuse against.
+base="$(git -C "$repo" rev-parse --abbrev-ref HEAD)"
+bare="$root/remote.git"; git init -q --bare "$bare"
+git -C "$repo" remote add origin "$bare"
+git -C "$repo" push -q -u origin "$base"
 
 wt="$("${L[@]}" init --loop-repo "$repo" --cap 9 | jget '["worktree"]')"
 gwt() { git -C "$wt" "$@"; }
@@ -57,7 +69,7 @@ pass "a real dirty file still trips not-clean (guard is not a blanket ignore)"
 rm -f "$wt/real-leftover.txt"
 "${L[@]}" rollback >/dev/null 2>&1 || true
 
-# --- committed artifacts: breaker naming paths AND root cause -----------------
+# --- committed artifacts: REPORTED at the commit, never a breaker -------------
 # The actual contamination path: an agent's `git add -A` sweeps them in.
 "${L[@]}" iter-start >/dev/null
 mkdir -p "$wt/pkg/__pycache__"
@@ -66,27 +78,42 @@ echo "work" >> "$wt/f.py"
 gwt add -A                      # the mistake this guard exists to catch
 gwt commit -qm "work + swept-in artifacts"
 rc=0; b="$("${L[@]}" iter-verify 2>&1)" || rc=$?
-[ "$rc" = "3" ] || fail "committed artifacts must break the iteration, got $rc"
-reason="$(echo "$b" | jget '["breaker"]')"
-echo "$reason" | grep -q "pkg/__pycache__/mod.cpython-311.pyc" \
-  || fail "breaker must name the offending path, got: $reason"
-echo "$reason" | grep -qi "build artifacts committed" \
-  || fail "breaker must state the root cause, got: $reason"
-echo "$reason" | grep -qi "not clean" \
-  && fail "committed artifacts must not masquerade as a not-clean breaker: $reason"
-pass "committed artifacts break AT the commit, naming the paths and the cause"
+[ "$rc" = "0" ] \
+  || fail "committed artifacts must NOT halt the iteration (4-part invariant), got $rc"
+[ "$(echo "$b" | jget '["ok"]')" = "True" ] || fail "the iteration should verify: $b"
+echo "$b" | jget '["build_artifacts_committed"]' \
+  | grep -q "pkg/__pycache__/mod.cpython-311.pyc" \
+  || fail "iter-verify must name the swept paths: $b"
+echo "$b" | jget '["warning"]' | grep -qi "build artifacts committed" \
+  || fail "iter-verify must warn, naming the cause: $b"
+pass "committed artifacts are reported at the commit, never fatal (invariant stays 4-part)"
 
-# The guard fires at the introducing commit, so the RECORDED breaker is the
-# artifact one — the failure this story describes is precisely that the
-# contamination used to surface iterations later as something else.
-# (state.json is read directly here so this fixture stays independent of
-# story 1.3's status-surfacing work.)
-recorded="$(python3 -c '
-import glob, json, sys
-p = glob.glob(sys.argv[1] + "/t/loop/*/state.json")
-print(json.load(open(p[0]))["last_breaker"]["reason"])' "$root")"
-echo "$recorded" | grep -qi "build artifacts committed" \
-  || fail "the recorded breaker should be the artifact one, got: $recorded"
-pass "the artifact breaker is what state records (diagnosable at the source)"
+# The warning must reach the morning gate — status is what the operator reads
+# before approving the merge. Always present, explicitly null when clean.
+s="$("${L[@]}" status)"
+echo "$s" | jget '["warning"]' | grep -qi "build artifacts" \
+  || fail "status must carry the artifact warning for the gate: $s"
+echo "$s" | jget '["build_artifacts_committed"]' | grep -q "mod.cpython-311.pyc" \
+  || fail "status must name the swept paths"
+pass "the warning reaches status, which the morning gate reads"
+
+# --- gate-push REFUSES: the enforcement point ---------------------------------
+# F102: artifacts rode the integration branch through the merge AND gate-push
+# onto the remote, with nothing objecting anywhere along that path.
+integ="$("${L[@]}" status | jget '["integration_branch"]')"
+git -C "$repo" merge -q --no-ff "$integ" -m "merge integration"
+rc=0; g="$("${L[@]}" gate-push 2>&1)" || rc=$?
+[ "$rc" = "3" ] || fail "gate-push must refuse a merge carrying artifacts, got $rc"
+[ "$(echo "$g" | jget '["pushed"]')" = "False" ] || fail "nothing may be pushed: $g"
+echo "$g" | jget '["build_artifacts"]' | grep -q "mod.cpython-311.pyc" \
+  || fail "gate-push must name the offending paths: $g"
+[ "$(git -C "$bare" ls-tree -r --name-only "$base" 2>/dev/null | grep -c pycache)" = "0" ] \
+  || fail "an artifact reached the remote — F102 reproduced"
+pass "gate-push refuses; the artifact never reaches the remote (F102 closed)"
+
+# The override exists and is deliberate.
+rc=0; "${L[@]}" gate-push --allow-artifacts >/dev/null 2>&1 || rc=$?
+[ "$rc" = "0" ] || fail "--allow-artifacts must permit a deliberate push, got $rc"
+pass "--allow-artifacts is the deliberate override"
 
 echo "ALL PASS"
