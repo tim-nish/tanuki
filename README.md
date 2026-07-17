@@ -108,6 +108,7 @@ That's the whole loop. After a run, useful entry points:
 /tanuki my-plugin decide                # decide what's pending, and file the issues
 /tanuki my-plugin ingest "…"            # log friction YOU hit, in plain words
 /tanuki my-plugin history               # the long view: what's been explored
+/tanuki my-plugin mine <run-id>         # re-mine a crashed or interrupted run
 /tanuki "try the export flow with a huge file"   # one-off ad-hoc scenario
 /tanuki-loop                            # unattended overnight mode (below)
 ```

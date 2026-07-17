@@ -1,8 +1,11 @@
 # Spec: short-command surface — no workflow requires raw tanuki-ledger
 
-Status: PROPOSED 2026-07-17 (drafted on the operator's order, consolidating
-the accepted ledger-UX findings F18, F20–F23, F33, F36, F60, F62, F66, F68,
-F70, F72, F76 and the operator's stated principle). Touches
+Status: RATIFIED 2026-07-17 (header sync — drafted PROPOSED the same day on
+the operator's order, consolidating the accepted ledger-UX findings F18,
+F20–F23, F33, F36, F60, F62, F66, F68, F70, F72, F76 and the operator's
+stated principle; the command surface, tools, and docs already implement it,
+and both `docs/tanuki-spec.md` and `specs/spec-tanuki-view/SPEC.md` OPEN-3
+cite D6 as ratified — the PROPOSED header had lagged the surface). Touches
 `commands/tanuki.md`, `tools/tanuki-ledger`, `docs/tanuki-spec.md`. No change
 to the pipeline contract (events → findings → proposals → labeled issues) or
 to any isolation/safety property.
