@@ -67,6 +67,9 @@ fully reversible runs unattended.
   them. It never merges without an explicit gate, never deletes a branch
   (`/repo-cleanup` owns that), and never resolves a contract conflict — it
   reports the decision the operator owes, with the governing text quoted.
+  Its **discovery and mechanical signals** come from `tanuki-loop unresolved`
+  (below), never re-derived in the sitting; its **verdicts** are judgment and
+  never come from a tool.
 - **The scheduler plan is pre-approved — no plan gate in the loop.** The
   attended `/tanuki` "confirm execution before anything runs" plan gate
   (`docs/tanuki-spec.md`) **does not apply at any phase of the loop**. Once the
@@ -427,6 +430,102 @@ dedicated attended subcommand, `tanuki-loop recover`, with these guarantees:
   adjusting only `head_expected`, the worktree, and the audit. The next
   `iter-start` then passes its own guards normally.
 
+## Reconcile substrate (`tanuki-loop unresolved`) + drift notification — ADDED 2026-07-17
+
+The reconcile pass (Non-negotiables, "A declined gate leaves a debt") is
+attended judgment by contract. Two things around it are **not** judgment, and
+leaving them to the sitting is why reconciling felt improvised and needed a
+model for work a script should do:
+
+- **Discovery.** Nobody knew the debt existed. Two branches accrued 25
+  unmerged commits and were found only because someone went looking, by which
+  time each had resolved a finding **opposite** to the way the attended
+  sitting had (F102, F25→F99). Drift is silent by construction: a declined
+  gate produces no artifact, and `git branch` is not a place anyone looks.
+- **Mechanical signals.** Ahead/behind, files touched, applies-cleanly, the
+  finding ids a message cites and whether they are still open — all
+  deterministic, all re-derived by hand today.
+
+Per the routing principle (deterministic → scripts, judgment → the command
+layer), those become a tool; the verdicts stay in the pass.
+
+### `tanuki-loop [--target <t>] unresolved [--json]` — read-only
+
+Enumerates the loop's own unmerged integration branches. It runs no drive, no
+iteration, writes no state, and **prompts never** — the
+`announce_new_target` rule applies (*"never a prompt; unattended callers must
+keep working"*). Per branch:
+
+- identity: branch, target, run id, tip SHA, created/last-commit dates;
+- **staleness**: commits ahead of the default branch, commits behind it, and
+  days since its last commit — behind-count is the decay signal (the two 2026
+  branches reached 63 and 116 behind);
+- **merge state**: whether any PR from it merged, and whether its tip is
+  reachable from the default branch;
+- per commit: subject, files touched, whether it cherry-picks cleanly onto
+  the default branch, and the ledger finding ids its message cites **paired
+  with each finding's current status** — a commit citing a finding that is
+  now `accepted` and tombstoned is a superseded *candidate*;
+- worktree: path and whether it is clean.
+
+**What it must not do — the load-bearing constraint.** It emits **signals,
+never verdicts**. It must not print, return, or imply already-landed /
+superseded / conflicting / still-applicable. Those are semantic: on
+2026-07-17 every one of 25 commits was patch-non-equivalent (`git cherry`
+called them all unmerged) while several were already landed, and a commit
+subjected "render the module docstrings in `--help`" carried a **rejected
+design** in its other hunk. A tool that guessed a verdict from patch identity
+or a subject line would be confidently wrong, and confidently wrong is worse
+than silent — it is the failure the pass exists to prevent. `cherry-picks
+cleanly` is a fact about git; it is **not** a synonym for applicable, and the
+field name must not suggest it is.
+
+Ownership: `unresolved` reuses the same branch/worktree resolution `init` and
+`branch_cleanup` already use — never parallel logic — so it cannot disagree
+with the run it describes.
+
+### The notification — pull-based, never a prompt
+
+Drift is reported through the surfaces the operator already opens, and
+through one stable path they can open cold:
+
+1. **A `note:` line on stderr** from `/tanuki-loop` and `/tanuki-loop
+   <t> reconcile` when unresolved branches exist: how many, how stale the
+   worst is, and the one command that acts on it. One line, never blocking,
+   never a prompt — an unattended phase that hits it keeps running.
+2. **`~/.tanuki/<target>/unresolved.md`** — a stable-path brief, rewritten by
+   `unresolved`, that reads cold: the branches, their staleness, and what the
+   reconcile sitting will ask of the operator.
+   **It lives under `~/.tanuki/`, never in the target repo** — the
+   non-negotiable is absolute ("never write any configuration into the target
+   repository"; the brief's canonical home is already `~/.tanuki/` for this
+   reason). A sibling project's equivalent brief lives in its own repo; that
+   shape is not available here and the difference is deliberate, not an
+   oversight.
+3. **Empty state is enumerated**, per `spec-tanuki-view` D3: "no unresolved
+   branches" is an `expected` state with its reason, not silence — silence is
+   what let 25 commits rot.
+
+The notification **states, never acts**: it never merges, never deletes, and
+never opens the gate. It exists so the operator learns the debt exists on a
+day they were not looking for it.
+
+### Acceptance
+
+- A repo with unresolved branches: `/tanuki-loop` prints the note; the note
+  names the count, the worst staleness, and `reconcile`. Exit code and every
+  other output are unchanged.
+- A repo with none: no note; `unresolved` reports the enumerated empty state;
+  `unresolved.md` says so rather than being absent.
+- An unattended (Phase 2/3) run with unresolved branches present completes
+  normally — the note is stderr, and nothing waits.
+- `unresolved --json` emits signals only; a test asserts the payload contains
+  **no verdict field** (no already-landed/superseded/conflicting/applicable),
+  because a future contributor's instinct will be to add one.
+- `unresolved` writes nothing under the loop repo (a fixture asserts the
+  target repo nets zero change), and nothing outside `~/.tanuki/<target>/`.
+- One fixture per enumerated empty state (D3's rule).
+
 ## Morning gate (attended — invariant across all phases)
 
 The loop ends by presenting, for one review:
@@ -510,6 +609,13 @@ and removing supervision is the only change between phases. The morning
   materialized** (`gate-push`, never force over a diverged remote); deferred
   judgment waits for the morning, never auto-decided.
 - Merged integration branches are cleaned up by `finish` (backstop: the next
-  `init`); an unmerged tip is never deleted.
+  `init`); an unmerged tip is never deleted. An unmerged tip is therefore a
+  **debt with an owner**: `unresolved` makes it visible and `reconcile` pays
+  it down. Never-deleted must not mean never-looked-at — that is precisely how
+  25 commits rotted into contradiction.
+- `unresolved` emits **signals, never verdicts**, and prompts never. Whether a
+  change is already-landed, superseded, conflicting or still-applicable is
+  semantic judgment that belongs to the reconcile sitting; patch identity and
+  subject lines are both known-wrong proxies for it.
 - Stop on convergence or cap, whichever first; stop immediately on any
   immediate-stop breaker.
