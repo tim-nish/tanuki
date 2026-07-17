@@ -1082,7 +1082,12 @@ def slug_target(value):
 
 
 def main():
-    p = argparse.ArgumentParser()
+    # See tanuki-loop's main() — same fix, same reason (F98): the evidence
+    # schema, the ledger growth policy and the P1/P2/P3 legend live in the
+    # module docstring and never reached --help without this.
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     # --target is a short namespace slug, NOT a filesystem path (F18): state
     # lives under $TANUKI_ROOT/<target>/ (default ~/.tanuki/<target>/), so the
     # current directory is ignored and a path-like value nests silently.
