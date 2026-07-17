@@ -189,17 +189,28 @@ for s in open proposed accepted dismissed; do
     || fail "findings --status $s rejected — status/stats vocabulary diverged"
 done
 # status output (its `next:` line included) must never present "compacted" as
-# a decided state alongside real statuses: it is not in STATUSES, and
-# `findings --status compacted` matches nothing — so naming it as a peer
-# teaches a vocabulary the tool cannot honor. This is the exact shape F99
-# reported as a regression of the F25 fix.
-# (Separate, NOT covered here: `findings --status` does not validate its
-# argument at all — any value silently yields []. That is F99's other half
-# and needs its own issue; #62 is about status/stats surfacing tombstones.)
+# a decided state alongside real statuses: it is not in STATUSES, so naming it
+# as a peer teaches a vocabulary the tool cannot honor. This is the exact
+# shape F99 reported as a regression of the F25 fix.
 "${D[@]}" status | grep -q "accepted/dismissed/compacted" \
   && fail "status names 'compacted' as a peer of real statuses (F99 regression)"
-[ "$("${D[@]}" findings --status compacted | tr -d '[:space:]')" = "[]" ] \
-  || fail "compacted matches no finding — it is a modifier, not a status"
+
+# F99's other half (arbitration 2026-07-17): --status used to accept ANY value
+# and return [] with exit 0 — an empty list indistinguishable from a real
+# "none match", so a typo or a wrong word read as a fact.
+rc=0; e="$("${D[@]}" findings --status totally-made-up 2>&1)" || rc=$?
+[ "$rc" = "2" ] || fail "an unknown --status must exit 2, not return [] (got $rc)"
+echo "$e" | grep -q "open|proposed|accepted|dismissed" \
+  || fail "the rejection must name the valid statuses: $e"
+pass "F99: an unknown --status is rejected at parse time, naming the enum"
+
+# 'compacted' is the word a reader of `status` is most likely to try — it gets
+# a targeted message rather than a bare enum dump.
+rc=0; e="$("${D[@]}" findings --status compacted 2>&1)" || rc=$?
+[ "$rc" = "2" ] || fail "--status compacted must be rejected: it is not a status"
+echo "$e" | grep -qi "modifier on a stored status" \
+  || fail "rejecting 'compacted' should explain tombstones are a modifier: $e"
+pass "F99: 'compacted' is rejected with a targeted explanation, not a silent []"
 n="$("${D[@]}" findings --status accepted | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
 [ "$n" = "1" ] || fail "a tombstoned finding must keep its stored status for findings --status"
 pass "issue #62: status/stats teach no vocabulary findings --status rejects (F99)"

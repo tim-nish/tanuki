@@ -280,6 +280,30 @@ def with_priority(findings):
     return [{**f, "priority": priority(f)} for f in findings]
 
 
+def status_filter(value):
+    """--status takes one of the four stored statuses, and says so.
+
+    It used to accept anything and return [] with exit 0 — an empty list that
+    looks exactly like a real answer, so a typo or a wrong word reads as "no
+    such findings" (F99). Reject at parse time instead, naming the enum.
+
+    'compacted'/'tombstoned' get a targeted message: a tombstone is a MODIFIER
+    on a stored status (the record keeps accepted|dismissed and carries
+    tombstone:true), never a status of its own (issue #62). Anyone reaching
+    for it has read `status` and is looking for the wrong door.
+    """
+    if value in STATUSES:
+        return value
+    hint = ""
+    if value in ("compacted", "tombstoned"):
+        hint = (" — a tombstone is a modifier on a stored status, not a "
+                "status: a compacted finding keeps accepted|dismissed and "
+                "carries tombstone:true. `status` reports the count alongside "
+                "its status")
+    raise argparse.ArgumentTypeError(
+        f"--status must be one of {'|'.join(STATUSES)}, got {value!r}{hint}")
+
+
 def cmd_findings(args, ledger):
     rows = ledger["findings"]
     if args.status:
@@ -1054,7 +1078,21 @@ def main():
     sp.add_argument("files", nargs="+",
                     help="one or more .events.jsonl files to ingest")
     sp = sub.add_parser("ingest-note"); sp.add_argument("--text", required=True)
-    sp = sub.add_parser("findings"); sp.add_argument("--status")
+    sp = sub.add_parser(
+        "findings",
+        help="list findings as JSON, each with a computed priority",
+        description=(
+            f"List findings as JSON. --status filters to one of "
+            f"{'|'.join(STATUSES)} and rejects anything else at parse time "
+            f"(an unknown value used to yield [] with exit 0 — indis"
+            f"tinguishable from a real 'none match'). Tombstoned findings are "
+            f"NOT a separate bucket: a compacted record keeps its stored "
+            f"status and carries tombstone:true, so --status accepted "
+            f"includes them and `status`/`stats` report the tombstoned count "
+            f"alongside."))
+    sp.add_argument("--status", type=status_filter,
+                    help=f"only findings with this stored status "
+                         f"({'|'.join(STATUSES)})")
     sp = sub.add_parser(
         "upsert-finding",
         description=(
