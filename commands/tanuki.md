@@ -15,6 +15,15 @@ headless runs) → else the cwd's registered target
 exists → else the interactive picker. cwd is a convenience hint via the
 registry, never the only source of truth.
 
+**Command shape (the rule — `specs/spec-short-command-surface/SPEC.md` D6):**
+a **bare word selects a mode that does not drive**; **flags modify a drive**;
+the bare default is driving. Every non-driving mode below is a word; the
+previously documented flag spellings are retained as aliases and marked as
+such. A new mode is a word if it does not drive — the rule answers it, not
+precedent. `view` is **reserved** by the rule but not yet implemented
+(`specs/spec-tanuki-view/SPEC.md` is PROPOSED); reserving it now keeps a
+future target or scenario named `view` from colliding with it later.
+
 Argument handling ($ARGUMENTS):
 - `init`: **onboarding** — run from inside the plugin repo (see "Init" below).
 - *(empty)*: resolve per the order above; when nothing resolves, the
@@ -27,14 +36,23 @@ Argument handling ($ARGUMENTS):
   `~/.tanuki/scenarios/<target>.scenarios.json`. Example: `my-plugin`.
 - `<target> <scenario-id>[,<scenario-id>…]`: drive only those scenarios.
 - `"<free text>"` (with or without a preceding `<target>`): an **ad-hoc
-  scenario** — see "Ad-hoc scenarios" below. Disambiguation: a non-flag
-  argument matching a configured target is a target; one matching scenario
-  id(s) selects them; anything else is ad-hoc text.
-- `<target> --brief`: reprint the latest brief and resume the decision pass
-  on anything still `proposed`. No driving.
-- `<target> --status`: run `tanuki-ledger --target <target> status` and show
-  it. No driving.
-- `<target> --history [scenario]`: cross-run scenario monitoring — run
+  scenario** — see "Ad-hoc scenarios" below. Disambiguation, in order: a
+  **mode word** (`init`, `decide`, `status`, `history`, `view`, `mine`,
+  `ingest`) always wins — the closed set above is reserved, so a target or
+  scenario sharing one of those names is addressed as `/tanuki <target>
+  <mode>` (the mode word is only read in mode position, after the target);
+  then an argument matching a configured target is a target; then one
+  matching scenario id(s) selects them; anything else is ad-hoc text. A
+  quoted argument is always ad-hoc text, never a mode word.
+- `<target> decide`: the **decision pass** — the complete, ledger-anchored
+  path from whatever the ledger holds decidable to labeled issues
+  (spec-short-command-surface D1). Orients off `status`/`next`; needs no
+  recent run or brief. No driving.
+  *Alias:* `<target> --brief` — reprints the latest brief, then continues
+  into the same pass (one code path, not a second behavior).
+- `<target> status`: run `tanuki-ledger --target <target> status` and show
+  it. No driving. *Alias:* `--status`.
+- `<target> history [scenario]`: cross-run scenario monitoring — run
   `tanuki-scheduler --target <target> history --scenarios <matrix-file>
   [--scenario <id>]` and show it. Repo-wide: per-scenario
   state/executions/streaks/recurrence, unexplored, long-unrun, recently
@@ -46,11 +64,13 @@ Argument handling ($ARGUMENTS):
   pass). With a scenario id: every execution (date, decision-point pins,
   yield, findings) plus its transition log. Built from persisted artifacts
   only (manifests, ledger, scheduler state, the matrix) — never model
-  memory. No driving.
-- `<target> --mine-only <run-id>`: skip driving; mine + consolidate an
+  memory. No driving. *Alias:* `--history`.
+- `<target> mine <run-id>`: skip driving; mine + consolidate an
   existing run's events (use after a crashed or interrupted session).
-- `<target> --ingest "<feedback>"`: record human feedback in natural
+  *Alias:* `--mine-only <run-id>`.
+- `<target> ingest "<feedback>"`: record human feedback in natural
   language (no driving) and mine it immediately — see "Ingest mode" below.
+  *Alias:* `--ingest "<feedback>"`.
   The human never classifies; the tool stores the note verbatim and the
   normal extraction + dedupe passes decide everything downstream.
 
@@ -103,7 +123,7 @@ their findings live in the ledger like any other (evidence
 `<run>/adhoc-1#seq`), and a later generation pass may derive a durable
 charter from them — through the plan gate, never silently.
 
-Distinguish from `--ingest`: **`--ingest` reports the past** (friction the
+Distinguish from `ingest`: **`ingest` reports the past** (friction the
 human already experienced; verbatim note event, no driving); **an ad-hoc
 scenario probes the present** (a driven, simulated session exploring
 something now). Both feed the same ledger.
@@ -334,7 +354,7 @@ URL for each one filed), what remains `proposed`, the brief path, and total
 duration/turns (never dollars). The pass is complete only if the user never
 had to type a `tanuki-ledger` or `gh` command themselves.
 
-## Ingest mode (`--ingest "<feedback>"`) — human feedback is one more event source
+## Ingest mode (`ingest "<feedback>"`, alias `--ingest`) — human feedback is one more event source
 
 Manual dogfooding feeds the *same* pipeline as a driven run; the only
 difference is the event source. The hard UX rule (docs/tanuki-spec.md "Human
@@ -365,7 +385,7 @@ does exactly this:
 
 The one-way flow is preserved end to end: a manual note is an event, and it
 reaches a proposal only through the normal extraction → dedupe → promotion →
-human-gate path. Promoted items surface in the next brief / `--brief` exactly
+human-gate path. Promoted items surface in the next brief / `decide` exactly
 like driven findings. Evidence pointers still bind every finding
 (`manual-<date>/ingest#<seq>`).
 
