@@ -52,6 +52,21 @@ fully reversible runs unattended.
   approval — every phase, Phase 3 included.** The loop never merges
   unattended; once approved, the morning gate performs the merge, merge-first
   (below). No iteration writes `main`.
+- **A declined gate leaves a debt, and the debt has an owner.** The gate's
+  other outcome is that the branch is *not* merged — and that work does not
+  evaporate: it sits on the integration branch while `main` moves, until the
+  operator re-derives the same fixes by hand and the branch's answer and
+  `main`'s answer contradict each other. On 2026-07-17 two branches held 25
+  unmerged commits and had resolved two findings **opposite** to the way the
+  attended sitting had, discovered only after both had shipped. So the loop
+  owns a **reconcile** pass over its own unmerged branches
+  (`/tanuki-loop <target> reconcile`, `commands/tanuki-loop.md`): attended,
+  report-first, classifying **per semantic change unit** rather than per
+  commit — a commit routinely mixes already-landed, superseded, conflicting
+  and still-applicable hunks, and its subject line describes at most one of
+  them. It never merges without an explicit gate, never deletes a branch
+  (`/repo-cleanup` owns that), and never resolves a contract conflict — it
+  reports the decision the operator owes, with the governing text quoted.
 - **The scheduler plan is pre-approved — no plan gate in the loop.** The
   attended `/tanuki` "confirm execution before anything runs" plan gate
   (`docs/tanuki-spec.md`) **does not apply at any phase of the loop**. Once the
