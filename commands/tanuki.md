@@ -51,25 +51,23 @@ Argument handling ($ARGUMENTS):
 - `<target> status`: run `tanuki-ledger --target <target> status` and show
   it. No driving. *Alias:* `--status`.
 - `<target> history [scenario]`: cross-run scenario monitoring — run
-  `tanuki-scheduler --target <target> history --scenarios <matrix-file>
-  [--scenario <id>]` and show it. Repo-wide: per-scenario
+  `tanuki-scheduler --target <target> history [--scenario <id>]` and show
+  it. Repo-wide: per-scenario
   state/executions/streaks/recurrence, unexplored, long-unrun, recently
-  productive, the selection history with reasons — plus, when the matrix
-  declares `axes`/`covers`, the **exploration coverage** block (per axis
-  value: explored / authored-never-run / uncovered), the **exploration
-  debt** summary, and ≤3 advisory next-charter recommendations (never
-  auto-applied — new charters enter only through the plan-gated generation
-  pass). With a scenario id: every execution (date, decision-point pins,
+  productive, the selection history with reasons. With a scenario id: every
+  execution (date, decision-point pins,
   yield, findings) plus its transition log. Built from persisted artifacts
-  only (manifests, ledger, scheduler state, the matrix) — never model
-  memory. No driving. *Alias:* `--history`. The coverage block and the
-  per-run trajectory render also have named doors of their own:
-  `view coverage`, `view trajectory` (see "Views" below).
+  only (manifests, ledger, scheduler state) — never model
+  memory. No driving. *Alias:* `--history`. The
+  per-run trajectory render also has a named door of its own:
+  `view trajectory` (see "Views" below). (The exploration-coverage/debt
+  block and its `--scenarios` flag were REMOVED 2026-07-18 — operator
+  decision; spec-tanuki-view D2.)
 - `<target> view [name]`: the **view surface** — one option-free door to
   every read-only view this repo computes
   (`specs/spec-tanuki-view/SPEC.md` D1/D2). Bare `view` presents the view
   picker; `view <name>` jumps straight to a named view from the closed
-  catalog (`status`, `live`, `history`, `coverage`, `trajectory`). Read-only,
+  catalog (`status`, `live`, `history`, `trajectory`). Read-only,
   never writes, safe alongside a running loop. No driving. See "Views" below.
 - `<target> mine <run-id>`: skip driving; mine + consolidate an
   existing run's events (use after a crashed or interrupted session).
@@ -96,16 +94,12 @@ Run from inside the plugin repo (contract:
    `skills/*/SKILL.md`, and commands for the external axes and intra-command
    decision points, AND the ledger's finding history when one exists (past
    friction seeds probes the docs would never suggest). Propose 4–6 charters
-   (including at least one pinned decision-point branch and one error-path),
-   **and declare the exploration space with them**: a top-level `axes` block
-   ({axis: {values, note?}}) plus per-scenario `covers` tags ({axis:
-   [values]}) — declaring the branching space is part of the same frontier
-   judgment, and coverage/debt reporting is uncomputable without it. Tools
-   never invent or extend axes; they compute over what this gate ratifies.
+   (including at least one pinned decision-point branch and one error-path).
    Present everything at one plan gate, apply the user's edits, then write
    `~/.tanuki/scenarios/<slug>.scenarios.json` and run
-   `tanuki-scheduler --target <slug> sync --scenarios <file>`. On any
-   regeneration pass, update `axes`/`covers` the same way.
+   `tanuki-scheduler --target <slug> sync --scenarios <file>`. (Declaring an
+   `axes`/`covers` exploration space was REMOVED 2026-07-18 — operator
+   decision; a matrix may still carry the keys, tools ignore them.)
 5. Offer the `"loop"` block (derive a `test_cmd` per /tanuki-loop's rule).
 
 Manual alternative (still supported): copy an existing scenarios file (or the
@@ -130,7 +124,7 @@ fixed order above — nothing view-specific). Then:
 - Bare `view`: present the **view picker** via AskUserQuestion — every
   catalog view as a selectable option with its one-line description and a
   **state-derived hint** of whether it currently has anything to say (e.g.
-  `coverage — 3 axis values uncovered`, `live — no loop run yet`). Hints come
+  `status — 4 proposed awaiting decision`, `live — no loop run yet`). Hints come
   from the substrates' own outputs (`--json` where it exists), never from
   re-derivation. Selection beats typing.
 - `view <name>`: jump straight to that view. Names come from the catalog
@@ -164,14 +158,6 @@ exists to fix. Each view names its substrate — run it, render its output:
   executions, streaks, recurrence, unexplored, long-unrun, recently
   productive, selection history with reasons.
   Substrate: `tanuki-scheduler --target <t> history`.
-- **`coverage`** — declared exploration space vs execution record: per axis
-  value explored / authored-never-run / uncovered, the axis rollup, the
-  exploration debt summary, and the ≤3 advisory recommendations (advisory
-  only — never applied from a view).
-  Substrate: `tanuki-scheduler --target <t> history --scenarios
-  <matrix-file>` — a named view of its own, not a block that appears inside
-  `history` only when the matrix happens to declare `axes`: an absent
-  declaration is a state to report, not a reason to render nothing.
 - **`trajectory`** — one run's step-by-step path (choices, errors,
   recoveries, outcome) from its event files alone.
   Substrate: `tanuki-scheduler --target <t> history --scenario <id>

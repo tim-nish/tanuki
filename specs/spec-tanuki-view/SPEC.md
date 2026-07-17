@@ -1,6 +1,8 @@
 # Spec: /tanuki view — one human-facing surface for every read-only view
 
-Status: IMPLEMENTED 2026-07-17 (D1/D2 landed in `commands/tanuki.md` and
+Status: **D2 AMENDED 2026-07-18 — `coverage` REMOVED from the catalog by
+operator decision** (no demand; no target ever declared `axes`). The catalog
+is four views: `status`, `live`, `history`, `trajectory`. IMPLEMENTED 2026-07-17 (D1/D2 landed in `commands/tanuki.md` and
 `docs/tanuki-spec.md` on the operator's order; D3 had already landed ahead of
 them — `EMPTY_STATES` in `tools/tanuki-loop` with
 `tools/tests/test-loop-empty-states` — and D4 stands as the acceptance rule.
@@ -31,7 +33,7 @@ the operator carries in their head:
 |---|---|---|
 | ledger status + derived `next` | `tanuki-ledger status` / `next` | `/tanuki <t> --status` |
 | cross-run scenario history | `tanuki-scheduler history` | `/tanuki <t> --history [scenario]` |
-| axis coverage + exploration debt | `tanuki-scheduler history --scenarios <file>` | `/tanuki <t> --history` (only when the matrix declares `axes`/`covers`) |
+| axis coverage + exploration debt | ~~`tanuki-scheduler history --scenarios <file>`~~ (REMOVED 2026-07-18 with the `coverage` view) | ~~`/tanuki <t> --history`~~ |
 | per-run trajectory | `tanuki-scheduler history --scenario <id> --trajectory` | `/tanuki <t> --history <scenario>` |
 | live loop dashboard | `tanuki-loop dashboard` | `/tanuki-loop` only |
 
@@ -77,7 +79,7 @@ grammar this repo already uses; not a new convention).
   then present the **view picker**: every view in the D2 catalog as a
   selectable option via the interactive question interface, each with a
   one-line description and a state-derived hint of whether it currently has
-  anything to say (e.g. `coverage — 3 axis values uncovered`). Selection
+  anything to say (e.g. `live — no loop run yet`). Selection
   beats typing.
 - `/tanuki <t> view <name>` — jump straight to a named view, for the
   operator who knows what they want. Names come from the D2 catalog and
@@ -120,14 +122,20 @@ D1 exists to fix):
   executions, streaks, recurrence, unexplored, long-unrun, recently
   productive, selection history with reasons.
   Substrate: `tanuki-scheduler history`.
-- **`coverage`** — declared exploration space vs execution record: per axis
-  value explored / authored / uncovered, axis rollup, exploration debt, and
-  the ≤3 advisory recommendations.
-  Substrate: `tanuki-scheduler history --scenarios <file>`
-  (`specs/spec-tanuki-scenario-lifecycle/SPEC.md`, Exploration axes).
-  Promoted to a **named view of its own** rather than a block that appears
-  inside `history` only when axes happen to be declared — an absent
-  declaration is a state to report, not a reason to render nothing.
+- ~~**`coverage`**~~ — **REMOVED 2026-07-18 (operator decision).** The
+  declared-exploration-space machinery (`axes`/`covers`, per-axis
+  explored/authored/uncovered, exploration debt, advisory recommendations,
+  and the coverage-diff block) was never used: no target ever declared
+  `axes`, the observed-only diff accumulated 99 driver-improvised axis
+  names with no comparison to make, and the operator ruled the function
+  has no demand. Removed from this catalog, from
+  `tanuki-scheduler history` (the `--scenarios` flag is gone), and from the
+  scenario-lifecycle contract (its "Exploration axes" section carries the
+  matching removal note). `decision_points` **event capture stays** — the
+  `trajectory` view reads the same events. The catalog is now FOUR views,
+  which incidentally fits the interactive interface's four-option limit —
+  dissolving issue #103's paging problem (a picker can now offer every
+  catalog view as a named option in one prompt).
 - **`trajectory`** — one run's step-by-step path from its event files.
   Substrate: `tanuki-scheduler history --scenario <id> --trajectory
   [--run <id>]` (`specs/spec-tanuki-trajectory/SPEC.md`). Promoted out of

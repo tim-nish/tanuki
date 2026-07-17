@@ -6,6 +6,24 @@ All notable changes to Tanuki are documented here. The format follows
 
 ## [Unreleased]
 
+### Removed
+- The **coverage function**, end to end (operator decision, 2026-07-18 — no
+  demand: in four days of operation no target ever declared `axes`, and the
+  observed-only diff accumulated 99 driver-improvised axis names with
+  nothing to compare against). Gone: the `coverage` view
+  (`spec-tanuki-view` D2 amended — the catalog is four views: `status`,
+  `live`, `history`, `trajectory`), `tanuki-scheduler history --scenarios`
+  and its axis-coverage / exploration-debt / recommendations / coverage-diff
+  computation and output (`spec-tanuki-trajectory` §2 retired), and the
+  generation pass's `axes`/`covers` declaration obligation
+  (`spec-tanuki-scenario-lifecycle` "Exploration axes" retired; a matrix may
+  still carry the keys — tools ignore them). **Kept:** typed trajectory
+  events and `decision_points` capture (the `trajectory` view consumes
+  them), repo-wide scenario states (unexplored / long-unrun / productive),
+  and the plan's exploration quota. Side effect: a four-view catalog fits
+  the interactive picker's four-option limit, dissolving issue #103's
+  paging problem.
+
 ### Added
 - `/tanuki <target> view [name]` — one option-free door to every read-only
   view (`specs/spec-tanuki-view/SPEC.md` D1/D2): bare `view` opens a picker

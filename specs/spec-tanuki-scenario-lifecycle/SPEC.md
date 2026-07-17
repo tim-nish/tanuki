@@ -193,7 +193,22 @@ best-effort from manifests + (capped) ledger evidence and labels them
 `approx`. Everything after this revision is exact. The selection model
 itself is unchanged — this section only *records* what it already does.
 
-## Exploration axes, coverage & debt (REVISED 2026-07-14 #2 — explainability)
+## ~~Exploration axes, coverage & debt~~ (REMOVED 2026-07-18 — operator decision)
+
+**This entire section is retired.** In four days of operation no target ever
+declared an `axes` block, the observed-only coverage diff accumulated 99
+driver-improvised axis names with nothing to compare them to, and the
+operator ruled the function has no demand. Removed with it:
+`tanuki-scheduler history --scenarios` (the flag and the axis-coverage /
+exploration-debt / recommendations / coverage-diff computation and output),
+the `coverage` view (spec-tanuki-view D2, amended the same day), and the
+generation pass's obligation to declare `axes`/`covers` (matrices may still
+carry the keys; tools ignore them). **Kept:** `decision_points` event
+capture and the typed trajectory events — the `trajectory` view consumes
+them (spec-tanuki-trajectory §1/§3, unaffected); the repo-wide scenario
+states (unexplored / long-unrun / productive) and the plan's exploration
+quota, which never depended on axes. The original text follows for the
+record:
 
 History must answer *"what have I never exercised?"*, not only *"what did I
 execute?"*. Coverage is the intersection of a **declared exploration space**

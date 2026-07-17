@@ -179,54 +179,21 @@ assert "consecutive low-yield" in reasons and "actionable finding" in reasons
 PY
 pass "history (--scenario): exact per-execution yield, transition log with reasons"
 
-# --- exploration coverage + debt + recommendations -----------------------------
-# Axes: ax1 has v1 (explored via a), v2 (authored via never-run scenario e),
-# v3 (uncovered); ax2 fully explored via b. Scenario e covers TWO debt values,
-# f covers one -> recommendation ranking must put e first.
-cat > "$tmp/mx.json" <<'EOF'
-{"axes": {"ax1": {"values": ["v1", "v2", "v3"]},
-          "ax2": {"values": ["w1"]},
-          "ax3": {"values": ["u1", "u2"]}},
- "scenarios": [
-  {"id":"a","charter":"c","prompt":"p","covers":{"ax1":["v1"]}},
-  {"id":"b","charter":"c","prompt":"p","covers":{"ax2":["w1"]}},
-  {"id":"e","charter":"c","prompt":"p","covers":{"ax1":["v2"],"ax3":["u1"]}},
-  {"id":"f","charter":"c","prompt":"p","covers":{"ax3":["u2"]}}]}
-EOF
-"${S[@]}" sync --scenarios "$tmp/mx.json" >/dev/null
-cov="$("${S[@]}" history --scenarios "$tmp/mx.json" --json)"
-echo "$cov" | python3 -c '
+# --- history rejects the removed --scenarios flag ------------------------------
+# Axis coverage / exploration debt / coverage diff were REMOVED 2026-07-18
+# (operator decision; spec-tanuki-view D2 amendment). The flag must fail
+# loudly, not silently ignore a matrix.
+if "${S[@]}" history --scenarios "$tmp/m.json" >/dev/null 2>&1; then
+  fail "history must reject the removed --scenarios flag"
+fi
+h="$("${S[@]}" history --json)"
+echo "$h" | python3 -c '
 import json, sys
 h = json.load(sys.stdin)
-ax = h["axes_coverage"]
-assert ax["ax1"]["v1"]["status"] == "explored", ax["ax1"]
-assert ax["ax1"]["v2"]["status"] == "authored" and ax["ax1"]["v2"]["scenarios"] == ["e"]
-assert ax["ax1"]["v3"]["status"] == "uncovered"
-assert ax["ax2"]["w1"]["status"] == "explored"
-debt = h["debt"]
-assert debt["uncovered"] == {"ax1": ["v3"]}, debt["uncovered"]
-assert set(debt["authored_never_run"]["ax1"]) == {"v2"}
-assert set(debt["authored_never_run"]["ax3"]) == {"u1", "u2"}
-recs = h["recommendations"]
-assert len(recs) <= 3, recs
-# e covers 2 debt values, f covers 1 -> e ranked first; uncovered v3 authored last
-assert "e" in recs[0] and "f" in recs[1], recs
-assert any("ax1: v3" in r and r.startswith("author") for r in recs), recs
-' || fail "coverage/debt/recommendations wrong"
-pass "coverage: explored/authored/uncovered; debt; greedy-ranked recommendations"
-
-# Human rendering + rollups + graceful no-axes.
-"${S[@]}" history --scenarios "$tmp/mx.json" > /tmp/covtxt.txt
-grep -Eq "ax1 +\[partially explored\]" /tmp/covtxt.txt || fail "axis rollup missing"
-grep -Eq "ax3 +\[never explored\]" /tmp/covtxt.txt || fail "never-explored rollup missing"
-grep -q "no charter covers   ax1: v3" /tmp/covtxt.txt || fail "debt line missing"
-grep -q "next: 1. run existing scenario 'e'" /tmp/covtxt.txt || fail "top recommendation missing"
-cat > "$tmp/noax.json" <<'EOF'
-{"scenarios": [{"id":"a","charter":"c","prompt":"p"}]}
-EOF
-"${S[@]}" history --scenarios "$tmp/noax.json" | grep -q "no axes declared" \
-  || fail "no-axes matrix must degrade gracefully"
-pass "rendering: rollups + debt + recommendations; no-axes degrades gracefully"
+for k in ("axes_coverage", "debt", "recommendations", "coverage_diff"):
+    assert k not in h, f"removed key {k} still emitted"
+' || fail "removed coverage keys still in history --json"
+pass "coverage removal: --scenarios rejected; no coverage keys in history"
 
 # --- scenario-yield attribution -------------------------------------------------
 "$ledger" --target t scenario-yield --runs 9 > /tmp/yield.json
