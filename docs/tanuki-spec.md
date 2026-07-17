@@ -386,6 +386,21 @@ decision pass. UX rules, from dogfooding Tanuki itself:
   home stays `~/.tanuki` (writing it into a repo would pollute it); the
   in-session presentation + `--brief` are the access path.
 
+## Command — `/tanuki-solve [target]`
+
+(`specs/spec-tanuki-solve/SPEC.md` is authoritative; `commands/tanuki-solve.md`
+implements it.) The consolidate-then-decide pass: promote → **consolidate**
+(deterministic candidate groups from `tanuki-ledger consolidate`, judged and
+classified as merge / conflict / dependency at the command layer) → decision
+pass over the consolidated plan → confirmed filing → watching list. A
+conflict group is presented as ONE multi-outcome question naming the
+branches; a filed issue from a resolved conflict records the rejected
+alternative in its body. Disposition mechanics, the promotion bar, and the
+downstream boundary are exactly the `/tanuki --brief` contract — the pipeline
+still ends at the labeled issue, and no downstream tooling is invoked, named,
+or configured (an operator's decide→file→triage chain composes outside this
+repo, on the far side of the label boundary).
+
 ## Files
 
 ```

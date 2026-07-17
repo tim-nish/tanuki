@@ -22,6 +22,7 @@ Usage:
       --evidence run/scenario#seq[,…] [--match F3] [--note "…"]
   tanuki-ledger --target <slug> promote [--min-recurrence 3] [--min-scenarios 2] [--dry-run]
   tanuki-ledger --target <slug> set-status --id F3 --status open|proposed|accepted|dismissed
+  tanuki-ledger --target <slug> consolidate [--status proposed,open] [--min-similarity 0.5]
   tanuki-ledger --target <slug> compact [--unseen-runs N]
   tanuki-ledger --target <slug> scenario-yield [--runs N]
   tanuki-ledger --target <slug> status   # human-readable "where was I?" view
@@ -374,6 +375,147 @@ def cmd_set_status(args, ledger):
             return
     print(f"error: no finding {args.id}", file=sys.stderr)
     sys.exit(2)
+
+
+# --- consolidate: deterministic pre-clustering (specs/spec-tanuki-solve D2) --
+
+# Function words only — tokens like "not"/"never" carry meaning in titles and
+# are kept; this list is deliberately small and fixed (determinism over IQ).
+_STOPWORDS = {"a", "an", "the", "to", "of", "in", "on", "is", "are", "was",
+              "it", "its", "as", "at", "by", "or", "and", "for", "with",
+              "that", "this", "than", "then", "into", "from", "be", "been"}
+
+# A subject token shared by this many candidate findings (or more) says
+# nothing about relatedness within the set and is dropped as generic.
+_GENERIC_SUBJECT_AT = 3
+
+
+def _words(text):
+    return [t for t in re.split(r"[^a-z0-9]+", text.lower()) if t]
+
+
+def _subject_tokens(title):
+    """Precise identifiers a title is ABOUT: backtick spans, --flags, dotted
+    names (os.path.join), tanuki-* tool names. Sharing one of these is a far
+    stronger relatedness signal than prose-word overlap."""
+    subs = set()
+    for span in re.findall(r"`([^`]+)`", title):
+        subs.update(_words(span))
+    subs.update(t.lstrip("-") for t in re.findall(r"--[\w][\w-]*", title))
+    for dotted in re.findall(r"\b\w+(?:\.\w+)+\b", title.lower()):
+        subs.add(dotted)
+        subs.update(dotted.split("."))
+    subs.update(re.findall(r"\btanuki-[\w-]+\b", title.lower()))
+    return {s for s in subs if len(s) >= 2 and s not in _STOPWORDS}
+
+
+def _content_tokens(title):
+    return {t for t in _words(title) if len(t) >= 3 and t not in _STOPWORDS}
+
+
+def _jaccard(a, b):
+    return len(a & b) / len(a | b) if a or b else 0.0
+
+
+def cmd_consolidate(args, ledger):
+    """Read-only candidate grouping over the decision pass's input set.
+    Emits groups + the mechanical reason each pair fired; merge / conflict /
+    dependency classification is judgment and stays with the command layer
+    (spec-tanuki-solve D2: the tool proposes, never decides). Writes nothing."""
+    statuses = [s.strip() for s in args.status.split(",") if s.strip()]
+    bad = [s for s in statuses if s not in STATUSES]
+    if bad:
+        print(f"error: status must be one of {STATUSES}, got {bad}",
+              file=sys.stderr)
+        sys.exit(2)
+    cands = [f for f in ledger["findings"]
+             if f["status"] in statuses and not f.get("tombstone")]
+
+    subj = {f["id"]: _subject_tokens(f["title"]) for f in cands}
+    cont = {f["id"]: _content_tokens(f["title"]) for f in cands}
+    scen = {f["id"]: set(f.get("scenarios", [])) for f in cands}
+
+    # Drop subject tokens generic within THIS candidate set (e.g. the tool's
+    # own name appearing in half the titles) — deterministic and self-scaling.
+    freq = {}
+    for toks in subj.values():
+        for t in toks:
+            freq[t] = freq.get(t, 0) + 1
+    generic = {t for t, n in freq.items() if n >= _GENERIC_SUBJECT_AT}
+    subj = {fid: toks - generic for fid, toks in subj.items()}
+
+    min_sim = args.min_similarity
+    edges = {}  # (idA, idB) -> [signal, ...]
+    ids = [f["id"] for f in cands]
+    for i, a in enumerate(ids):
+        for b in ids[i + 1:]:
+            sim = _jaccard(cont[a], cont[b])
+            shared_subj = subj[a] & subj[b]
+            shared_scen = scen[a] & scen[b]
+            signals = []
+            # Edge rules (fixed, documented in --help): strong title
+            # similarity alone, or a shared precise subject corroborated by
+            # weak title similarity or a shared scenario. Scenario overlap
+            # alone never groups (one scenario legitimately yields many
+            # unrelated findings).
+            if sim >= min_sim:
+                signals.append(
+                    f"title-similarity {sim:.2f} "
+                    f"(shared: {', '.join(sorted(cont[a] & cont[b]))})")
+            if shared_subj and (sim >= min_sim / 3 or shared_scen):
+                signals.append(
+                    f"subject-overlap: {', '.join(sorted(shared_subj))}")
+                if shared_scen:
+                    signals.append(
+                        f"scenario-overlap: {', '.join(sorted(shared_scen))}")
+            if signals:
+                edges[(a, b)] = signals
+
+    # Union-find over fired edges -> candidate groups of >= 2.
+    parent = {fid: fid for fid in ids}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for a, b in edges:
+        parent[find(a)] = find(b)
+    groups = {}
+    for fid in ids:
+        groups.setdefault(find(fid), []).append(fid)
+
+    by_id = {f["id"]: f for f in cands}
+    out = []
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        members.sort(key=lambda i: int(i[1:]))
+        pair_signals = []
+        for (a, b), sigs in sorted(edges.items()):
+            if a in members and b in members:
+                pair_signals.append(
+                    {"pair": [a, b], "signals": sigs})
+        out.append({
+            "ids": members,
+            "members": [{"id": i, "title": by_id[i]["title"],
+                         "kind": by_id[i]["kind"],
+                         "status": by_id[i]["status"],
+                         "priority": priority(by_id[i])} for i in members],
+            "pairs": pair_signals,
+        })
+    out.sort(key=lambda g: (-len(g["ids"]), int(g["ids"][0][1:])))
+
+    note_generic = (f"; dropped generic subject token(s): "
+                    f"{', '.join(sorted(generic))}" if generic else "")
+    print(f"{len(out)} candidate group(s) across {len(cands)} finding(s) "
+          f"considered (statuses: {', '.join(statuses)}){note_generic}; "
+          f"grouping is mechanical — merge/conflict/dependency classification "
+          f"stays with the decision pass", file=sys.stderr)
+    print(json.dumps({"considered": len(cands), "statuses": statuses,
+                      "min_similarity": min_sim, "candidates": out},
+                     indent=2, ensure_ascii=False))
 
 
 def all_run_ids(target):
@@ -840,6 +982,29 @@ def main():
     sp.add_argument("--status", required=True, choices=STATUSES,
                     help=f"new status; one of {STATUSES}")
     sp = sub.add_parser(
+        "consolidate",
+        help="read-only: emit candidate groups of related findings (JSON) for "
+             "the solve pass's consolidation stage; proposes groups with "
+             "mechanical reasons, never decides merge/conflict",
+        description=(
+            "Pre-cluster the decision pass's candidate findings "
+            "(spec-tanuki-solve D2). Deterministic signals only: title-token "
+            "Jaccard similarity, shared precise subject tokens (backtick "
+            "spans, --flags, dotted names, tanuki-* names; tokens generic "
+            "within the candidate set are dropped), and scenario overlap as "
+            "corroboration. Edge rules: similarity >= --min-similarity alone; "
+            "or a shared subject token corroborated by weak similarity "
+            "(>= min/3) or a shared scenario. Scenario overlap alone never "
+            "groups. Output groups are CANDIDATES for the command layer's "
+            "judgment (merge / conflict / dependency / discard) — this tool "
+            "never classifies and never writes."))
+    sp.add_argument("--status", default="proposed,open",
+                    help="comma list of statuses to consider "
+                         f"(default proposed,open; each one of {STATUSES})")
+    sp.add_argument("--min-similarity", type=float, default=0.5,
+                    help="title-token Jaccard threshold for a "
+                         "similarity-alone edge (default 0.5)")
+    sp = sub.add_parser(
         "compact",
         help="tombstone accepted/dismissed findings verified-absent for enough "
              "re-driven runs; keeps the ledger's frontier small",
@@ -891,6 +1056,7 @@ def main():
     {"init": cmd_init, "ingest": cmd_ingest, "ingest-note": cmd_ingest_note,
      "findings": cmd_findings, "upsert-finding": cmd_upsert,
      "promote": cmd_promote, "set-status": cmd_set_status,
+     "consolidate": cmd_consolidate,
      "compact": cmd_compact, "scenario-yield": cmd_scenario_yield,
      "stats": cmd_stats, "policy-surface": cmd_policy_surface,
      "status": cmd_status, "next": cmd_next}[args.cmd](args, ledger)
