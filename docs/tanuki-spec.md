@@ -355,7 +355,7 @@ aliases: `--brief` → `decide`, `--status`, `--history`, `--mine-only` →
 `mine`, `--ingest` → `ingest`. `view` is the **option-free door to every
 read-only view** (`specs/spec-tanuki-view/SPEC.md`): bare `view` opens the
 view picker; `view <name>` jumps to one of the closed catalog — `status`,
-`live`, `history`, `coverage`, `trajectory`. The surface reads and renders;
+`live`, `history`, `trajectory`. The surface reads and renders;
 the tools stay the computing substrate, and no view ever writes.
 
 (`commands/tanuki.md` is authoritative for the full argument grammar —

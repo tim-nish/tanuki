@@ -1,6 +1,10 @@
 # Spec: Tanuki trajectory — typed path events, coverage diff, and the trajectory view
 
-Status: RATIFIED 2026-07-16 (operator, after the 2026-07-16 consistency
+Status: **§2 (coverage diff) REMOVED 2026-07-18** with the whole coverage
+function (operator decision — see spec-tanuki-view D2 and the lifecycle
+spec's matching removal note); §1 (typed events) and §3 (trajectory view)
+stand unchanged and remain in force. RATIFIED 2026-07-16 (operator, after
+the 2026-07-16 consistency
 review amended build-order labels, the mixed pre/post-marker coverage note,
 and the recovery/evidence acceptance criteria). The *concept* was already
 ratified operator policy (2026-07-15 rulings on the operator's policy
@@ -82,7 +86,13 @@ no LLM in the loop):
 The existing exact-dupe collapse, capped-exemplar evidence, and one-way flow
 apply to the new types unchanged — they are Events like any other.
 
-## 2. Coverage diff — observed vs declared (build step 2 — first consumer)
+## ~~2. Coverage diff — observed vs declared~~ (REMOVED 2026-07-18 — operator decision)
+
+**This section is retired** with the coverage function: the
+`observed_decision_points` / coverage-diff computation and the `--scenarios`
+flag are gone from `tanuki-scheduler history`. The typed events §2 consumed
+are NOT retired — §1's capture and §3's trajectory view stand. The original
+text follows for the record:
 
 The payoff piece, and deterministic set arithmetic end to end:
 
