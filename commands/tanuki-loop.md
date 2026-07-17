@@ -279,6 +279,11 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
 — nothing outward-facing until the merge is a fact:
 1. **Final tests** on integration HEAD — `tanuki-loop test` (the same
    configured `test_cmd` each iteration runs); abort the gate on failure.
+   **Running `test` here is expected even though the run is already closed**
+   (F101): the overnight run finished with `cap` or `converged` before you sat
+   down, and gate steps still work on a finished run — `test` echoes a
+   `run_finished` block naming the close reason, and appends its result to the
+   closed run's audit. That block is a confirmation, not a warning.
 2. **Merge `integration → main`** — a plain `git merge --no-ff
    <integration-branch>` on `main` (there is no `tanuki-loop merge` subcommand;
    this one gate step is a hand-run git operation).
@@ -345,6 +350,13 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
    1. That is expected, not a fault. Removing the worktree first and running
    `finish` again here is what performs that deferred deletion; you can see it
    land in `branch_cleanup.deleted` (F96, F9).
+   **What a second `finish` reports** (F108): it echoes `previously_finished`
+   with the earlier close's reason and timestamp rather than overwriting it
+   silently, so a double close is visible and deliberate — the `cap` close and
+   this `gate-ratified` close are two calls in one run's life, both expected.
+   Likewise `gate-check` after the branch is deleted reports `branch_deleted`
+   with a `note`: a deleted branch is the *success* state at that point, not a
+   missing one.
    **Artifacts already committed to the base can block the removal** (F111).
    The build-artifact guard above concerns output *the loop's own commits*
    swept in; this is the other direction. If regenerable output (`*.pyc`,
