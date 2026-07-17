@@ -150,9 +150,9 @@ headless-readiness validator — see "Headless readiness" below), `policy`
 (records iteration-1
 judgment answers — the mechanism behind "questions only in iteration 1"),
 `recover` (the attended external-modification recovery path — see "Circuit
-breakers"), `finish` (machine-readable terminal reason: converged | cap |
-gate-ratified |
-aborted; breakers persist `last_breaker` the same way), and `dashboard`
+breakers"), `finish` (machine-readable terminal reason: converged | cap | aborted —
+gate-ratified survives as compatibility only per the 2026-07-17
+delivery-boundary ruling; breakers persist `last_breaker` the same way), and `dashboard`
 (one-screen **operational status** — see "Dashboard revision" below;
 `--follow N` self-refreshes). Per-target run settings — `test_cmd`,
 `iterations`, `wall_time_s`, `token_budget`, `attempt_cap` — live in the
@@ -561,9 +561,12 @@ outward-facing record is written until the merge is a fact:
    Materialization key above — one format, everywhere).
 6. **Link** each issue to the (now pushed) merge commit, **close it as
    completed**, and reconcile the board to Done.
-7. **Remove the loop worktree** and close the run machine-readably
-   (`tanuki-loop finish --reason gate-ratified`), which also owns the
-   merged-integration-branch deletion.
+7. **Remove the loop worktree.** No closing command follows (owner ruling
+   2026-07-17): the merge's reachability from the base *is* the settlement,
+   derived by whatever next needs it — the next `init`'s merged-branch sweep
+   deletes the integration branch, and `/repo-cleanup` owns any earlier
+   cleanup. `finish --reason gate-ratified` survives as a compatibility
+   mechanism only; no workflow instructs it.
 
 **Idempotent retry:** before creating an issue, search for its `<run-id>`
 marker (plus a per-problem key); an existing one is reused, never duplicated.
@@ -578,21 +581,49 @@ there the local-merge + `gate-push` sequence above cannot run at all. For such
 a target the scenarios `loop` block sets `"gate": "pr"` (default `"merge"` —
 everything above unchanged), and the gate reshapes around the forge:
 
-**Delivery, then ratification — two separated facts.** After a successful
-unattended run closes (`finish --reason cap|converged`) and the final tests
-pass on the integration HEAD, `tanuki-loop gate-pr` pushes the **integration
-branch** (never the base, never forced) and opens **one Draft PR**
-`integration → base`. Opening that Draft PR is the **delivery of review
-material** — the mechanical act of placing the diff, commit groups, and run
-summary where the operator reviews. It is **not ratification**, exactly as
-`finish --reason cap` is not: the Human Gate relocates once more, from a
-terminal approval to **PR approval + merge on the forge**. The loop **never
+**Delivery is the loop's boundary (owner ruling 2026-07-17).** After a
+successful unattended run closes (`finish --reason cap|converged`) and the
+final tests pass on the integration HEAD, `tanuki-loop gate-pr` pushes the
+**integration branch** (never the base, never forced) and opens **one Draft
+PR** `integration → base`. **The loop ends when that Draft PR opens.** The
+run is recorded as **delivered** — PR number, integration-tip SHA, base SHA —
+and that is the loop's terminal fact. The loop does not poll, merge, comment,
+or wait for the PR outcome; whether the PR is ultimately accepted is not the
+loop's to know, and **no human runs a machine-level closing command** to tell
+it. The Human Gate is **PR approval + merge on the forge**; the loop **never
 auto-merges** — `gate-pr` contains no merge call, and no phase adds one.
 
 Because the Draft PR is review material rather than a decision, opening it
 does not violate "no outward-facing artifacts overnight": that rule's target
 was always *records that assert conclusions* (issues stating what landed,
 merges into `main`). A draft marked as awaiting review asserts nothing.
+
+**Settlement is derived, never declared.** Later **read-only** operations
+(`status`, `init`'s cleanup backstop, `unresolved`) derive the outcome from
+the forge and the current base, at the moment they actually need it:
+- **merged and reachable from the current base** → `landed` (the
+  merged-on-forge-but-base-not-pulled window is `landed` with
+  `local_synced: false` and a sync hint);
+- **PR still open** → `pending` — awaiting review, not rot;
+- **closed without merging** → `declined` — the branch holds unlanded work,
+  and what to do with it is the reconcile pass's judgment;
+- **forge unavailable or unverifiable** → `unknown`, **never an optimistic
+  default**. Offline views may serve the **last observed** result with its
+  timestamp, always marked stale — a cache is never presented as current
+  truth, and no view requires a human to restate the forge's decision.
+
+**Accounting uses the strict test.** Finding verification and recurrence
+accounting may treat a delivered change as landed **only** when its delivered
+SHA is reachable from the current base — never from the forge's word alone,
+and never optimistically.
+
+**Cleanup ownership.** Branch and worktree removal belong to `/repo-cleanup`
+(with the next `init`'s merged-branch sweep as the mechanical backstop), and
+may delete **only** after reachability proves the work landed, or after an
+attended decision explicitly discards it. An unmerged tip is never deleted —
+unchanged. `finish --reason gate-ratified` survives **as a compatibility
+mechanism only**: no workflow instructs it; invoked anyway, it derives the
+same settlement and refuses unless the delivery verifiably landed.
 
 Mechanics, each mechanically enforced by the tool (exit 3 + remedy, nothing
 mutated, on violation):
@@ -607,28 +638,25 @@ mutated, on violation):
 - **Failure leaves everything intact.** A failed push (never forced) or a
   failed PR create exits 3 with the local integration branch, worktree, and
   run state untouched; re-running `gate-pr` resumes.
-- **Ratification is verified, not assumed.** `finish --reason gate-ratified`
-  refuses until (a) the PR's forge state is MERGED and (b) the local base
-  contains the merge commit (falling back to the delivered head when the
-  forge omits it). Cleanup — worktree removal, integration-branch deletion —
-  therefore cannot run while an open PR still points at the branch, and
-  cannot run against a local base that has not synchronized the merge.
 - **Merge method.** The intended method is a merge commit, so the loop's
   intent-scoped commit groups stay visible in the base's history; the PR body
-  states this. (The verification above tolerates squash/rebase via the forge's
+  states this. (Settlement derivation tolerates squash/rebase via the forge's
   merge-commit oid, but the grouped history is then lost — an operator choice,
   not a loop one.)
 
 Issue materialization (steps 5–6) is unchanged where a tracker is configured;
 the PR replaces only the merge/push steps (2–4).
 
-**Branch cleanup has an owner.** Gate step 7 removes the worktree; the deferred
-"delete the integration branch once the merge is confirmed" is then executed by
-`tanuki-loop finish` (with the next `init` for the target as backstop): it
-deletes integration branches whose tip is reachable from the base branch and
-reports any it kept — an **unmerged** tip is never deleted. This closes a leak
-where merged `tanuki-loop/<target>/<ts>` branches accumulated until an unrelated
-tool happened to collect them.
+**Branch cleanup has an owner** (amended by the 2026-07-17 delivery-boundary
+ruling): `/repo-cleanup` owns branch and worktree removal, with the next
+`init`'s merged-branch sweep as the mechanical backstop — both delete an
+integration branch **only** when its tip is reachable from the base
+(reachability proves the work landed) or an attended decision explicitly
+discards it; an **unmerged** tip is never deleted. `finish`'s own sweep (on
+`cap`/`converged`/`aborted` closes) remains as an additional backstop with
+the same reachability rule. This closes a leak where merged
+`tanuki-loop/<target>/<ts>` branches accumulated until an unrelated tool
+happened to collect them.
 
 ## Phases (supervision + cap, not separate code paths)
 
@@ -663,10 +691,11 @@ and removing supervision is the only change between phases. The morning
   materialized** (`gate-push`, never force over a diverged remote); deferred
   judgment waits for the morning, never auto-decided. On a PR-protected
   target (`gate: "pr"`) the approval takes the form of **PR approval + merge
-  on the forge**: the run's close delivers one Draft PR (`gate-pr` — review
-  material, not ratification), the loop **never auto-merges**, and
-  `finish --reason gate-ratified` refuses until the PR is merged and the
-  local base contains the merge.
+  on the forge**: the loop ends at delivering one Draft PR (`gate-pr` —
+  review material, not ratification; owner ruling 2026-07-17), it **never
+  auto-merges**, and settlement (landed / pending / declined / unknown) is
+  **derived** by read-only surfaces from the forge and the current base — no
+  human closing command restates the forge's decision.
 - Merged integration branches are cleaned up by `finish` (backstop: the next
   `init`); an unmerged tip is never deleted. An unmerged tip is therefore a
   **debt with an owner**: `unresolved` makes it visible and `reconcile` pays
