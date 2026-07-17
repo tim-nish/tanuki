@@ -22,6 +22,8 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
        --scenarios reads the per-target "loop" block from the scenarios file
        ({"test_cmd", "iterations", "wall_time_s", "token_budget",
         "attempt_cap"}) so a run needs no repo-specific flags; CLI overrides.
+       The block is NOT auto-loaded from the canonical path — init/doctor read
+       it only from the --scenarios file you pass.
        Fetches <base>'s remote and FAILS CLOSED if the local base is behind
        its upstream (the loop must never dogfood stale code); --allow-stale-base
        overrides to dogfood the local tip anyway. The base is never silently

@@ -18,7 +18,7 @@ Usage:
   tanuki-ledger --target <slug> ingest <events.jsonl> [...]
   tanuki-ledger --target <slug> ingest-note --text "<human feedback>"
   tanuki-ledger --target <slug> findings [--status open|proposed|accepted|dismissed]
-  tanuki-ledger --target <slug> upsert-finding --title T --kind K \
+  tanuki-ledger --target <slug> upsert-finding --title T --kind friction|papercut|gap \
       --evidence run/scenario#seq[,…] [--match F3] [--note "…"]
   tanuki-ledger --target <slug> promote [--min-recurrence 3] [--min-scenarios 2] [--dry-run]
   tanuki-ledger --target <slug> set-status --id F3 --status open|proposed|accepted|dismissed
@@ -776,7 +776,9 @@ def cmd_compact(args, ledger):
               f"intentionally dropped (bounded growth), id/title/resolution "
               f"kept so they never resurface")
     else:
-        print(f"nothing to compact (threshold: unseen for >= {n} run(s))")
+        print(f"nothing to compact (threshold: unseen for >= {n} run(s)); "
+              f"only re-DRIVEN runs advance a finding's unseen counter, so a "
+              f"hand-written / ingest-only ledger never reaches this threshold")
 
 
 def cmd_scenario_yield(args, ledger):
