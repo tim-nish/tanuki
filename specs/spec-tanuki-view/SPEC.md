@@ -99,10 +99,23 @@ D1 exists to fix):
 - **`status`** — ledger counts + the derived `next` step.
   Substrate: `tanuki-ledger status` / `next` (short-command-surface D2's
   enumerated-state derivation; not recomputed here).
-- **`live`** — the loop dashboard: health, latest drive, this run, scheduler
-  decisions, convergence, why-stopped/NEXT.
-  Substrate: `tanuki-loop dashboard` (`--follow` remains available).
+- **`live`** — the loop dashboard **of an actively running loop**: health,
+  latest drive, this run, scheduler decisions, convergence, why-stopped/NEXT.
+  Substrate: `tanuki-loop dashboard --live` (`--follow` remains available).
   This is the **live** view; `history` is the long view.
+  **Live means active** (amended 2026-07-18): a closed run — however
+  recent — is history, never live. With no active run the substrate emits
+  the typed D3 empty state (`live:no-active-run` / `live:never-initialized`)
+  plus ONE line of historical context — run id, **computational stop
+  reason** (cap | converged | breaker | cancelled — never a settlement,
+  which is what became of the delivery, not a reason execution stopped),
+  the **delivery** (the delivered PR with its settlement result — landed |
+  pending | declined | unknown, the delivery-boundary ruling's closed set,
+  derived **offline**: local reachability or the stale-marked cache, never
+  a forge poll from a view; unknown never reads as landed), and the
+  **frozen execution time** (wall-clock the loop executed, ending at the
+  first close; review/merge waiting time never accrues). None of the
+  closed run's detail sections render under `live`.
 - **`history`** — cross-run per-scenario execution history: state,
   executions, streaks, recurrence, unexplored, long-unrun, recently
   productive, selection history with reasons.
@@ -269,6 +282,23 @@ only — the catalog (D2) and everything else here remain PROPOSED.
   permitted substrate change, and it is additive — a section that can render
   empty gains a typed `{state, expected, reason, next}` alongside the prose
   it already prints. No subcommand, flag, or existing output field changes.
+  **Amended 2026-07-18 (`live` semantics):** a second substrate change is
+  permitted, because `live` needed classifications no tool emitted — active
+  vs completed, the computational stop reason as distinct from the derived
+  settlement, and a frozen execution duration — and D4 forbids deriving
+  them in the command layer. The change is the smallest typed output that
+  carries them: `tanuki-loop` gains a `dashboard --live` flag, a typed
+  `lifecycle` block in `status` (`active`, `breaker_open`, `stop_reason`,
+  `stopped_at`, `execution_s`, `delivered`, offline-derived `settlement`),
+  two D3 members (`live:no-active-run`, `live:never-initialized`), the
+  persisted stop facts (`stop`, `wall_end` in `state.json`, written by
+  `finish`), and an `offline` mode on the delivery-boundary ruling's
+  `derive_settlement` (local reachability or the stale-marked cache — a
+  view never polls, merges, comments on, or mutates a PR). Existing
+  subcommands, flags, and output fields are unchanged except the
+  dashboard's relabeled counters (`fixed` retired for the ledger-fact
+  labels) and its stop line, which now separates stop reason from
+  settlement.
   The original non-goal assumed the explanation could live in the command
   layer; it cannot, because the dashboard that produces these empty states is
   itself a tool. Honoring the non-goal literally would have meant two

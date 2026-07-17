@@ -61,12 +61,18 @@ grep -q "rolled-back count too" <<<"$out" \
   && fail "iterations line still promises a count it does not print (F45)"
 pass "issue #63: iterations line states the rolled-back count (zero case)"
 
-# --- F6: 'fixed' carries its inline definition once a run has movement --------
+# --- F6: the delta counters carry their inline definitions once a run moves ---
+# 'fixed' was retired: it read as a commit count beside the convergence line's
+# patch fact. The label is now the ledger fact itself (status→accepted), and
+# the definition line still renders.
 "${L[@]}" iter-start >/dev/null
 echo v1 > "$("${L[@]}" status | python3 -c 'import json,sys;print(json.load(sys.stdin)["worktree"])')/f"
 out2="$("${L[@]}" dashboard)"
-grep -q "fixed = findings that stopped recurring" <<<"$out2" || fail "'fixed' inline definition missing (F6)"
-pass "'fixed' counter carries its inline definition (F6)"
+grep -q "status→accepted = ledger status transitions this run, not patch commits" <<<"$out2" \
+  || fail "delta counter inline definition missing (F6)"
+grep -qE "this run: .*fixed" <<<"$out2" \
+  && fail "the retired 'fixed' label must not render in the delta line"
+pass "delta counters carry inline definitions; 'fixed' label retired (F6)"
 
 # --- F7: a long deferral reason truncates WITH a pointer, never bare ----------
 run="$("${L[@]}" status | python3 -c 'import json,sys;print(json.load(sys.stdin)["run"])')"

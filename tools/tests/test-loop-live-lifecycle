@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+# Fixture for the live-view lifecycle contract (spec-tanuki-view D2 `live`;
+# spec-tanuki-loop "Stop reason vs delivery settlement" over the delivery-
+# boundary ruling — settlement is DERIVED, never declared):
+#   - `dashboard --live` renders the full dashboard ONLY while the run is
+#     active; a closed run degrades to the typed empty state plus ONE
+#     historical line — a completed run never appears as currently live;
+#   - the computational stop reason (cap | converged | breaker | cancelled)
+#     is recorded at the first close and survives ratification: a run stopped
+#     at `cap` and merged later still displays stop reason `cap`;
+#   - settlement is derived from the forge + current base into a closed set
+#     of results (landed | pending | declined | unknown); an unverifiable
+#     outcome reads `unknown`, never `landed`; a PR closed without merge
+#     derives `declined`. Views derive OFFLINE (local reachability + the
+#     stale-marked cache) — never a forge poll;
+#   - execution time freezes at the first close (review/merge waiting never
+#     accrues);
+#   - the delta counters are ledger facts ('fixed' retired) and the
+#     convergence line says commits were PRODUCED, so the misleading
+#     "fixed 0" / "patch LANDED" combination cannot render.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
+export TANUKI_ROOT="$root"
+L=("$here/tanuki-loop" --target t)
+jget() { python3 -c "import json,sys; d=json.load(sys.stdin); print(d$1)"; }
+
+# --- fake gh (the test-loop-gate-pr shim): scripted by files -------------------
+mkdir -p "$root/bin" "$root/gh-state"
+echo "OPEN" > "$root/gh-state/pr_state"
+cat > "$root/bin/gh" <<SHIM
+#!/usr/bin/env bash
+state_dir="$root/gh-state"
+echo "\$*" >> "\$state_dir/calls.log"
+case "\$1 \$2" in
+  "pr list")   echo "[]" ;;
+  "pr create") echo "https://example.invalid/owner/repo/pull/9" ;;
+  "pr view")
+    st="\$(cat "\$state_dir/pr_state")"
+    if [ "\$st" = "MERGED" ]; then
+      oid="\$(cat "\$state_dir/merge_oid" 2>/dev/null || echo "")"
+      echo "{\"state\": \"MERGED\", \"mergeCommit\": {\"oid\": \"\$oid\"}}"
+    else
+      echo "{\"state\": \"\$st\", \"mergeCommit\": null}"
+    fi ;;
+  *) echo "fake gh: unscripted call: \$*" >&2; exit 1 ;;
+esac
+SHIM
+chmod +x "$root/bin/gh"
+export PATH="$root/bin:$PATH"
+
+# --- repo with a bare origin ---------------------------------------------------
+repo="$root/repo"; git init -q "$repo"
+git -C "$repo" config user.email a@b.c; git -C "$repo" config user.name t
+echo x > "$repo/f.txt"; git -C "$repo" add -A; git -C "$repo" commit -qm init
+base="$(git -C "$repo" rev-parse --abbrev-ref HEAD)"
+bare="$root/remote.git"; git init -q --bare "$bare"
+git -C "$repo" remote add origin "$bare"; git -C "$repo" push -q -u origin "$base"
+
+scen="$root/scen.json"
+cat > "$scen" <<JSON
+{"target": "t", "loop": {"test_cmd": "true", "iterations": 3,
+ "wall_time_s": 600, "token_budget": 1000, "attempt_cap": 2, "gate": "pr"}}
+JSON
+
+# --- the closed sets are what the spec says ------------------------------------
+# Stop reasons are a source-level tuple; settlement results are the closed set
+# derive_settlement can emit — each is exercised behaviorally below (pending,
+# declined, landed, unknown), and `observed(` is the only constructor.
+python3 - "$here/tanuki-loop" <<'EOF'
+import re, sys
+src = open(sys.argv[1]).read()
+sr = re.search(r'STOP_REASONS = \(([^)]*)\)', src).group(1)
+got = sorted(re.findall(r'"([a-z]+)"', sr))
+want = sorted(["cap", "converged", "breaker", "cancelled"])
+assert got == want, f"STOP_REASONS must be exactly {want}, got {got}"
+results = set(re.findall(r'(?:observed\(|"result": )"([a-z]+)"', src))
+assert results == {"landed", "pending", "declined", "unknown"}, \
+    f"settlement results must be a closed set, got {sorted(results)}"
+EOF
+pass "stop reasons and settlement results are the spec's closed sets"
+
+# --- active run: --live renders the FULL dashboard -----------------------------
+wt="$("${L[@]}" init --loop-repo "$repo" --scenarios "$scen" | jget '["worktree"]')"
+out="$("${L[@]}" dashboard --live)"
+grep -q "^  health:" <<<"$out"    || fail "--live on an active run must render the dashboard: $out"
+grep -q "convergence" <<<"$out"   || fail "--live active render must be the full skeleton"
+grep -q "no active loop" <<<"$out" && fail "an active run must not read as no-active"
+pass "active run: --live renders the full dashboard"
+
+# --- one iteration with a produced patch, then close at cap --------------------
+"${L[@]}" iter-start >/dev/null
+echo work >> "$wt/f.txt"; git -C "$wt" commit -qam "loop work"
+"${L[@]}" test >/dev/null
+"${L[@]}" iter-verify >/dev/null
+"${L[@]}" record-cycle >/dev/null
+"${L[@]}" finish --reason cap >/dev/null
+
+# --- counter labels: the misleading combination cannot render ------------------
+dash="$("${L[@]}" dashboard)"
+grep -qE "this run: .*\bfixed\b" <<<"$dash" \
+  && fail "the retired 'fixed' label must not render: $(grep 'this run' <<<"$dash")"
+grep -q "patch LANDED" <<<"$dash" \
+  && fail "'patch LANDED' must not render — commits are produced, not landed"
+grep -q "patch commit(s) PRODUCED (on the integration branch)" <<<"$dash" \
+  || fail "the convergence line must say commits were PRODUCED: $dash"
+grep -q "status→accepted" <<<"$dash" \
+  || fail "the delta line must use the ledger-fact label: $dash"
+pass "counter labels: 'fixed 0' / 'patch LANDED' combination is unrenderable"
+
+# --- closed run: never live, one historical line -------------------------------
+out2="$("${L[@]}" dashboard --live)"
+grep -q "live — no active loop" <<<"$out2" \
+  || fail "a closed run must not appear live: $out2"
+grep -q "latest run: " <<<"$out2" || fail "historical one-liner missing: $out2"
+grep -q "stop reason: cap" <<<"$out2" || fail "historical line must carry the stop reason: $out2"
+grep -q "delivery: none" <<<"$out2" \
+  || fail "closed with nothing delivered yet must read delivery: none: $out2"
+grep -q "health:" <<<"$out2" && fail "--live must not render the closed run's sections"
+# Explicitly named run: still never live once closed.
+run="$(cat "$root/t/loop/current")"
+out3="$("$here/tanuki-loop" --target t --run "$run" dashboard --live)"
+grep -q "live — no active loop" <<<"$out3" \
+  || fail "an explicitly named closed run must not appear live: $out3"
+pass "closed run: typed empty state + one historical line; never live"
+
+# --- execution time freezes at the close ---------------------------------------
+e1="$("${L[@]}" status | jget '["lifecycle"]["execution_s"]')"
+sleep 2
+e2="$("${L[@]}" status | jget '["lifecycle"]["execution_s"]')"
+[ "$e1" = "$e2" ] || fail "execution_s must not grow after the close: $e1 -> $e2"
+[ "$("${L[@]}" status | jget '["elapsed_s"]')" = "$e1" ] \
+  || fail "status elapsed_s must be the frozen execution time"
+pass "execution time is frozen at the close"
+
+# --- delivery: gate-pr records the terminal fact; settlement derives pending ---
+"${L[@]}" gate-pr >/dev/null
+s="$("${L[@]}" status)"
+[ "$(echo "$s" | jget '["delivered"]["pr"]')" = "9" ] \
+  || fail "gate-pr must record the delivered PR"
+[ "$(echo "$s" | jget '["settlement"]["result"]')" = "pending" ] \
+  || fail "an open PR must derive settlement: pending"
+dash_d="$("${L[@]}" dashboard)"
+grep -q "DELIVERED: PR #9" <<<"$dash_d" \
+  || fail "the dashboard must render the delivery: $dash_d"
+grep -q "SETTLEMENT: pending" <<<"$dash_d" \
+  || fail "the dashboard must render the derived settlement: $dash_d"
+pass "delivered recorded; settlement derives pending while the PR is open"
+
+# --- declined: a PR closed without merge derives declined ----------------------
+echo "CLOSED" > "$root/gh-state/pr_state"
+if "${L[@]}" finish --reason gate-ratified >/dev/null 2>&1; then
+  fail "finish gate-ratified (compat) must refuse a closed-unmerged PR"
+fi
+s="$("${L[@]}" status)"
+[ "$(echo "$s" | jget '["settlement"]["result"]')" = "declined" ] \
+  || fail "a PR closed without merge must derive declined"
+[ "$(echo "$s" | jget '["lifecycle"]["stop_reason"]')" = "cap" ] \
+  || fail "a declined PR must not touch the stop reason"
+pass "settlement: declined when the forge closed the PR without a merge"
+
+# --- landed via ratification; stop reason survives -----------------------------
+integ="$(cat "$root/t/loop/$run/state.json" | jget '["integration_branch"]')"
+clone="$root/clone"; git clone -q "$bare" "$clone"
+git -C "$clone" config user.email a@b.c; git -C "$clone" config user.name t
+git -C "$clone" checkout -q "$base"
+git -C "$clone" merge -q --no-ff -m "operator merges" "origin/${integ#refs/heads/}"
+git -C "$clone" push -q origin "$base"
+git -C "$clone" rev-parse HEAD > "$root/gh-state/merge_oid"
+echo "MERGED" > "$root/gh-state/pr_state"
+git -C "$repo" pull -q --ff-only origin "$base"
+"${L[@]}" finish --reason gate-ratified >/dev/null \
+  || fail "finish gate-ratified must pass once merged + synced"
+s="$("${L[@]}" status)"
+[ "$(echo "$s" | jget '["lifecycle"]["stop_reason"]')" = "cap" ] \
+  || fail "a run stopped at cap and merged later must still report stop reason cap"
+[ "$(echo "$s" | jget '["settlement"]["result"]')" = "landed" ] \
+  || fail "a merged + locally-synced delivery must derive landed"
+[ "$(echo "$s" | jget '["lifecycle"]["settlement"]["result"]')" = "landed" ] \
+  || fail "the OFFLINE derivation must also answer landed (local reachability)"
+[ "$(echo "$s" | jget '["lifecycle"]["active"]')" = "False" ] \
+  || fail "a ratified run is not active"
+dash2="$("${L[@]}" dashboard)"
+grep -q "STOPPED — stop reason: cap" <<<"$dash2" \
+  || fail "the dashboard must keep the computational stop reason: $(grep STOPPED <<<"$dash2")"
+grep -q "STOPPED — stop reason: gate-ratified" <<<"$dash2" \
+  && fail "gate-ratified must never render as the stop reason"
+grep -q "delivery: landed via PR #9" <<<"$dash2" \
+  || fail "the dashboard must render the landed settlement on its own line: $dash2"
+pass "landed via PR; stop reason cap survives ratification"
+
+# --- execution time still frozen at the FIRST close (ratification adds none) ---
+e3="$("${L[@]}" status | jget '["lifecycle"]["execution_s"]')"
+[ "$e1" = "$e3" ] \
+  || fail "ratification must not extend execution time: $e1 -> $e3"
+pass "ratification (review wait) added nothing to execution time"
+
+# --- unknown: an unverifiable outcome never reads landed -----------------------
+# Make the delivered tip unreachable, clear the cached observation, and have
+# the forge answer garbage: the derivation must say unknown — never landed.
+python3 - "$root/t/loop/$run/state.json" <<'EOF'
+import json, sys
+p = sys.argv[1]; s = json.load(open(p))
+s["delivered"]["head_sha"] = "0" * 40
+s.pop("settlement_observed", None)
+json.dump(s, open(p, "w"))
+EOF
+echo "GARBAGE" > "$root/gh-state/pr_state"
+[ "$("${L[@]}" status | jget '["settlement"]["result"]')" = "unknown" ] \
+  || fail "an unverifiable outcome must derive unknown, never landed"
+[ "$("${L[@]}" status | jget '["lifecycle"]["settlement"]["result"]')" = "unknown" ] \
+  || fail "the offline derivation must also read unknown with no cache"
+pass "unknown: unverifiable settlement is unknown, never landed"
+
+# --- the offline path never touches the forge ----------------------------------
+# lifecycle.settlement is the view substrate: derived with offline=True, so a
+# status call adds pr-view calls only for the top-level (live) settlement —
+# the dashboard --live path for an undelivered run adds none at all.
+calls_before="$(grep -c "pr view" "$root/gh-state/calls.log")"
+"${L[@]}" dashboard --live >/dev/null
+calls_after="$(grep -c "pr view" "$root/gh-state/calls.log")"
+[ "$calls_before" = "$calls_after" ] \
+  || fail "dashboard --live must never poll the forge: $calls_before -> $calls_after"
+pass "dashboard --live consults the forge zero times"
+
+echo "all live-lifecycle fixtures passed"

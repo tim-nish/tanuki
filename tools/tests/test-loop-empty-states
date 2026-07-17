@@ -39,6 +39,8 @@ EOF
 covered="drive:iteration-open-not-driven
 drive:iterations-ran-none-drove
 drive:no-iteration-started
+live:never-initialized
+live:no-active-run
 run:no-iteration-started
 scheduler:never-synced-after-runs
 scheduler:never-synced-fresh
@@ -114,6 +116,32 @@ grep -q "expected on a fresh target" <<<"$out" \
   || fail "fresh scheduler state should be expected"
 grep -q "GAP" <<<"$s3" || fail "post-run scheduler state should be a gap"
 pass "one absent substrate, two verdicts — expected on a fresh target, GAP after runs"
+
+# --- live view members (spec-tanuki-view D2 `live`: live = an ACTIVE run) -----
+
+# live:never-initialized — a target that has never run a loop at all.
+out_l1="$("$loop" --target t2 dashboard --live)"
+grep -q "live — no loop run has ever been initialized" <<<"$out_l1" \
+  || fail "live:never-initialized missing: $out_l1"
+grep -q "GAP" <<<"$out_l1" && fail "a never-initialized target is expected, not a gap"
+grep -q "init creates the run" <<<"$out_l1" \
+  || fail "the command live:never-initialized names must be explained: $out_l1"
+pass "live:never-initialized — expected, init explained"
+
+# live:no-active-run — a closed run is history, never live.
+"${L[@]}" finish --reason cap >/dev/null
+out_l2="$("${L[@]}" dashboard --live)"
+grep -q "live — no active loop" <<<"$out_l2" \
+  || fail "live:no-active-run missing: $out_l2"
+grep -q "GAP" <<<"$out_l2" && fail "between runs is expected, not a gap"
+grep -q "latest run: " <<<"$out_l2" \
+  || fail "the one-line historical summary must render: $out_l2"
+# Historical context is ONE line — none of the closed run's detail sections.
+for sec in "latest drive" "this run:" "scheduler decisions" "convergence" "NEXT:"; do
+  grep -q "$sec" <<<"$out_l2" \
+    && fail "live must not render the closed run's '$sec' section: $out_l2"
+done
+pass "live:no-active-run — expected; one historical line, no closed-run sections"
 
 # --- an unenumerated state is a bug, not an invented string -------------------
 python3 - "$loop" <<'EOF'

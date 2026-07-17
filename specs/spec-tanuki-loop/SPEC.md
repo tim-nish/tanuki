@@ -245,11 +245,15 @@ against other state by hand.** Concretely:
    (already ruled on — expected) or `UNMATCHED` (no ledger finding yet — the
    only class that warrants mid-run attention, and an ATTENTION trigger).
 3. **Run-scoped deltas, not cumulative counters.** The live view reports what
-   *this run* changed — new / fixed / recurred findings, deferred/frozen with
-   reasons inline — computed from the run-start ledger snapshot (`iter-start`
-   now snapshots `{id: {status, recurrence}}`, not bare ids). Lifetime totals
-   are one pointer line to the history view (`tanuki-scheduler history`),
-   which owns the long view.
+   *this run* changed — newly observed / status→accepted / recurred
+   findings, deferred/frozen with reasons inline — computed from the
+   run-start ledger snapshot (`iter-start` now snapshots
+   `{id: {status, recurrence}}`, not bare ids). Lifetime totals are one
+   pointer line to the history view (`tanuki-scheduler history`), which owns
+   the long view. (AMENDED 2026-07-18: the delta previously labeled `fixed`
+   is a ledger status transition, open/proposed → accepted — it is now
+   labeled as exactly that, because `fixed 0` beside the convergence line's
+   patch fact read as a contradiction.)
 4. **Scheduler decisions, not pool sizes.** From the iteration's persisted
    plan record (spec-tanuki-scenario-lifecycle): the verify set, the
    exploration pick, the active rotation, what waits for future iterations,
@@ -287,13 +291,17 @@ cold reader unable to distinguish "no data yet" from "missing data").
    target — run tanuki-scheduler sync first`, `this run: no ledger movement
    yet`. This generalizes point 4's "degrade … with an explicit note — never
    silently" from the plan record to **every** section.
-3. **Counters carry their definitions inline.** Any number whose meaning is
-   not derivable from the line it appears on states its definition next to
-   its first use — e.g. `fixed` = findings that stopped recurring this run
-   (not commits landed); the iteration counter counts *consumed* iterations,
-   including rolled-back ones (so `cap hit` next to `1/3` cannot read as a
-   contradiction). A counter needing a paragraph belongs in the audit, not
-   the dashboard.
+3. **Counters carry their definitions inline, and their labels are the
+   substrate's facts.** Any number whose meaning is not derivable from the
+   line it appears on states its definition next to its first use — e.g.
+   `status→accepted` = ledger status transitions this run (not patch
+   commits); the iteration counter counts *consumed* iterations, including
+   rolled-back ones (so `cap hit` next to `1/3` cannot read as a
+   contradiction). A label may not imply a fact the substrate does not
+   record (AMENDED 2026-07-18: `fixed` retired for this reason; the
+   convergence line says patch commits were *produced* on the integration
+   branch, never "landed"). A counter needing a paragraph belongs in the
+   audit, not the dashboard.
 4. **No model-supplied text except quoted reasons.** The only free text on
    the dashboard is operator/model-authored reason strings (deferral/freeze
    reasons). These render truncated to one line with an explicit ellipsis
@@ -657,6 +665,40 @@ discards it; an **unmerged** tip is never deleted. `finish`'s own sweep (on
 the same reachability rule. This closes a leak where merged
 `tanuki-loop/<target>/<ts>` branches accumulated until an unrelated tool
 happened to collect them.
+
+### Stop reason vs delivery settlement (ADDED 2026-07-18)
+
+The delivery-boundary ruling above already fixes what settlement *is* —
+derived, never declared, with its closed result set (`landed | pending |
+declined | unknown`). This section adds the fact that lives on the other
+side of the boundary, because `finish --reason gate-ratified` used to
+overwrite the run's close and the dashboard then presented `gate-ratified`
+as why the run stopped — a category error the operator had to undo by
+reading audit.md:
+
+- **Stop reason** — why loop *execution* ended. A closed set: `cap` |
+  `converged` | `breaker` | `cancelled` (the lifecycle name for a finish
+  reason of `aborted`). Recorded (`state.json` `stop`) at the **first
+  computational close** and never overwritten; a settlement — including the
+  compatibility `gate-ratified` — is not a stop reason and may never render
+  as one. A legacy run whose close was overwritten before this separation
+  reports `unknown` — never a guess.
+- **Settlement in views.** A read-only view never polls the forge
+  (spec-tanuki-view): it derives **offline** — local reachability still
+  answers `landed`; otherwise the last cached observation, always marked
+  stale with its timestamp, or `unknown`. The same never-optimistic rule:
+  offline derivation can only *confirm* landed from reachability, never
+  assume it.
+- **Execution time** ends at the first close (`state.json` `wall_end`);
+  waiting for PR review or merge never accrues to it. Runs closed before
+  `wall_end` existed freeze at their recorded close timestamp.
+
+`tanuki-loop status` emits this as one typed `lifecycle` block (`active`,
+`breaker_open`, `stop_reason`, `stopped_at`, `execution_s`, `delivered`,
+and the offline-derived `settlement`; the live-derived settlement remains
+the top-level `settlement` field). The dashboard renders stop reason and
+settlement as separate lines and freezes its elapsed figure. Views derive
+from this block and never re-classify (spec-tanuki-view D4).
 
 ## Phases (supervision + cap, not separate code paths)
 

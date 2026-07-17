@@ -144,10 +144,22 @@ exists to fix. Each view names its substrate — run it, render its output:
 - **`status`** — ledger counts + the derived next step.
   Substrate: `tanuki-ledger --target <t> status` and `next` (the
   short-command-surface D2 derivation; never recomputed here).
-- **`live`** — the loop dashboard: health verdict, latest drive, this run,
-  scheduler decisions, convergence, why-stopped/NEXT.
-  Substrate: `tanuki-loop --target <t> dashboard` (offer `--follow 10` when
-  a loop is running). The **live** view; `history` is the long view.
+- **`live`** — the loop dashboard **of an actively running loop**: health
+  verdict, latest drive, this run, scheduler decisions, convergence,
+  why-stopped/NEXT.
+  Substrate: `tanuki-loop --target <t> dashboard --live` (offer
+  `--follow 10` when a loop is running). The **live** view; `history` is
+  the long view. **Live means active**: a closed run — however recent — is
+  history, never live. With no active run the substrate renders its typed
+  empty state plus ONE line of historical context (run id, computational
+  stop reason — cap/converged/breaker/cancelled, never a settlement, which
+  is what became of the delivery — the delivery with its derived settlement
+  result, and the frozen execution time); render it verbatim and do not add
+  the closed run's detail sections. The line's settlement is derived
+  offline (local reachability or the stale-marked cache) — a view never
+  polls the forge. For a closed run's full dashboard the operator asks for
+  it explicitly (`tanuki-loop dashboard`, no `--live`) — not through
+  `view live`.
 - **`history`** — cross-run per-scenario execution history: state,
   executions, streaks, recurrence, unexplored, long-unrun, recently
   productive, selection history with reasons.

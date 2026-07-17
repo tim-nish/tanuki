@@ -48,6 +48,23 @@ All notable changes to Tanuki are documented here. The format follows
   remote is refused (reconcile + re-run), never force-pushed. (#5)
 
 ### Fixed
+- `view live` means an actively running loop, never the final dashboard of
+  the latest completed run (`specs/spec-tanuki-view/SPEC.md` D2, amended):
+  `tanuki-loop dashboard --live` renders the dashboard only while the run is
+  active and degrades a closed run to a typed empty state
+  (`live:no-active-run` / `live:never-initialized`) plus one historical line.
+  Stop reason and settlement are two separated, typed facts (spec-tanuki-loop
+  "Stop reason vs delivery settlement", over the delivery-boundary ruling):
+  the first computational close (cap | converged | breaker | cancelled) is
+  preserved in `state.json` `stop` and a settlement — including the
+  compatibility `gate-ratified` — never renders as why the run stopped.
+  Views derive settlement **offline** (`derive_settlement(offline=True)`:
+  local reachability or the stale-marked cache — a view never polls the
+  forge; unknown never reads landed). Execution time freezes at the first
+  close (`wall_end`) — review/merge waiting never accrues. Dashboard
+  counters are ledger facts: `fixed` retired for `status→accepted`, and the
+  convergence line says patch commits were *produced*, not "LANDED".
+  `tanuki-loop status` gains a typed `lifecycle` block carrying all of it.
 - Hostless self-dogfood scenarios now run the disposable plugin clone, never
   the operator's real checkout: the driver's sandbox preamble pins the clone
   path, and a post-run execution-escape check asserts nothing outside the
