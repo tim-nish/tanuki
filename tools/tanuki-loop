@@ -22,6 +22,8 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
        --scenarios reads the per-target "loop" block from the scenarios file
        ({"test_cmd", "iterations", "wall_time_s", "token_budget",
         "attempt_cap"}) so a run needs no repo-specific flags; CLI overrides.
+       The block is NOT auto-loaded from the canonical path — init/doctor read
+       it only from the --scenarios file you pass.
        Fetches <base>'s remote and FAILS CLOSED if the local base is behind
        its upstream (the loop must never dogfood stale code); --allow-stale-base
        overrides to dogfood the local tip anyway. The base is never silently
@@ -263,7 +265,10 @@ def breaker_hint(reason):
                 ".pyc, coverage files) — add them to .gitignore or clean them; "
                 "the dirty paths are named in the breaker reason")
     if "integration invariant" in r:
-        return "the four-part integration check failed — inspect the worktree against the audit trail"
+        return ("the four-part integration check failed — the iteration is in an "
+                "inconsistent state; reset it with `tanuki-loop --target <t> "
+                "rollback` (resets to the start SHA and cleans the worktree), or "
+                "inspect the worktree against the audit trail first")
     if "rollback failed" in r:
         return "the worktree could not be reset cleanly — inspect it by hand at the start SHA"
     return None
