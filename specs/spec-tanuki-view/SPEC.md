@@ -2,14 +2,19 @@
 
 Status: PROPOSED 2026-07-17 (drafted on the operator's order as a **new
 design exercise**, grounded in the current repository — not a transcription
-of a previously ratified discussion). Touches `commands/tanuki.md`,
-`docs/tanuki-spec.md`. **No change** to `tools/tanuki-scheduler`,
-`tools/tanuki-ledger`, or `tools/tanuki-loop` beyond what the OPEN questions
-below may later require: the tools stay the deterministic machine substrate
-and this spec adds a presentation surface over them. No change to the
-pipeline contract (events → findings → proposals → labeled issues) or to any
-isolation/safety property. Unresolved questions are marked **OPEN** and are
-not decided here.
+of a previously ratified discussion); **D3 AMENDED and OPEN-1 RESOLVED
+2026-07-17** — the empty state is a closed enumeration, typed and tested (see
+D3), and D3 now lands ahead of D1/D2 with issue #66 as its first instance.
+Touches `commands/tanuki.md`, `docs/tanuki-spec.md`, and — per OPEN-1's
+resolution — `tools/tanuki-loop` (the dashboard's empty states gain typed
+`{state, expected, reason, next}` alongside the prose they already print; an
+additive change, no subcommand/flag/existing-field altered). `tools/tanuki-
+scheduler` and `tools/tanuki-ledger` are unchanged: the tools stay the
+deterministic machine substrate and this spec adds a presentation surface
+over them. No change to the pipeline contract (events → findings → proposals
+→ labeled issues) or to any isolation/safety property. **OPEN-2** remains
+open and is marked as such; OPEN-1 and OPEN-3 are resolved in place with the
+reasoning kept.
 
 ## Problem
 
@@ -123,8 +128,36 @@ a whole:
   states why in one line at the picker and in the view itself.
 - The reason must carry an **expected-vs-gap signal** — whether emptiness is
   normal for this target's state (a fresh target has no runs) or a real gap
-  the operator should close. See **OPEN-1**: the mechanism that produces
-  that signal is not decided here.
+  the operator should close.
+
+**The empty state is a closed enumeration, not prose** (OPEN-1 resolved
+2026-07-17). Every section that can render empty resolves to exactly one
+member of an enumerated set, emitted as typed data and rendered as the
+one-line reason:
+
+```
+{state: <enum member>, expected: true|false, reason: "<one line>",
+ next: "<the command that changes it>" | null}
+```
+
+- `expected: true` — emptiness is normal for this target's state (a fresh
+  target has never synced; no run has driven yet). `expected: false` — a
+  **gap**: the substrate should exist and does not.
+- **One test fixture per enumerated state**, so a new state or a regression
+  fails visibly rather than being re-reported by a later dogfood run.
+- Any command the reason names must be explained where it is named — an
+  operator meeting `tanuki-scheduler sync` for the first time in an error
+  string learns nothing from the name alone (F47).
+
+This is `specs/spec-short-command-surface/SPEC.md` D2's rule applied to the
+same disease. D2 exists because the `next:` hint "has been fixed twice and
+regressed twice because it is patched string logic"; the empty-state class
+has now been reported three times — **F5** (sections omitted with no note),
+**F47 / issue #66** (scheduler-decisions naming an unmet command with no
+expected-vs-gap signal), and **F46 / issue #65** (latest drive reading
+"none yet" after an iteration had run). Prose no test can check is what
+regressed each time. Issue #66 is the first instance of this rule, not a
+one-off fix.
 
 ### D4 — the surface renders; the tools compute
 
@@ -143,27 +176,33 @@ A standing acceptance rule, not a one-time change:
 
 ## OPEN questions (not decided in this spec)
 
-**OPEN-1 — unexplained coverage.** Coverage states *what* (`explored` /
-`authored` / `uncovered`, per `spec-tanuki-scenario-lifecycle`) but never
-*why*, and an empty view cannot distinguish "expected for a fresh target"
-from "a real gap". The same class is already visible in the dashboard's
-empty states: ledger finding **F47 / issue #66** ("scheduler decisions: no
-scheduler state — run `tanuki-scheduler sync` first" names a command the
-operator hasn't met and gives no signal whether that's expected for a fresh
-target or a real gap) and **F5** ("dashboard omits sections the spec says
-are always present, with no note explaining why"). D3 asserts the
-requirement; the mechanism is undecided:
+**~~OPEN-1 — unexplained coverage.~~ RESOLVED 2026-07-17 — closed
+enumeration, typed and tested.** Coverage stated *what* (`explored` /
+`authored` / `uncovered`) but never *why*, and an empty view could not
+distinguish "expected for a fresh target" from "a real gap". The answer is in
+**D3 above**: every empty state is one member of a closed enumeration
+carrying `expected: true|false`, emitted as typed data, with one test fixture
+per state.
 
-- Does the **substrate** emit a machine-readable reason/state code per empty
-  section (deterministic, testable, but a tool change — and tool changes are
-  out of scope here), or does the **command layer** derive the explanation
-  from state it already reads (no tool change, but explanation logic lands
-  in prose, which D4 forbids for computed values)?
-- Is "expected vs gap" a closed enumeration like short-command-surface D2's
-  ledger states, or per-view ad-hoc?
-- Does issue #66's fix (already classified `direct`) settle the dashboard
-  case in a way this surface should generalize, or does generalizing it
-  supersede that fix? **These must not be resolved independently.**
+Two parts of the question as originally posed were wrong, and the record
+should say so:
+
+- It asked whether the **substrate** emits the code or the **command layer**
+  derives it. That framing does not survive contact with the code: the
+  dashboard **is** `tanuki-loop dashboard` — a tool that prints prose — so
+  #66's fix is a substrate change either way. The real question was never
+  *where the logic lives* but whether the reason is **enumerated typed data
+  or prose**. Prose is what regressed, three times.
+- It treated "is this a closed enumeration like D2's ledger states?" as open.
+  It is not a close call: D2 exists because the same class of string logic
+  "has been fixed twice and regressed twice", and the empty-state class is
+  now on its third report (F5, F47/#66, F46/#65). The evidence had already
+  decided it.
+
+**Issue #66 is the first instance of the D3 rule**, not a one-off — its
+`direct` classification stands, but it lands as an application of the
+enumeration rather than a prose patch, which is why the two could not be
+resolved independently.
 
 **OPEN-2 — axis vocabulary.** `axes` are per-target and author-declared: the
 generation pass ratifies them at the plan gate, and
@@ -185,8 +224,11 @@ this spec does not answer:
   the lifecycle spec, or neither?
 - Should `coverage` render an axis whose values are all `uncovered` and
   whose scenarios are all unexecuted — a declared-but-untouched space —
-  differently from an undeclared one? (Related to OPEN-1's expected-vs-gap
-  signal; likely the same decision.)
+  differently from an undeclared one? **Partly answered by OPEN-1's
+  resolution:** both are empty states, so both must be enumerated members
+  carrying `expected` — "declared but never run" is expected on a fresh
+  target and a gap on a mature one. What remains open here is only whether
+  the *axis vocabulary* they are reported in is comparable across targets.
 
 **~~OPEN-3 — flags vs. the catalog.~~ RESOLVED 2026-07-17 (issue #74).** The
 question — whether `view` is a word or a flag, and whether `--status` /
@@ -205,6 +247,15 @@ only — the catalog (D2) and everything else here remain PROPOSED.
 - **No scheduler refactor.** `tools/tanuki-scheduler` keeps its subcommands,
   flags, and output contract exactly. This spec proposes a surface over the
   substrate, never a reshaping of it (explicit operator instruction).
+  **Amended 2026-07-17 (OPEN-1):** D3's empty-state enumeration is the one
+  permitted substrate change, and it is additive — a section that can render
+  empty gains a typed `{state, expected, reason, next}` alongside the prose
+  it already prints. No subcommand, flag, or existing output field changes.
+  The original non-goal assumed the explanation could live in the command
+  layer; it cannot, because the dashboard that produces these empty states is
+  itself a tool. Honoring the non-goal literally would have meant two
+  descriptions of one truth — the tool's prose and the view's — which is the
+  drift D4 forbids.
 - **No new views.** The catalog is the views this repo already computes. A
   new view is a new spec.
 - **No writes, no gates, no dispositions.** Views are read-only. The
@@ -225,12 +276,14 @@ only — the catalog (D2) and everything else here remain PROPOSED.
 
 ## Ordering
 
-D1 and D2 land together (a door with no catalog is not a surface). D3 is
-blocked on **OPEN-1** for the expected-vs-gap mechanism, though the
-always-offered part is independent and can land with D1/D2. D4 is a standing
-acceptance rule rather than a one-time change. **OPEN-2** blocks nothing in
-D1/D2 — `coverage` renders declared axes verbatim today — and is a
-prerequisite only for any cross-target coverage comparison.
+D1 and D2 land together (a door with no catalog is not a surface). **D3 is
+unblocked** (OPEN-1 resolved 2026-07-17) and lands *ahead of* D1/D2: its
+enumeration applies to the dashboard's empty states, which exist today and
+have produced every report of this class, and issue #66 is its first
+instance. D4 is a standing acceptance rule rather than a one-time change.
+**OPEN-2** blocks nothing in D1/D2 — `coverage` renders declared axes
+verbatim today — and is a prerequisite only for any cross-target coverage
+comparison.
 
 Sequencing against current work: this spec is **PROPOSED and unscheduled**.
 It follows the in-flight sequence (commit the #72/#73 spec changes → Story
