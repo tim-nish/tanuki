@@ -45,10 +45,35 @@ adds a prompt to the headless path.
 
 ### D1 — the decision pass fully wraps the mechanics (fixes F23)
 
-`/tanuki <target> --brief` (and the end of a normal run) must be the
-*complete* path from proposals to labeled issues, per the existing contract
-("the human gate is part of the run, not homework", `docs/tanuki-spec.md`):
+The decision pass (and the end of a normal run) must be the *complete* path
+from proposals to labeled issues, per the existing contract ("the human gate
+is part of the run, not homework", `docs/tanuki-spec.md`):
 
+- **Ledger-anchored entry, not brief-anchored — and named for it.** The pass
+  decides whatever the ledger holds as decidable, whether or not a recent
+  brief exists: it orients off `status`/`next` and proceeds. A brief, when
+  one exists, is reprinted as context — never a precondition. (An operator
+  with open findings and no recent run must still reach filed issues in one
+  command; this is the capability the pass owes, and it is why no second
+  decision command is needed.) The entry therefore names the **workflow**,
+  not the artifact — a gate reachable only through a name borrowed from an
+  artifact it no longer requires is the memorized-flag defect this spec's
+  Principle forbids. Per D6 the pass does not drive, so its entry is the
+  bare word **`decide`**; `--brief` is retained as an alias that reprints
+  the latest brief and continues into the same pass. The spelling is
+  ratified by D6 and applied surface-wide there (issue #74), not
+  independently by this deliverable.
+- **Consolidation before presentation.** Between promotion and the first
+  question, the pass consolidates candidate items (proposals + watching)
+  into merge / conflict / dependency / independent groups and presents
+  groups, not the raw finding list. The group taxonomy, the
+  one-multi-outcome-question rule for a conflict group, and the
+  no-history-surgery constraint are normative in
+  `specs/spec-tanuki-solve/SPEC.md` D1/D3 and are not restated here; the
+  deterministic pre-clustering substrate is that spec's D2
+  (`tanuki-ledger consolidate`). Carve-out: with fewer than two candidate
+  items there is nothing to consolidate and the stage is skipped — the
+  minimal path stays minimal.
 - Promotion moves status to `proposed` as the contract already states; the
   command layer performs the transition (the tool may keep a `--dry-run`
   preview). No separate unhinted `set-status` call.
@@ -67,9 +92,47 @@ adds a prompt to the headless path.
 - Dispositions are written back via the tool (`set-status` stays the
   substrate); the command reports what changed and what remains undecided.
 
-Acceptance: an operator can go from "run finished" to "issues filed,
-ledger updated" answering questions only — zero raw `tanuki-ledger` or
-`gh` invocations typed by hand.
+Acceptance: an operator can go from "run finished" — or from "open findings
+await judgment, no recent run" — to "issues filed, ledger updated" answering
+questions only, in one command, with zero raw `tanuki-ledger` or `gh`
+invocations typed by hand. Two findings carrying contradictory proposals for
+the same behavior never reach two separate filings on this path (the
+`spec-tanuki-solve` D4 incident class, now unrepresentable on *every*
+decision path rather than one command's).
+
+### D6 — the command-shape rule, ratified once and applied surface-wide (issue #74)
+
+The grammar has no stated rule for what is a bare word and what is a flag,
+and is already mixed: `init` is a word, every other mode is a flag, nothing
+says why. With no rule, each new mode is answered by local precedent — which
+is how two changes drafted in one sitting (2026-07-17) came out opposite
+(`--decide` following `--brief`; a proposed `view` following `init`). The
+rule states what the repo already practices — every non-driving mode's doc
+says "No driving", and the one word in the grammar is the one mode that never
+drives:
+
+> **A bare word selects a mode that does not drive. Flags modify a drive.
+> The bare default is driving.**
+
+Applied to the whole surface, in **one** change (fixing instances one at a
+time re-litigates the rule per command and churns entry points through
+repeated renames):
+
+```
+/tanuki <t>                  — drive (default)
+/tanuki <t> <scenario-ids>   — drive a subset
+/tanuki <t> "<free text>"    — drive ad-hoc
+/tanuki <t> init | decide | status | history | view
+/tanuki <t> mine <run> | ingest "<text>"
+  flags: --follow, --json, … (true modifiers only)
+```
+
+The documented spellings are retained as **aliases** (`--brief` → `decide`,
+`--status`, `--history`, `--mine-only`, `--ingest`), so nothing in an
+operator's fingers breaks. `view` is specified separately
+(`specs/spec-tanuki-view/SPEC.md`, PROPOSED); this deliverable ratifies its
+*shape*, resolving that spec's OPEN-3, not its content. D1's `decide`
+spelling is ratified here and lands with this rule, not ahead of it.
 
 ### D2 — `next` derived from enumerated ledger states (fixes F24, F36, F76)
 

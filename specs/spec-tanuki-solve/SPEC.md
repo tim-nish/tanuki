@@ -1,9 +1,14 @@
 # Spec: /tanuki-solve — consolidate-then-decide pass from ledger to labeled issues
 
-Status: IMPLEMENTED 2026-07-17 — D2 in `tools/tanuki-ledger` (`consolidate`
-subcommand), D1/D3 in `commands/tanuki-solve.md`, D4 in
+Status: IMPLEMENTED 2026-07-17; **AMENDED 2026-07-17 — folded into the
+decision pass** (issue #72, see Non-goals). D1/D3 stay normative as the
+consolidation contract, but their consuming surface is now
+`/tanuki <t> decide` per `specs/spec-short-command-surface/SPEC.md` D1, not
+a separate `/tanuki-solve` command; that command is retired once the fold
+lands, its capability absorbed rather than dropped. D2 in
+`tools/tanuki-ledger` (`consolidate` subcommand) is unaffected; D4 in
 `tools/tests/test-ledger-consolidate` (drafted and implemented on the
-operator's order, same sitting). Extends
+operator's order, same sitting) now applies to the folded pass. Extends
 `specs/spec-short-command-surface/SPEC.md` D1 (the wrapped decision pass);
 changes nothing in the pipeline contract (events → findings → proposals →
 labeled issues) or any isolation/safety property. Origin: a live incident —
@@ -146,10 +151,25 @@ spec.
   deterministic (pointer/path/scenario overlap + text similarity); judgment
   is applied once per candidate group at the command layer, never in a
   generate-and-filter loop.
-- **`/tanuki <t> --brief` keeps working** as the minimal decision pass; this
-  command is the superset form. If maintaining both surfaces diverges, the
-  resolution is folding solve's consolidation stage into the brief pass, not
-  a second contract.
+- **~~`/tanuki <t> --brief` keeps working~~ — RESOLVED 2026-07-17, the fold
+  fired.** The rule this bullet recorded ("if maintaining both surfaces
+  diverges, the resolution is folding solve's consolidation stage into the
+  brief pass, not a second contract") met its trigger: issue #72 observed
+  that the brief pass walks the raw finding list with no consolidation, so
+  any sitting deciding through `--brief` or the end of a normal run could
+  reproduce the #68/#70 incident this spec exists to prevent. Per the rule,
+  the consolidation stage is folded into the decision pass —
+  `specs/spec-short-command-surface/SPEC.md` D1 now requires it, cites D1/D3
+  below as the normative taxonomy, and carries the ledger-anchored entry the
+  workflow needs — surfaced as `/tanuki <t> decide`, with `--brief`
+  retained as an alias (the flag names the workflow, not the artifact, since
+  the pass no longer requires a brief). `/tanuki-solve` is consequently retired as a separate
+  surface: its capability (one attended command from open findings to
+  labeled issues, no raw ledger invocations) is not lost but absorbed —
+  retirement is conditional on that capability being wholly reachable
+  through `/tanuki <t> --brief`, which the amended D1 requires. This spec's
+  D1/D3 remain normative as the consolidation contract; only the consuming
+  surface changed. D2 (`tanuki-ledger consolidate`) is untouched.
 
 ## Ordering
 
