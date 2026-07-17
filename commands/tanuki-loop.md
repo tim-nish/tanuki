@@ -312,7 +312,9 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
    deliberately. `status`'s `warning` field names these paths before you get
    here — read it when deciding the merge. Only past a successful push does
    anything else outward-facing run.
-5. **Materialize** issues — **one per resolved problem** (keyed by the lead
+5. **Materialize** issues — *skip steps 5–6 entirely if no issue tracker is
+   configured (e.g. a hostless target); the merge commit and audit trail are
+   already the record* — **one per resolved problem** (keyed by the lead
    ledger finding id, or a `+`-joined set), describing **what landed**, each
    body stamped `tanuki-loop: <run-id>/<problem-key>`. Before creating,
    `tanuki-loop issue-get --key <problem-key>` (and a marker search) returns
@@ -325,7 +327,10 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
    than inventing a substitute (F15).
 6. **Link** each to the (now pushed) merge commit, **close as completed**,
    reconcile the board to Done (where project-board tooling is configured).
-7. Remove the loop worktree (`git worktree remove`), then close the run
+   *(Skipped along with step 5 when no tracker is configured.)*
+7. Remove the loop worktree (`git worktree remove` — if it refuses with a
+   modified-file error naming regenerable output, see the note at the end of
+   this step), then close the run
    machine-readably: `tanuki-loop finish --reason gate-ratified` (likewise
    `converged` / `cap` / `aborted` when a run ends without a gate). **`finish`
    owns the branch cleanup** — its `branch_cleanup` report has three buckets:
@@ -340,6 +345,17 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
    1. That is expected, not a fault. Removing the worktree first and running
    `finish` again here is what performs that deferred deletion; you can see it
    land in `branch_cleanup.deleted` (F96, F9).
+   **Artifacts already committed to the base can block the removal** (F111).
+   The build-artifact guard above concerns output *the loop's own commits*
+   swept in; this is the other direction. If regenerable output (`*.pyc`,
+   `__pycache__/`) was committed to the base branch *before* the run, running
+   `test_cmd` regenerates it in the worktree, the tracked content then differs
+   from the index, and `git worktree remove` refuses — at the last gate step,
+   naming a file that has nothing to do with the loop's work. It is not a
+   breaker and nothing is wrong with the batch: use `git worktree remove
+   --force`, or clean the paths first. The durable fix is to stop tracking
+   them on the base (`git rm -r --cached <path>` + `.gitignore`), which also
+   removes the `gate-push` artifact refusal for every later run.
 
 ## Monitoring (the operator's window)
 
