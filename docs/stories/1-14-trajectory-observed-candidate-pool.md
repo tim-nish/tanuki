@@ -2,7 +2,9 @@
 story: 1.14
 epic: 1
 title: "Story 1.14: trajectory-observed unexplored branches seed the regeneration candidate pool"
-status: ready
+status: published
+depends_on: ["1.13"]
+issue: 124
 umbrella: 113
 ---
 

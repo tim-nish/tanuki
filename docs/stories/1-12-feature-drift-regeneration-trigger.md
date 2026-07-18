@@ -2,7 +2,9 @@
 story: 1.12
 epic: 1
 title: "Story 1.12: feature-drift as a third scenario-regeneration trigger"
-status: ready
+status: published
+depends_on: ["1.13"]
+issue: 123
 umbrella: 113
 ---
 

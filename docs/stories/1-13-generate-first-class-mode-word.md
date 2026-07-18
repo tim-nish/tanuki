@@ -1,8 +1,9 @@
 ---
 story: 1.13
 epic: 1
-title: "Story 1.13: generate — first-class mode word for scenario regeneration"
-status: ready
+title: "Story 1.13: generate \u2014 first-class mode word for scenario regeneration"
+status: published
+issue: 122
 umbrella: 113
 ---
 
