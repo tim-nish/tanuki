@@ -45,6 +45,10 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
        out of nowhere (F91).
        Not-ready follows the breaker convention ({"breaker": …} + exit 3)
        but persists nothing — there is no run state to write.
+       `doctor --help` carries the fullest scenarios-file documentation
+       (the exact "loop"-block JSON shape, the canonical path formula, and
+       per-key CLI equivalents) — read it before writing a scenarios file
+       (F132).
   iter-start                     cap / wall-time / external-modification breakers;
                                  records the iteration start SHA + ledger snapshot
   iter-verify [--no-patch]       the four-part integration invariant; records end SHA
@@ -93,9 +97,12 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
                                  to run, then re-finish (F138).
                                  The FIRST computational close (converged/cap/
                                  aborted) is recorded as the run's STOP REASON
-                                 and never overwritten (aborted is recorded as
-                                 `cancelled`); settlement is derived, never a
-                                 stop reason — the two are separate facts.
+                                 and never overwritten. (`--reason aborted` is
+                                 the CLI value — pass exactly that; the stop
+                                 reason is then STORED/DISPLAYED as
+                                 `cancelled`, which is not itself a valid
+                                 --reason, F165.) Settlement is derived, never
+                                 a stop reason — the two are separate facts.
                                  Execution time ends at the first close
                                  (wall_end); review/merge wait never accrues
   recover --restore | --adopt    ATTENDED recovery from the external-modification
@@ -1784,6 +1791,16 @@ def cmd_rollback(args):
     it["removed"] = removed_paths
     it["phase"] = "rolled_back"
     state["head_expected"] = start
+    # F118: rollback is the documented remedy for breakers that fire with an
+    # iteration open (test failure, invariant violation); once it succeeds the
+    # stop is resolved, and the verdict must not keep reading "stopped"
+    # against an active lifecycle. External modification stays armed — that
+    # breaker is recover's, not rollback's.
+    lb = state.get("last_breaker")
+    if lb and not lb.get("recovered") and \
+            "external modification" not in lb.get("reason", ""):
+        lb["recovered"] = {"mode": "rollback",
+                           "at": time.strftime("%Y-%m-%d %H:%M:%S")}
     save_state(state)
     audit(state, f"iter {it['n']}: rolled back to {start[:12]}; "
                  f"removed untracked: {removed_paths or 'none'}")
@@ -3206,6 +3223,16 @@ def run_verdict(state):
     # "iteration N open" while lifecycle.iterations_open on the same screen was 0
     # — a direct self-contradiction of the kind F118 already guards elsewhere.
     openb = [i for i in state["iterations"] if i.get("phase") == "started"]
+    # F78: when every cap slot is consumed and the run is still unclosed,
+    # closing it was a manual inference from comparing iterations_done to cap
+    # on one screen — name the next action instead.
+    if not openb and done >= cap:
+        return {"state": "running", "reason": None,
+                "next_action": ("iteration cap consumed — close the run: "
+                                "finish --reason cap (or --reason converged "
+                                "if record-cycle reported converged)"),
+                "summary": (f"running: {done}/{cap} iterations consumed — "
+                            f"cap reached, close with finish")}
     where = (f"iteration {openb[-1]['n']} open" if openb
              else f"{done}/{cap} iterations done")
     return {"state": "running", "reason": None,
