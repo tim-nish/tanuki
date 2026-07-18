@@ -851,10 +851,14 @@ def cmd_compact(args, ledger):
                 if k >= n:
                     continue  # (would have compacted; handled above)
                 scen = set(f.get("scenarios", [])) - {"ingest"}
-                how = ("driven-and-absent run(s)" if scen
-                       else "later run(s) elapsed (ingest/no-scenario)")
-                reasons.append(f"  {f['id']}: accepted, {k}/{n} {how} "
-                               f"— {n - k} more to verify the fix")
+                if scen:
+                    tail = (f"{k}/{n} driven-and-absent run(s) — {n - k} more "
+                            f"re-drive(s) of its scenario to verify the fix "
+                            f"(hand-ingest will not advance this)")
+                else:
+                    tail = (f"{k}/{n} later run(s) elapsed (ingest/no-scenario) "
+                            f"— {n - k} more, driven or manual")
+                reasons.append(f"  {f['id']}: accepted, {tail}")
             elif status == "dismissed":
                 k = runs_since(f.get("last_seen_run"))
                 if k >= n:
@@ -1389,8 +1393,13 @@ def main():
             "manifest.json listing that scenario) without the finding "
             "recurring. --unseen-runs N is that threshold: the count of "
             "re-driven runs the finding must be absent from, NOT wall-clock "
-            "runs elapsed. Plain `ingest` of hand-written events does not "
-            "create a manifest, so it never advances this counter (F75)."))
+            "runs elapsed. A hand-written `ingest` now writes a run manifest "
+            "(Story 1.9), so a finding with NO real scenario (only the reserved "
+            "`ingest` pseudo-scenario) advances on each later run, driven or "
+            "manual. A finding evidenced against a REAL scenario is different: "
+            "only a run that actually RE-DRIVES that scenario counts, so "
+            "hand-ingestion alone can never tombstone it — re-drive the scenario "
+            "with `tanuki-drive` (F140/F141; supersedes the stale F75 note)."))
     sp.add_argument("--unseen-runs", type=int, default=None,
                     help="re-driven runs the finding must be absent from before "
                          "tombstoning (default from config)")
