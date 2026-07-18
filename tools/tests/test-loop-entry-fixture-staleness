@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# spec-host-snapshot "Stage-entry fixtures" / story 1.18: doctor compares each
+# declared entry fixture against the most recent run's pinned provenance and
+# WARNS when the artifacts or the producing stage moved — informational,
+# ready unaffected (the host-drift posture). No prior run degrades to an
+# explicit first-run note; a missing artifact stays a failing check (1.16).
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+loop="$here/tanuki-loop"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+jget() { python3 -c "import json,sys;print(json.load(sys.stdin)$1)"; }
+jcheck() { python3 -c "
+import json,sys
+r=json.load(sys.stdin)
+print(json.dumps(next(c for c in r['checks'] if c['check']=='$1')))"; }
+
+repo="$tmp/repo"
+git init -q "$repo" && git -C "$repo" config user.email t@e && git -C "$repo" config user.name t
+git -C "$repo" checkout -qb main && echo v0 > "$repo/f" && git -C "$repo" add -A && git -C "$repo" commit -qm base
+
+host="$tmp/host"
+git init -q "$host" && git -C "$host" config user.email t@e && git -C "$host" config user.name t
+git -C "$host" checkout -qb main && mkdir -p "$host/facts" \
+  && echo harvested > "$host/facts/sheet.md" \
+  && git -C "$host" add -A && git -C "$host" commit -qm h0
+
+sc="$tmp/s.scenarios.json"
+cat > "$sc" <<EOF
+{"target":"efs","plugin":"$repo","host":"$host",
+ "loop":{"iterations":2,"test_cmd":"test -f f","wall_time_s":3600,
+         "token_budget":100000,"attempt_cap":4},
+ "entry_fixtures":{"harvested":{"paths":["facts/sheet.md"],
+                                "producing_stage":"harvest-v1"}},
+ "scenarios":[{"id":"s1","charter":"c","prompt":"p",
+               "entry_fixture":"harvested"}]}
+EOF
+
+D=("$loop" --target efs doctor --loop-repo "$repo" --scenarios "$sc")
+
+# --- fresh target: no prior provenance, explicit first-run note, no warning --
+"${D[@]}" > /tmp/efs0.json 2>&1 || { cat /tmp/efs0.json; fail "doctor not ready on fresh target"; }
+jcheck entry-fixtures < /tmp/efs0.json | grep -q "first run: expected" \
+  || fail "fresh target must state there is no prior pin to compare"
+jcheck entry-fixtures < /tmp/efs0.json | grep -q '"warning"' \
+  && fail "fresh target must not warn" || true
+pass "no prior run: explicit first-run note, no warning"
+
+# --- pin via init, then doctor: provenance matches, no warning ---------------
+"$loop" --target efs init --loop-repo "$repo" --scenarios "$sc" >/dev/null 2>&1 \
+  || fail "init failed"
+"${D[@]}" > /tmp/efs1.json 2>&1 || fail "doctor failed after init"
+jcheck entry-fixtures < /tmp/efs1.json | jget '["ok"]' | grep -q True \
+  || fail "matching provenance must pass"
+jcheck entry-fixtures < /tmp/efs1.json | grep -q '"warning"' \
+  && fail "matching provenance must not warn" || true
+pass "pinned provenance matching the live host: ok, no warning"
+
+# --- the declared artifact moves on the live host: warning, ready unaffected -
+echo re-harvested > "$host/facts/sheet.md"
+git -C "$host" add -A && git -C "$host" commit -qm h1
+"${D[@]}" > /tmp/efs2.json 2>&1 || fail "doctor must stay ready on a stale fixture"
+jget '["ready"]' < /tmp/efs2.json | grep -q True || fail "staleness must not flip ready"
+w="$(jcheck entry-fixtures < /tmp/efs2.json | jget '["warning"]')"
+echo "$w" | grep -q "artifacts changed since pinned" || fail "warning must say what moved: $w"
+echo "$w" | grep -q "harvested" || fail "warning must name the fixture: $w"
+pass "artifact drift: warning names fixture + commits, ready stays true"
+
+# --- an unrelated host commit does NOT warn ----------------------------------
+"$loop" --target efs init --loop-repo "$repo" --scenarios "$sc" >/dev/null 2>&1 \
+  || fail "re-init failed"
+echo other > "$host/unrelated.md"
+git -C "$host" add -A && git -C "$host" commit -qm h2
+"${D[@]}" > /tmp/efs3.json 2>&1 || fail "doctor failed"
+jcheck entry-fixtures < /tmp/efs3.json | grep -q '"warning"' \
+  && fail "a commit not touching the declared paths must not warn" || true
+pass "unrelated host movement: no warning"
+
+# --- the producing stage version moves in the scenarios file: warning --------
+python3 - "$sc" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["entry_fixtures"]["harvested"]["producing_stage"] = "harvest-v2"
+json.dump(d, open(sys.argv[1], "w"))
+PY
+"${D[@]}" > /tmp/efs4.json 2>&1 || fail "doctor failed"
+jcheck entry-fixtures < /tmp/efs4.json | jget '["warning"]' | grep -q "producing stage moved" \
+  || fail "a stage-version move must warn"
+pass "producing-stage move: warning, ready unaffected"
+
+echo "ALL PASS"

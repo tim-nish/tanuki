@@ -1683,13 +1683,57 @@ def cmd_doctor(args):
                        if not os.path.exists(os.path.join(host, p))]
                    for n, r in efx.items()}
         missing = {n: m for n, m in missing.items() if m}
-        checks.append({"check": "entry-fixtures", "ok": not missing,
-                       "detail": ("declared fixture(s) "
-                                  f"({', '.join(sorted(efx))}) all "
-                                  "materializable from the live host"
-                                  if not missing else
-                                  "init would FAIL CLOSED — missing from "
-                                  f"the live host: {missing}")})
+        if missing:
+            checks.append({"check": "entry-fixtures", "ok": False,
+                           "detail": "init would FAIL CLOSED — missing from "
+                                     f"the live host: {missing}"})
+        else:
+            # Staleness vs the last pinned provenance (story 1.18): compare
+            # each recipe against what the most recent run pinned. A stale
+            # fixture is the operator's call — warning, `ok`/`ready`
+            # unaffected (the host-drift posture); read-only throughout.
+            prior = {}
+            cur = os.path.join(TANUKI_ROOT, args.target, "loop", "current")
+            if os.path.exists(cur):      # quiet: no prior run is expected,
+                try:                     # never an error on a read-only check
+                    with open(cur, encoding="utf-8") as f:
+                        prior = (load_state(args.target, f.read().strip())
+                                 .get("entry_fixtures") or {})
+                except (OSError, ValueError):
+                    pass
+            rc_t, live_tip = git(host, "rev-parse", "HEAD")
+            stale = []
+            for n, r in sorted(efx.items()):
+                p = prior.get(n)
+                if not p:
+                    continue
+                pinned = p.get("source_commit")
+                if (rc_t == 0 and pinned and live_tip != pinned):
+                    rc_d, changed = git(host, "diff", "--name-only",
+                                        f"{pinned}..{live_tip}", "--",
+                                        *r["paths"])
+                    if rc_d == 0 and changed.strip():
+                        stale.append(
+                            f"'{n}': artifacts changed since pinned "
+                            f"{pinned[:12]} -> live {live_tip[:12]} "
+                            f"({', '.join(changed.split())})")
+                if r.get("producing_stage") != p.get("producing_stage_version"):
+                    stale.append(
+                        f"'{n}': producing stage moved "
+                        f"{p.get('producing_stage_version')} -> "
+                        f"{r.get('producing_stage')} — pinned artifacts may "
+                        "no longer match what the current stage produces")
+            entry = {"check": "entry-fixtures", "ok": True,
+                     "detail": ("declared fixture(s) "
+                                f"({', '.join(sorted(efx))}) all "
+                                "materializable from the live host"
+                                + ("" if prior else
+                                   " — no prior pinned provenance to "
+                                   "compare (first run: expected)"))}
+            if stale:
+                entry["warning"] = ("stale entry fixture(s) — informational, "
+                                    "ready unaffected: " + "; ".join(stale))
+            checks.append(entry)
 
     # PR-gate tooling (spec-tanuki-loop "PR-protected targets"): a target whose
     # gate mode is "pr" delivers its review material via `gh` — validate that
