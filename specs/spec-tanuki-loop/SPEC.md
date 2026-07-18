@@ -620,6 +620,22 @@ the forge and the current base, at the moment they actually need it:
   timestamp, always marked stale — a cache is never presented as current
   truth, and no view requires a human to restate the forge's decision.
 
+**The direct-merge (non-PR) gate settles the same way — by reachability, not
+by a forge PR.** On a non-PR-protected target the gate merges `integration →
+base` locally rather than opening a Draft PR, so there is no PR state to read;
+the settlement is nonetheless derived, from the **same strict test** — the
+integration tip's reachability from the current base (the "the merge's
+reachability from the base *is* the settlement" rule stated above):
+- **integration tip reachable from the current base** → `landed`, with
+  `delivered` populated from the local merge (integration-tip SHA, base SHA,
+  merge commit) exactly as `gate-pr` populates it from the PR;
+- **not yet reachable** (merge not run, or base moved past it) → `pending`;
+- **base unreadable** → `unknown`, never an optimistic default.
+So `status.delivered`/`settlement` populate symmetrically on both gate paths —
+the PR path sources reachability alongside the forge PR, the direct-merge path
+sources it from the base alone. A direct-merge run whose merge has landed must
+never show `settlement: null`, which a reader would misread as a lost delivery.
+
 **Accounting uses the strict test.** Finding verification and recurrence
 accounting may treat a delivered change as landed **only** when its delivered
 SHA is reachable from the current base — never from the forge's word alone,
