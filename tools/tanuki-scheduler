@@ -121,14 +121,28 @@ def load_ledger(target):
                      {"events": {}, "findings": []})
 
 
-def matrix_ids(scenarios_file, target=None):
+def matrix_data(scenarios_file, target=None):
+    """{id: scenario dict} for the whole matrix — the substrate for covers
+    tags and cost keys (story 1.19), sharing matrix_ids' adhoc guard."""
     with open_scenarios(scenarios_file, target) as f:
         data = json.load(f)
-    ids = [s["id"] for s in data["scenarios"]]
-    for sid in ids:
-        if sid.startswith("adhoc-"):
-            die(f"matrix id '{sid}' uses the reserved adhoc- prefix")
-    return ids
+    by_id = {}
+    for s in data["scenarios"]:
+        if s["id"].startswith("adhoc-"):
+            die(f"matrix id '{s['id']}' uses the reserved adhoc- prefix")
+        by_id[s["id"]] = s
+    return by_id
+
+
+def matrix_ids(scenarios_file, target=None):
+    return list(matrix_data(scenarios_file, target))
+
+
+def scenario_cost(s):
+    """Deterministic verify cost: an explicit "cost" key, else max_turns,
+    else the drive's default turn budget (40) — spec-tanuki-scenario-
+    lifecycle "Cheapest covering verify"."""
+    return s.get("cost") or s.get("max_turns") or 40
 
 
 def run_yield(target, run):
@@ -205,7 +219,7 @@ def cmd_sync(args):
     first = not os.path.exists(sched_path(args.target))
     sched = read_json(sched_path(args.target), {"scenarios": {}, "runs_recorded": []})
     added = []
-    for sid in matrix_ids(args.scenarios, args.target):
+    for sid, s in matrix_data(args.scenarios, args.target).items():
         if sid not in sched["scenarios"]:
             sched["scenarios"][sid] = {
                 "state": "active" if first else "unexplored",
@@ -213,6 +227,10 @@ def cmd_sync(args):
                 "last_planned": 0, "since_regression": 0,
             }
             added.append(sid)
+        # covers tags (story 1.19): target-local vocabulary, refreshed from
+        # the matrix on every sync (the file is the source of truth), no
+        # normalization — visible in status/history.
+        sched["scenarios"][sid]["covers"] = list(s.get("covers") or [])
     write_json(sched_path(args.target), sched)
     out({"first_sync": first, "added": added,
          "total": len(sched["scenarios"])})
@@ -224,16 +242,47 @@ def cmd_plan(args):
     sched = read_json(sched_path(args.target), None)
     if sched is None:
         die("no scheduler state; run `sync --scenarios <file>` first")
-    known = set(matrix_ids(args.scenarios, args.target))
+    matrix = matrix_data(args.scenarios, args.target)
+    known = set(matrix)
     scen = {k: v for k, v in sched["scenarios"].items() if k in known}
     tick = len(sched["runs_recorded"]) + 1
 
-    # 1. Verify set: scenarios evidencing accepted (non-tombstone) findings —
-    #    replaying them verifies the fix by absence.
-    verify = set()
+    # 1. Verify set — CHEAPEST COVERING scenario per accepted finding
+    #    (spec-tanuki-scenario-lifecycle "Cheapest covering verify"; story
+    #    1.19). Candidates: scenarios whose covers tags include the
+    #    finding's surface tag, plus the originating scenarios; pick the
+    #    cheapest by scenario_cost. The originating scenario is the fallback
+    #    (no tag / no cheaper cover) and wins outright when the finding is
+    #    pinned (verify_pin). Deterministic arithmetic only; slot counts and
+    #    rotation are untouched — covers change WHICH scenario fills a
+    #    verify slot, never how many slots verify gets.
+    verify, verify_selection = set(), []
     for f in load_ledger(args.target)["findings"]:
-        if f.get("status") == "accepted" and not f.get("tombstone"):
-            verify.update(s for s in f.get("scenarios", []) if s in scen)
+        if f.get("status") != "accepted" or f.get("tombstone"):
+            continue
+        orig = [s for s in f.get("scenarios", []) if s in scen]
+        if not orig:
+            continue
+        orig_best = min(orig, key=lambda s: (scenario_cost(matrix[s]), s))
+        tag = f.get("surface")
+        if f.get("verify_pin"):
+            choice, reason = orig_best, "pinned to its originating scenario"
+        else:
+            covering = [sid for sid in scen
+                        if tag and tag in (matrix[sid].get("covers") or [])]
+            cands = set(covering) | set(orig)
+            choice = min(cands, key=lambda s: (scenario_cost(matrix[s]), s))
+            if choice in orig:
+                reason = ("originating scenario"
+                          + (f" (no cheaper cover for surface '{tag}')"
+                             if tag else " (no surface tag)"))
+            else:
+                reason = (f"cheapest covering scenario for surface '{tag}' "
+                          f"(cost {scenario_cost(matrix[choice])} vs "
+                          f"originating {scenario_cost(matrix[orig_best])})")
+        verify.add(choice)
+        verify_selection.append({"finding": f["id"], "scenario": choice,
+                                 "reason": reason})
     # 2. Exploration quota — the anti-Goodhart guard. Reserved BEFORE verify
     #    (spec "Verify / cap interaction"): a large verify backlog must never
     #    consume the whole cap and starve coverage exploration.
@@ -265,6 +314,11 @@ def cmd_plan(args):
     quota_met = (not unexplored) or any(s in seen for s in unexplored)
     record = {"run": args.run, "plan": plan, "quota_met": quota_met,
               "verify": sorted(verify & seen),
+              # Which finding each verify entry verifies and why that
+              # scenario was chosen (story 1.19) — selections whose scenario
+              # was deferred by the cap still appear (their entry names a
+              # scenario in verify_deferred).
+              "verify_selection": verify_selection,
               "verify_deferred": sorted(verify_deferred),
               "explore": [s for s in explore if s in seen],
               "due_regression": [s for s in due if s in seen],
@@ -622,6 +676,7 @@ def cmd_history(args):
         st = sched["scenarios"].get(sid, {})
         data = {"scenario": sid,
                 "state": st.get("state", "(not in scheduler)"),
+                "covers": st.get("covers", []),
                 "low_streak": st.get("low_streak", 0),
                 "runs_driven": len(executions.get(sid, [])),
                 "last_execution": (executions.get(sid) or [{}])[-1],

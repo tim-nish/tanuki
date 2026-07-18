@@ -402,6 +402,10 @@ def cmd_upsert(args, ledger):
                 f["last_seen_run"] = latest_run(evidence, f.get("last_seen_run"))
                 if args.note:
                     f.setdefault("notes", []).append(args.note)
+                if args.surface:
+                    f["surface"] = args.surface
+                if args.verify_pin:
+                    f["verify_pin"] = True
                 save(args.target, ledger)
                 # before->after so the Miner can report the run delta without
                 # a separate pre-mine snapshot (spec §2).
@@ -421,6 +425,10 @@ def cmd_upsert(args, ledger):
                "status": "open", "last_seen_run": latest_run(evidence)}
     if args.note:
         finding["notes"] = [args.note]
+    if args.surface:
+        finding["surface"] = args.surface
+    if args.verify_pin:
+        finding["verify_pin"] = True
     ledger["findings"].append(finding)
     save(args.target, ledger)
     # F22: a multi-pointer creation still starts at recurrence:1 (recurrence
@@ -1357,6 +1365,20 @@ def main():
                     help="existing finding id to bump (accumulate recurrence) "
                          "instead of creating a new one; omit to create")
     sp.add_argument("--note")
+    # Cheapest-covering-verify substrate (story 1.19 / spec-tanuki-scenario-
+    # lifecycle "Cheapest covering verify"): mining records the surface a
+    # finding touches; the scheduler matches it against scenarios' covers
+    # tags. --verify-pin forces the originating scenario when reproduction
+    # genuinely needs the full path.
+    sp.add_argument("--surface",
+                    help="surface tag this finding touches (matched against "
+                         "scenarios' covers: tags by the scheduler's "
+                         "cheapest-covering-verify selection); target-local "
+                         "vocabulary")
+    sp.add_argument("--verify-pin", action="store_true",
+                    help="pin verify-by-absence to the finding's ORIGINATING "
+                         "scenario — a cheaper covering scenario is never "
+                         "substituted for it")
     cfg = load_config()  # promote's default thresholds, named in --help (F68)
     sp = sub.add_parser(
         "promote",
