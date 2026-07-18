@@ -2436,12 +2436,19 @@ EMPTY_STATES = {
         expected=True,
         reason="no loop run has ever been initialized for this target — "
                "expected before the first `init` (init creates the run, its "
-               "worktree, and its state)",
+               "worktree, and its state). A loop you just launched is not "
+               "visible yet: target resolution, `doctor`, and preflight all "
+               "run before `init` and persist nothing (issue #102)",
         next="tanuki-loop --target {t} init --loop-repo <repo>"),
     "live:no-active-run": dict(
         expected=True,
         reason="no active loop — the latest run is closed; expected between "
-               "runs (`init` starts a new run)",
+               "runs (`init` starts a new run). If you just launched "
+               "`/tanuki-loop`, its new run is not visible yet: target "
+               "resolution, `doctor`, and preflight run before `init` and "
+               "persist nothing, so `view live` stays on the previous (closed) "
+               "run until `init` lands — which can take a few minutes when "
+               "doctor runs the baseline test_cmd (issue #102)",
         next="tanuki-loop --target {t} init --loop-repo <repo>"),
     # -- scheduler decisions (F47 / issue #66) --------------------------------
     "scheduler:never-synced-fresh": dict(
