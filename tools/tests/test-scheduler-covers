@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# spec-tanuki-scenario-lifecycle "Cheapest covering verify" / story 1.19:
+# scenarios declare covers: surface tags (persisted at sync, visible in
+# status/history); findings carry a surface tag (upsert --surface) and an
+# optional verify pin; plan fills each verify slot with the cheapest
+# covering scenario (explicit cost else max_turns), originating fallback,
+# pin wins — and the plan record explains every selection.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+sched="$here/tanuki-scheduler"
+ledger="$here/tanuki-ledger"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+jget() { python3 -c "import json,sys;print(json.load(sys.stdin)$1)"; }
+
+sc="$tmp/s.json"
+cat > "$sc" <<'EOF'
+{"scenarios":[
+  {"id":"e2e-review","charter":"c","prompt":"p","max_turns":160,
+   "covers":["review","draft"]},
+  {"id":"review-only","charter":"c","prompt":"p","max_turns":40,
+   "covers":["review"]},
+  {"id":"misc","charter":"c","prompt":"p","max_turns":30}
+]}
+EOF
+
+"$sched" --target cv sync --scenarios "$sc" >/dev/null
+"$sched" --target cv status | jget "['scenarios']['review-only']['covers']" | grep -q review \
+  || fail "sync must persist covers tags into scheduler state"
+pass "sync persists covers; status shows them"
+
+"$ledger" --target cv init >/dev/null
+# F1: surfaced in the expensive e2e scenario, tagged surface=review.
+"$ledger" --target cv upsert-finding --title "review pass bug" --kind gap \
+  --evidence "r1/e2e-review#1" --surface review >/dev/null
+"$ledger" --target cv set-status --id F1 --status accepted >/dev/null 2>&1
+# F2: no surface tag, surfaced in e2e — originating fallback.
+"$ledger" --target cv upsert-finding --title "untagged bug" --kind gap \
+  --evidence "r1/e2e-review#2" >/dev/null
+"$ledger" --target cv set-status --id F2 --status accepted >/dev/null 2>&1
+# F3: tagged review but pinned — originating must win.
+"$ledger" --target cv upsert-finding --title "pinned bug" --kind gap \
+  --evidence "r1/e2e-review#3" --surface review --verify-pin >/dev/null
+"$ledger" --target cv set-status --id F3 --status accepted >/dev/null 2>&1
+
+plan="$("$sched" --target cv plan --scenarios "$sc" --run p1)"
+sel="$(echo "$plan" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print(json.dumps({e['finding']: (e['scenario'], e['reason']) for e in d['verify_selection']}))")"
+
+echo "$sel" | grep -q '"F1": \["review-only"' \
+  || fail "F1 must verify via the cheapest covering scenario: $sel"
+echo "$sel" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+assert 'cheapest covering' in d['F1'][1], d['F1']
+assert d['F2'][0] == 'e2e-review' and 'no surface tag' in d['F2'][1], d['F2']
+assert d['F3'][0] == 'e2e-review' and 'pinned' in d['F3'][1], d['F3']
+" || fail "selection reasons wrong: $sel"
+echo "$plan" | jget "['verify']" | grep -q "review-only" \
+  || fail "verify set must contain the chosen cover"
+pass "plan: cheapest cover for tagged, originating for untagged, pin wins — reasons stated"
+
+# covers visible in history --scenario
+"$sched" --target cv history --scenario review-only --json 2>/dev/null \
+  | jget "['covers']" | grep -q review \
+  || fail "history --scenario must show covers"
+pass "history --scenario shows covers"
+
+echo "ALL PASS"
