@@ -205,7 +205,17 @@ def save(target, ledger):
 
 
 def cmd_init(args, ledger):
+    # F164: init on an existing slug used to print the same "ledger ready" as
+    # a fresh one, silently reusing another session's data (~/.tanuki is
+    # machine-wide, F94). State the reuse and its size; never a prompt.
+    existed = os.path.isfile(ledger_path(args.target))
     save(args.target, ledger)
+    if existed:
+        print(f"note: target '{args.target}' already exists — reusing its "
+              f"ledger ({len(ledger.get('events', {}))} event record(s), "
+              f"{len(ledger.get('findings', []))} finding(s)). If you "
+              f"expected a fresh target, pick an unused slug: ~/.tanuki/ is "
+              f"shared machine-wide.", file=sys.stderr)
     print(f"ledger ready: {ledger_path(args.target)}")
 
 
