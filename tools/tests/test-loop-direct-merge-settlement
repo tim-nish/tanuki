@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# Fixture for direct-merge (non-PR) gate settlement derivation (spec-tanuki-loop
+# "The direct-merge (non-PR) gate settles the same way", story 1.11). The
+# contract under test — status/dashboard DERIVE delivered/settlement from the
+# integration tip's reachability from the current base, symmetrically with the
+# PR path, and NEVER leave them null after a landed merge:
+#   - BEFORE the local merge (tip not reachable from base): settlement is
+#     `pending`, NOT null; delivered is null;
+#   - AFTER the merge lands (tip reachable from base): settlement is `landed`
+#     and delivered is populated from the local merge (integration-tip SHA,
+#     base SHA, merge commit) — read-only, derived, never declared;
+#   - base unreadable: settlement is `unknown`, never an optimistic default;
+#   - the gate=pr path is UNCHANGED — an undelivered pr-gate run stays null
+#     (no reachability shortcut into landed).
+# No forge (gh) is involved on the direct-merge path — settlement is sourced
+# from the base alone.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
+export TANUKI_ROOT="$root"
+L=("$here/tanuki-loop" --target t)
+jget() { python3 -c "import json,sys; d=json.load(sys.stdin); print(d$1)"; }
+
+# --- toy repo with a base branch ---------------------------------------------
+repo="$root/repo"; mkdir -p "$repo"
+git init -q "$repo"; git -C "$repo" config user.email a@b.c
+git -C "$repo" config user.name t
+echo x > "$repo/f.txt"; git -C "$repo" add -A; git -C "$repo" commit -qm init
+base="$(git -C "$repo" rev-parse --abbrev-ref HEAD)"
+
+# --- scenarios: default (merge) gate, no forge tooling required ---------------
+scen="$root/scen.json"
+cat > "$scen" <<JSON
+{"target": "t", "loop": {"test_cmd": "true", "iterations": 3,
+ "wall_time_s": 600, "token_budget": 1000, "attempt_cap": 2, "gate": "merge"}}
+JSON
+
+# --- init + one verified iteration -------------------------------------------
+wt="$("${L[@]}" init --loop-repo "$repo" --scenarios "$scen" \
+      | jget '["worktree"]')"
+integ="$(cat "$root/t/loop/$(cat "$root/t/loop/current")/state.json" \
+         | jget '["integration_branch"]')"
+"${L[@]}" iter-start >/dev/null
+echo work >> "$wt/f.txt"; git -C "$wt" commit -qam "loop work"
+"${L[@]}" test >/dev/null
+"${L[@]}" iter-verify >/dev/null
+"${L[@]}" finish --reason cap >/dev/null
+
+# --- (b) BEFORE the merge: settlement is pending, NOT null --------------------
+st="$("${L[@]}" status)"
+[ "$(echo "$st" | jget '["settlement"]["result"]')" = "pending" ] \
+  || fail "pre-merge settlement must be 'pending' on the direct-merge gate"
+[ "$(echo "$st" | jget '["settlement"]')" != "None" ] \
+  || fail "pre-merge settlement must NOT be null (a lost-delivery misread)"
+[ "$(echo "$st" | jget '["delivered"]')" = "None" ] \
+  || fail "delivered must be null until the merge lands"
+pass "pre-merge: settlement=pending (not null), delivered=null"
+
+# --- perform the direct merge integration -> base ----------------------------
+git -C "$repo" merge -q --no-ff -m "gate: merge $integ" "$integ"
+tip="$(git -C "$repo" rev-parse "$integ")"
+newbase="$(git -C "$repo" rev-parse "$base")"
+
+# --- (a) AFTER the merge lands: settlement=landed + populated delivered -------
+st="$("${L[@]}" status)"
+[ "$(echo "$st" | jget '["settlement"]["result"]')" = "landed" ] \
+  || fail "settlement must be 'landed' once the tip is reachable from the base"
+[ "$(echo "$st" | jget '["delivered"]["head_sha"]')" = "$tip" ] \
+  || fail "delivered.head_sha must be the integration tip SHA"
+[ "$(echo "$st" | jget '["delivered"]["base_sha"]')" = "$newbase" ] \
+  || fail "delivered.base_sha must be the current base SHA"
+[ -n "$(echo "$st" | jget '["delivered"]["merge_commit"]')" ] \
+  && [ "$(echo "$st" | jget '["delivered"]["merge_commit"]')" != "None" ] \
+  || fail "delivered.merge_commit must be the derivable merge node"
+[ "$(echo "$st" | jget '["lifecycle"]["settlement"]["result"]')" = "landed" ] \
+  || fail "the lifecycle block's offline settlement must agree: landed"
+pass "post-merge: settlement=landed, delivered populated from the local merge"
+
+# --- dashboard renders the derived settlement, not the local gate steps -------
+dash="$("${L[@]}" dashboard)"
+echo "$dash" | grep -q "DELIVERED: local merge" \
+  || fail "dashboard must show the derived local-merge delivery"
+echo "$dash" | grep -q "SETTLEMENT: landed" \
+  || fail "dashboard must show the derived settlement: landed"
+if echo "$dash" | grep -q "approve or reject the merge"; then
+  fail "a landed direct-merge run must not show the local morning-gate steps"
+fi
+pass "dashboard: landed direct-merge run shows settlement, no pending gate steps"
+
+# --- base unreadable -> unknown, never an optimistic default ------------------
+git -C "$repo" checkout -q --detach
+git -C "$repo" branch -D "$base" >/dev/null
+[ "$(("${L[@]}" status) | jget '["settlement"]["result"]')" = "unknown" ] \
+  || fail "an unreadable base must derive settlement=unknown, never landed"
+pass "base unreadable: settlement=unknown (never optimistic)"
+
+# --- gate=pr path is UNCHANGED: undelivered -> null (no reachability shortcut) -
+prrepo="$root/prrepo"; mkdir -p "$prrepo"
+git init -q "$prrepo"; git -C "$prrepo" config user.email a@b.c
+git -C "$prrepo" config user.name t
+echo x > "$prrepo/f.txt"; git -C "$prrepo" add -A
+git -C "$prrepo" commit -qm init
+prscen="$root/prscen.json"
+cat > "$prscen" <<JSON
+{"target": "p", "loop": {"test_cmd": "true", "iterations": 3,
+ "wall_time_s": 600, "token_budget": 1000, "attempt_cap": 2, "gate": "pr"}}
+JSON
+PL=("$here/tanuki-loop" --target p)
+"${PL[@]}" init --loop-repo "$prrepo" --scenarios "$prscen" >/dev/null
+"${PL[@]}" iter-start >/dev/null
+prwt="$(cat "$root/p/loop/$(cat "$root/p/loop/current")/state.json" \
+        | jget '["worktree"]')"
+echo work >> "$prwt/f.txt"; git -C "$prwt" commit -qam "loop work"
+"${PL[@]}" test >/dev/null
+"${PL[@]}" iter-verify >/dev/null
+"${PL[@]}" finish --reason cap >/dev/null
+# A pr-gate run that has NOT delivered (no gate-pr) stays null — the
+# direct-merge reachability derivation must not leak into the PR path (the full
+# pr flow is exercised by test-loop-gate-pr; this guards the branch here).
+[ "$(("${PL[@]}" status) | jget '["settlement"]')" = "None" ] \
+  || fail "an undelivered gate=pr run must keep settlement null (no regression)"
+pass "gate=pr unaffected: undelivered run stays null"
+
+echo "all direct-merge settlement fixtures passed"

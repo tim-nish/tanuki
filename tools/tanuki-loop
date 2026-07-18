@@ -775,6 +775,75 @@ def gh(repo, *args):
     return r.returncode, (text or "").strip()
 
 
+def _find_merge_commit(repo, tip, base_sha):
+    """The merge node that brought <tip> into base, if determinable: the commit
+    on base's ancestry whose parent list contains <tip>. Returns its SHA, or
+    None — a fast-forward merge leaves no merge node, which is not an error."""
+    rc, o = git(repo, "rev-list", "--ancestry-path", "--parents",
+                f"{tip}..{base_sha}")
+    if rc != 0:
+        return None
+    for line in o.splitlines():
+        parts = line.split()
+        if len(parts) > 1 and tip in parts[1:]:
+            return parts[0]
+    return None
+
+
+def _derive_merge_settlement(state):
+    """Settle a DIRECT-MERGE (non-PR) gate run — the loop writes no delivery
+    record on this path (it ends at the operator's local merge, not a forge
+    PR), so status/dashboard derive it read-only, SYMMETRICALLY with gate-pr
+    (spec-tanuki-loop "The direct-merge (non-PR) gate settles the same way").
+    The strict test is identical — the integration tip's reachability from the
+    current base — but sourced from the base alone, with no PR to consult:
+
+      integration tip reachable from the current base -> `landed`, with
+        `delivered` populated from the local merge (integration-tip SHA, base
+        SHA, and the merge commit when its node is determinable);
+      base readable but the tip not yet reachable (merge not run, or the base
+        moved past the tip) -> `pending` — never `null`;
+      base (or the integration tip) unreadable -> `unknown`, never an
+        optimistic default.
+
+    An integration branch that never diverged from its init base (no iteration
+    produced a commit) has nothing to settle as a delivery: its tip is
+    trivially reachable, but no merge landed, so this returns None (not
+    `landed`) — the same as a run that was never delivered. The story's
+    never-null guard is about a real merge that landed, not a work-free run.
+
+    Read-only: it computes, never mutates state."""
+    repo = state["loop_repo"]
+    base, integ = state["base"], state["integration_branch"]
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    rc_b, base_sha = git(repo, "rev-parse", base)
+    if rc_b != 0 or not base_sha:
+        return {"result": "unknown", "observed_at": now,
+                "detail": f"base '{base}' is unreadable — settlement cannot be "
+                          "derived; never assumed merged (direct-merge gate)"}
+    rc_t, tip = git(repo, "rev-parse", integ)
+    if rc_t != 0 or not tip:
+        return {"result": "unknown", "observed_at": now,
+                "detail": f"integration branch '{integ}' does not resolve — "
+                          "reachability cannot be proven; never assumed merged "
+                          "(direct-merge gate)"}
+    # No divergence from the init base ⇒ nothing was ever delivered; trivial
+    # reachability is not a landed merge (this is not the null the story guards).
+    if tip == state.get("base_sha"):
+        return None
+    if git(repo, "merge-base", "--is-ancestor", tip, base_sha)[0] == 0:
+        delivered = {"gate": "merge", "head_sha": tip, "base_sha": base_sha,
+                     "merge_commit": _find_merge_commit(repo, tip, base_sha)}
+        return {"result": "landed", "observed_at": now, "local_synced": True,
+                "delivered": delivered,
+                "detail": f"integration tip {tip[:12]} is reachable from local "
+                          f"'{base}' (direct-merge gate — local merge landed)"}
+    return {"result": "pending", "observed_at": now,
+            "detail": f"integration tip {tip[:12]} is not yet reachable from "
+                      f"local '{base}' — the merge has not run, or the base "
+                      "moved past the tip (direct-merge gate)"}
+
+
 def derive_settlement(state, save=True, offline=False):
     """Derive a delivered run's settlement from the forge and the current base
     (owner ruling 2026-07-17, delivery boundary): the loop's own record stops
@@ -802,6 +871,15 @@ def derive_settlement(state, save=True, offline=False):
     same never-optimistic fallback."""
     d = state.get("delivered") or state.get("gate_pr")
     if not d:
+        # No PR/delivery record. On the direct-merge (non-PR) gate the loop
+        # writes none by design — it ends at the operator's LOCAL merge, not a
+        # forge PR — so settlement is derived from the integration tip's
+        # reachability from the current base, the SAME strict test the PR path
+        # uses (spec-tanuki-loop "The direct-merge (non-PR) gate settles the
+        # same way"). A gate=pr run with no delivery yet stays None (undelivered
+        # — unchanged, no regression to the PR path).
+        if state.get("gate_mode", "merge") == "merge":
+            return _derive_merge_settlement(state)
         return None
     repo, base = state["loop_repo"], state["base"]
     now = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -2403,6 +2481,16 @@ def _health(state, driving, unmatched):
                     }.get(r, f"ATTENTION — delivered as PR #{d.get('pr')} "
                              "but settlement is unknown (forge unreachable, "
                              "no prior observation)")
+        # Direct-merge (non-PR) gate: the loop records no `delivered`, so the
+        # settlement is derived from the merge's reachability. Once it has
+        # LANDED, health is DONE — otherwise (pending/unknown) fall through to
+        # the morning-gate guidance below, which is still the operator's action
+        # (the morning gate IS the local merge on this path).
+        if state.get("gate_mode", "merge") == "merge":
+            r = (derive_settlement(state) or {}).get("result")
+            if r == "landed":
+                return ("DONE — direct merge landed (integration tip reachable "
+                        f"from the base){gate_note}")
         return {"gate-ratified": "DONE — ratified at the morning gate",
                 "converged": f"OK — converged; run the morning gate{gate_note}",
                 "cap": "ATTENTION — cap hit without convergence; run the "
@@ -2560,7 +2648,9 @@ def _delivery_phrase(state, lifecycle):
     d = lifecycle.get("delivered")
     if d:
         s = lifecycle.get("settlement") or {}
-        return (f"{s.get('result', 'unknown')} via PR #{d.get('pr')}"
+        via = (f"PR #{d.get('pr')}" if d.get("pr")
+               else "local merge (direct-merge gate)")
+        return (f"{s.get('result', 'unknown')} via {via}"
                 + (f" [last observed {s.get('observed_at')}]"
                    if s.get("stale") else ""))
     fin = state.get("finished") or {}
@@ -2862,6 +2952,18 @@ def cmd_dashboard(args):
         #    SETTLEMENT lines below (live-derived); this line renders the
         #    delivery phrase only when that block will not (e.g. a compat
         #    gate-ratified refinish, or a merge-gate ratification).
+        # Delivery + settlement, live-derived (the PR path records `delivered`
+        # at gate-pr; the direct-merge path derives it from the merge's
+        # reachability — both surface here). The DELIVERED/SETTLEMENT block
+        # replaces the local morning-gate steps only when the delivery is on
+        # the forge (a PR — the decision moved there) or a direct merge has
+        # already LANDED (no merge left to run); a direct-merge run still
+        # pending keeps the morning-gate merge steps below.
+        _deliv = lifecycle.get("delivered")
+        _settle = lifecycle.get("settlement") or {}
+        _is_pr = bool(_deliv and _deliv.get("pr"))
+        _settle_block = bool(_deliv and (_is_pr
+                                         or _settle.get("result") == "landed"))
         at_gate = False
         if state.get("finished"):
             reason = lifecycle["stop_reason"]
@@ -2871,7 +2973,7 @@ def cmd_dashboard(args):
             lines.append(f"  STOPPED — stop reason: {reason} "
                          f"(at {lifecycle['stopped_at']})")
             at_gate = state["finished"]["reason"] in ("converged", "cap")
-            if not (at_gate and state.get("delivered")):
+            if not (at_gate and _settle_block):
                 lines.append(
                     f"  delivery: {_delivery_phrase(state, lifecycle)}")
         elif state.get("last_breaker") and \
@@ -2903,14 +3005,21 @@ def cmd_dashboard(args):
         else:
             lines.append(f"  NEXT: iteration {n_done + 1} of {state['cap']} — "
                          "no action needed from you")
-        if at_gate and state.get("delivered"):
+        if at_gate and _settle_block:
             # Delivered runs (owner ruling 2026-07-17): the loop ended at the
-            # Draft PR; the decision lives on the forge, and the dashboard
-            # reports the derived settlement instead of the local gate steps.
+            # Draft PR (decision lives on the forge) or a direct merge that has
+            # already landed — the dashboard reports the DERIVED settlement
+            # instead of the local gate steps.
             at_gate = False
-            d = state["delivered"]
-            s = derive_settlement(state) or {}
-            lines.append(f"  DELIVERED: PR #{d.get('pr')} ({d.get('url')})")
+            d, s = _deliv, _settle
+            if _is_pr:
+                lines.append(f"  DELIVERED: PR #{d.get('pr')} ({d.get('url')})")
+            else:
+                mc = d.get("merge_commit")
+                lines.append(
+                    f"  DELIVERED: local merge — integration tip "
+                    f"{(d.get('head_sha') or '')[:12]} -> {state['base']}"
+                    + (f" (merge commit {mc[:12]})" if mc else ""))
             lines.append(f"  SETTLEMENT: {s.get('result', '?')} — "
                          f"{s.get('detail', '')}"
                          + (f" [last observed {s.get('observed_at')}]"
@@ -2996,11 +3105,17 @@ def run_lifecycle(state):
         reason, at = "breaker", lb.get("at")
     else:
         reason, at = None, None
+    settlement = derive_settlement(state, save=False, offline=True)
     return {"active": not fin, "breaker_open": breaker_open,
             "stop_reason": reason, "stopped_at": at,
             "execution_s": execution_seconds(state),
-            "delivered": state.get("delivered"),
-            "settlement": derive_settlement(state, save=False, offline=True)}
+            # The PR path records `delivered` at gate-pr; the direct-merge path
+            # writes none (it ends at a local merge), so its delivery record is
+            # derived read-only alongside its settlement — populated once the
+            # merge is reachable, symmetrically with the PR path.
+            "delivered": state.get("delivered")
+            or (settlement or {}).get("delivered"),
+            "settlement": settlement}
 
 
 def run_verdict(state):
@@ -3074,6 +3189,9 @@ def cmd_status(args):
         shown = ", ".join(swept[:8]) + (" …" if len(swept) > 8 else "")
         warning = (f"build artifacts committed to the integration branch "
                    f"({shown}) — gate-push will refuse until they are removed")
+    # Derived once: the top-level settlement AND (on the direct-merge gate) the
+    # delivery record it carries, so both fields agree on one derivation.
+    _status_settlement = derive_settlement(state)
     out({
         # Verdict leads: the condition is the question status exists to answer.
         "verdict": run_verdict(state),
@@ -3094,9 +3212,14 @@ def cmd_status(args):
         # Delivery + derived settlement (owner ruling 2026-07-17): the loop's
         # record ends at "delivered"; whether the PR landed is derived here,
         # live from the forge and the current base — never restated by a
-        # closing command. None for a run that was never delivered.
-        "delivered": state.get("delivered"),
-        "settlement": derive_settlement(state),
+        # closing command. The direct-merge (non-PR) gate writes no `delivered`
+        # record (it ends at a local merge), so `delivered` is derived from the
+        # merge's reachability alongside `settlement` — populated when landed,
+        # symmetrically with the PR path; a landed direct merge never shows
+        # `settlement: null`. None only for a run that was never delivered.
+        "delivered": state.get("delivered") or (_status_settlement or {}).get(
+            "delivered"),
+        "settlement": _status_settlement,
         # F107: iterations_done counted iterations that were still OPEN, so "2"
         # could mean two closed or one closed and one in flight — ambiguous
         # exactly where the morning gate skims it. Report closed only, with the
