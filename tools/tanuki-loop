@@ -1330,6 +1330,17 @@ def cmd_doctor(args):
     base, base_sha = resolve_base(repo, args.base)
     checks = []
 
+    def noop_test_cmd(cmd):
+        """True when test_cmd can never fail — a placeholder, not a gate
+        (#140/F125). Sanctioned placeholders stay accepted (ready is
+        unaffected); this only feeds the warning."""
+        parts = [p.strip() for p in re.split(r"&&|;|\|\|", cmd.strip())
+                 if p.strip()]
+        return bool(parts) and all(
+            p in ("true", ":", "exit 0") or p == "echo"
+            or p.startswith("echo ")
+            for p in parts)
+
     # 1. Required headless config — every ceiling an unattended run needs.
     #    The spec says "always ensure they're set (config or flag) for an
     #    unattended run"; init does not enforce that, doctor does.
@@ -1361,6 +1372,18 @@ def cmd_doctor(args):
                    "run would be unbounded (no cap/wall-time/token ceiling) with "
                    "no regression gate (F74)"),
     }
+    # #140/F125: ready:true could not be distinguished from "ready, but with
+    # zero real test coverage" — the only caveat lived in prose guidance. A
+    # configured no-op gets a non-fatal warning in the check detail AND as a
+    # top-level report field; the sanctioned-placeholder design stands
+    # (`ready` is unaffected).
+    noop_warning = None
+    if cfg["test_cmd"] is not None and noop_test_cmd(cfg["test_cmd"]):
+        noop_warning = (f"test_cmd looks like a no-op ({cfg['test_cmd']!r}) — "
+                        "this headless run would have NO regression gate; "
+                        "accepted by design (ready unaffected), but every "
+                        "iteration's test breaker is a rubber stamp")
+        loop_check["detail"] += " — WARNING: " + noop_warning
     if missing:
         loop_check["set_via_flag"] = {k: flag_for[k] for k in missing}
         loop_check["scenarios_loop_shape"] = {
@@ -1583,8 +1606,12 @@ def cmd_doctor(args):
                if not c["ok"] and c.get("derived_from")
                and c["derived_from"] in failed}
     roots = [c for c in failed if c not in derived]
+    # Always present, explicitly null when clean (the status convention,
+    # F102/F106): absence and "nothing to warn about" must not be
+    # indistinguishable (#140).
     report = {"phase": args.phase, "target": args.target, "base": base,
-              "base_sha": base_sha, "ready": not failed, "checks": checks}
+              "base_sha": base_sha, "ready": not failed,
+              "warning": noop_warning, "checks": checks}
     if failed:
         tail = ""
         if derived:

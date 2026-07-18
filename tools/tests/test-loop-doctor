@@ -62,6 +62,21 @@ echo "$docr" | jcheck policy-coverage | grep -q "no actionable findings" \
 [ "$(git -C "$repo" worktree list | wc -l)" = "1" ] || fail "baseline test leaked its throwaway worktree"
 pass "fully configured target: ready, baseline test passes, throwaway worktree removed"
 
+# --- no-op test_cmd: still ready, but warned at top level (#140/F125) -------
+echo "$docr" | jget '["warning"]' | grep -q None \
+  || fail "a real test_cmd must leave the top-level warning null"
+docw="$("${D[@]}" --scenarios "$tmp/scen.json" --test-cmd true)"
+echo "$docw" | jget '["ready"]' | grep -q True \
+  || fail "a sanctioned no-op test_cmd must keep ready:true"
+echo "$docw" | jget '["warning"]' | grep -q "NO regression gate" \
+  || fail "a no-op test_cmd must set the top-level warning"
+echo "$docw" | jcheck loop-config | grep -q "WARNING" \
+  || fail "the loop-config check detail must carry the no-op warning"
+docw2="$("${D[@]}" --scenarios "$tmp/scen.json" --test-cmd 'echo ok && true')"
+echo "$docw2" | jget '["warning"]' | grep -q "NO regression gate" \
+  || fail "an echo-only chain is a no-op and must warn"
+pass "no-op test_cmd: ready:true kept, top-level warning + check detail set"
+
 # --- CLI override, failing baseline: exit 3, the base-tip failure explained --
 rc=0; "${D[@]}" --scenarios "$tmp/scen.json" --test-cmd false >/tmp/doc2.json 2>&1 || rc=$?
 [ "$rc" = "3" ] || fail "failing baseline test_cmd must exit 3 (got $rc)"
