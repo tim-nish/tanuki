@@ -84,7 +84,13 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
                                  — settlement is derived, owner ruling
                                  2026-07-17) — machine-readable; also deletes
                                  merged integration branches for the target
-                                 (unmerged tips kept) — issue #6.
+                                 (unmerged tips kept) — issue #6. A branch still
+                                 checked out in its worktree is SKIPPED, not
+                                 deleted (a live worktree can't be removed): so
+                                 finishing before the loop worktree is removed
+                                 leaves the merged branch behind. The skip
+                                 reason names the exact `git worktree remove`
+                                 to run, then re-finish (F138).
                                  The FIRST computational close (converged/cap/
                                  aborted) is recorded as the run's STOP REASON
                                  and never overwritten (aborted is recorded as
@@ -129,11 +135,16 @@ Breakers — what actually trips each one, and where (every breaker prints
                              rolled-back iterations count toward the cap — a
                              rollback does not give the attempt back.
   wall-time exceeded         iter-start, when now - wall_start > wall_limit_s.
-  external modification      iter-start, when the worktree HEAD is not the
-                             head_expected the last iter-verify recorded (i.e.
-                             something committed outside the loop). Fires on the
-                             NEXT iter-start, not at the moment of the edit; clear
-                             it with `recover --restore|--adopt`, never `rollback`.
+  external modification      iter-start, when EITHER the worktree HEAD is not
+                             the head_expected the last iter-verify recorded
+                             (something committed outside the loop) OR the
+                             worktree is not clean at iteration start (stray
+                             uncommitted edits). Both are edits to the loop's
+                             OWN worktree; a commit on the base branch does NOT
+                             trip it (base is out of scope after init —
+                             spec-host-snapshot). Fires on the NEXT iter-start,
+                             not at the moment of the edit; clear it with
+                             `recover --restore|--adopt`, never `rollback`.
   sequencing violation       iter-start on an unclosed iteration, or record-cycle
                              with an iteration still open.
   test failure               test, when the configured test_cmd exits non-zero.
@@ -269,7 +280,8 @@ def breaker_hint(reason):
         # the generic "inspect the worktree" hint the other four-part failures
         # get. The iteration simply committed nothing.
         return ("this iteration produced no commit — stage the work and "
-                "commit it, or `rollback` if the iteration should be undone")
+                "commit it; or re-run `iter-verify --no-patch` if no change was "
+                "expected this iteration; or `rollback` to undo the iteration")
     if "integration invariant" in r:
         return ("the four-part integration check failed — the iteration is in an "
                 "inconsistent state; reset it with `tanuki-loop --target <t> "
@@ -372,6 +384,10 @@ def cleanup_merged_integration_branches(repo, base, target):
     # a live worktree can't be deleted, and a merged branch whose delete failed
     # is a different (and more alarming) situation than the routine former.
     skipped_reasons = {}
+    # `kept` used to carry no reason while `skipped` did, so a reader had to
+    # infer from the help that "kept" means unmerged (F143). State it, for the
+    # same "never opaque on-screen" reason skipped_reasons exists.
+    kept_reasons = {}
     for b in branches:
         if b in checked_out:
             skipped.append(b)                       # can't delete a live branch
@@ -389,8 +405,12 @@ def cleanup_merged_integration_branches(repo, base, target):
                 skipped_reasons[b] = "merged but 'git branch -D' failed"
         else:
             kept.append(b)                          # unmerged tip — never delete
+            kept_reasons[b] = ("tip not reachable from %s (unmerged) — kept "
+                               "deliberately; only a merged branch is deleted "
+                               "(reconcile or merge it, or `/repo-cleanup` after "
+                               "an attended decision)" % base)
     return {"deleted": deleted, "kept": kept, "skipped": skipped,
-            "skipped_reasons": skipped_reasons}
+            "skipped_reasons": skipped_reasons, "kept_reasons": kept_reasons}
 
 
 # --- unresolved: the reconcile pass's discovery + mechanical signals ---------
@@ -2957,7 +2977,13 @@ def run_verdict(state):
             s["hint"] = lb["hint"]
         return s
     done, cap = len(state["iterations"]), state["cap"]
-    openb = [i for i in state["iterations"] if i.get("end") is None]
+    # An iteration is open iff its phase is "started" — the SAME definition
+    # run_lifecycle's iterations_open uses (F149). Testing `end is None` instead
+    # disagreed after a recover --restore/rollback (which can leave an iteration
+    # with no `end` but a non-"started" phase), so the one-line summary read
+    # "iteration N open" while lifecycle.iterations_open on the same screen was 0
+    # — a direct self-contradiction of the kind F118 already guards elsewhere.
+    openb = [i for i in state["iterations"] if i.get("phase") == "started"]
     where = (f"iteration {openb[-1]['n']} open" if openb
              else f"{done}/{cap} iterations done")
     return {"state": "running", "reason": None,
@@ -3060,6 +3086,17 @@ def main():
     # hand-aligned table and argparse would otherwise reflow it to mush.
     p = argparse.ArgumentParser(
         description=__doc__,
+        # A concrete, copy-pasteable example so the --target-before-subcommand
+        # ordering (F40) and the required paths are shown, not only described in
+        # prose a reader has to reconstruct (F144).
+        epilog=(
+            "examples (note --target precedes the subcommand):\n"
+            "  tanuki-loop --target myrepo doctor --loop-repo ~/work/myrepo "
+            "--scenarios ~/.tanuki/scenarios/myrepo.scenarios.json\n"
+            "  tanuki-loop --target myrepo init --loop-repo ~/work/myrepo "
+            "--scenarios ~/.tanuki/scenarios/myrepo.scenarios.json --phase 1\n"
+            "  tanuki-loop --target myrepo iter-start\n"
+            "  tanuki-loop --target myrepo status"),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     # --target is a global option and must precede the subcommand, e.g.
     # `tanuki-loop --target foo iter-start` (F40); it is a namespace slug, not a

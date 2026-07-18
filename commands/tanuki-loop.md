@@ -287,10 +287,18 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
 2. **Merge `integration → main`** — a plain `git merge --no-ff
    <integration-branch>` on `main` (there is no `tanuki-loop merge` subcommand;
    this one gate step is a hand-run git operation).
+   **If the merge conflicts** — the base moved under the run and a hunk
+   overlaps — this hand-run step has no tool recovery, unlike the others: abort
+   with `git merge --abort` to return to a clean base, reconcile the divergence
+   (rebase or re-run the loop on the fresh base), or resolve the conflict by
+   hand and `git commit` the merge. Do **not** push a half-merged tree; the
+   later `gate-push` divergence guard is not a substitute for a clean merge
+   here (F152).
    **Check out the base branch first, and use its real name.** The merge runs
    in the operator's normal checkout and lands on whatever branch is currently
-   checked out — `git checkout <base>` before merging, or the batch lands
-   somewhere unintended. The base is **not** assumed to be `main`: take the
+   checked out — confirm where you are with `git branch --show-current`, then
+   `git checkout <base>` before merging, or the batch lands somewhere
+   unintended (F137). The base is **not** assumed to be `main`: take the
    actual name from `init`'s `base` / `base_upstream` output (it may be
    `master` or anything else); the `main` in these snippets is a placeholder
    (F100, F103).
@@ -335,14 +343,21 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
    *(Skipped along with step 5 when no tracker is configured.)*
 7. Remove the loop worktree (`git worktree remove` — if it refuses with a
    modified-file error naming regenerable output, see the note at the end of
-   this step). **No closing command follows** (owner ruling 2026-07-17): the
+   this step). **This worktree removal is the terminal action of the attended
+   gate — once the merge is pushed (step 4) and the worktree is gone, you are
+   done; do not reach for a closing command (F136).** **No closing command
+   follows** (owner ruling 2026-07-17): the
    merge's reachability from the base *is* the settlement, and the surfaces
    that need it derive it — `status` reports it, the next `init`'s
    merged-branch sweep deletes the integration branch (tip reachable from the
    base; an unmerged tip is never deleted), and `/repo-cleanup` owns any
    earlier branch/worktree removal. `finish --reason gate-ratified` remains
    accepted for compatibility only — nothing in this workflow invokes it, and
-   invoked anyway it refuses unless the delivery verifiably landed.
+   invoked anyway it refuses unless the delivery verifiably landed. **"Not
+   required" is not "unsafe": once the merge has landed, running `finish` is
+   harmless — it simply deletes the merged integration branch immediately
+   instead of leaving it for the next `init` sweep, and returns `ok`. Optional,
+   not forbidden; you lose nothing by stopping at worktree removal (F151).**
    **What a repeated `finish` reports** (F108): it echoes `previously_finished`
    with the earlier close's reason and timestamp rather than overwriting it
    silently, so a double close is visible and deliberate.
