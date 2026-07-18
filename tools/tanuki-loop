@@ -1856,6 +1856,12 @@ def cmd_recover(args):
         rc, preview = git(wt, "clean", "-nd")
         removed = [ln[len("Would remove "):] for ln in preview.splitlines()
                    if ln.startswith("Would remove ")]
+        # F168: `discarded` names external COMMITS only, but reset --hard also
+        # throws away uncommitted tracked edits — list those separately or a
+        # dirty-tree restore reads as a no-op ("discarded": []).
+        dirty = [ln[3:] for ln in
+                 git(wt, "status", "--porcelain")[1].splitlines()
+                 if ln and not ln.startswith("??")]
         discarded = []
         if head and git(wt, "merge-base", "--is-ancestor", expected, head)[0] == 0:
             discarded = git(wt, "rev-list", "--oneline",
@@ -1867,10 +1873,13 @@ def cmd_recover(args):
                            f"tree at {expected}")
         mode = "restore"
         note = (f"worktree reset to {expected[:12]}; discarded external "
-                f"commits: {discarded or 'none'}; removed untracked: "
-                f"{removed or 'none'} (reflog-recoverable)")
+                f"commits: {discarded or 'none'}; discarded uncommitted "
+                f"edits: {dirty or 'none'}; removed untracked: "
+                f"{removed or 'none'} (commits reflog-recoverable; "
+                f"uncommitted edits are not)")
         result = {"ok": True, "mode": mode, "head_expected": expected,
-                  "discarded": discarded, "removed": removed}
+                  "discarded": discarded,
+                  "discarded_uncommitted_edits": dirty, "removed": removed}
     else:  # --adopt
         # Re-baseline around the external change: the human accepts the
         # current worktree HEAD as the loop's expected state. The adopted
@@ -2419,7 +2428,18 @@ def cmd_finish(args):
         warning = ("branch cleanup incomplete — skipped: "
                    + ", ".join(f"{b} ({r})" for b, r in
                                cleaned["skipped_reasons"].items()))
-    payload = {"ok": True, "reason": args.reason, "warning": warning,
+    # F170: after a second finish, `reason` is just THIS call's argument while
+    # `previously_finished.reason` is the earlier call's — neither is labeled
+    # authoritative. The run's computational stop reason is state["stop"]
+    # (first close wins, never overwritten); echo it so downstream consumers
+    # have one field to read.
+    payload = {"ok": True, "reason": args.reason,
+               "stop_reason": (state.get("stop") or {}).get("reason"),
+               "stop_reason_note": ("stop_reason is the run's authoritative "
+                                    "computational close (first finish wins); "
+                                    "'reason' is only this invocation's "
+                                    "argument"),
+               "warning": warning,
                "branch_cleanup": cleaned,
                "host_drift": host_drift,
                # The morning gate is told to present these three; point at them
