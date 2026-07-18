@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# spec-tanuki-loop "Concurrent drives within one iteration" / story 1.21:
+# drive_concurrency (loop block, CLI override) runs up to N planned scenarios
+# in parallel, one disposable workspace each; per-scenario progress entries
+# live under `running` (atomic writes, no corruption); a failing scenario is
+# recorded per-scenario without aborting siblings; the manifest is written
+# once after all drives (plan order preserved); serial (default) output keeps
+# today's shape with current/stage mirroring the single in-flight entry.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+drive="$here/tanuki-drive"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+
+# Stub claude: sleeps briefly (so drives genuinely overlap), then emits a
+# minimal transcript. A scenario whose prompt contains BOOM exits 1.
+mkdir -p "$tmp/bin"
+cat > "$tmp/bin/claude" <<'EOF'
+#!/bin/sh
+sleep 1
+if echo "$@" | grep -q BOOM; then
+  echo "boom" >&2
+  exit 1
+fi
+cat <<'JSON'
+{"type":"assistant","message":{"content":[{"type":"text","text":"FRICTION LOG: none"}]}}
+{"type":"result","subtype":"success","num_turns":1,"duration_ms":10,"total_cost_usd":0.001,"is_error":false,"result":"done"}
+JSON
+EOF
+chmod +x "$tmp/bin/claude"
+export PATH="$tmp/bin:$PATH"
+
+for r in plugin host; do
+  git init -q "$tmp/$r" && git -C "$tmp/$r" config user.email t@e && git -C "$tmp/$r" config user.name t
+  git -C "$tmp/$r" checkout -qb main && echo x > "$tmp/$r/x" && git -C "$tmp/$r" add -A && git -C "$tmp/$r" commit -qm base
+done
+
+cat > "$tmp/scenarios.json" <<'EOF'
+{"loop": {"drive_concurrency": 3},
+ "scenarios": [
+  {"id": "s-a", "charter": "c", "prompt": "p", "max_turns": 3},
+  {"id": "s-b", "charter": "c", "prompt": "p", "max_turns": 3},
+  {"id": "s-c", "charter": "c", "prompt": "p", "max_turns": 3}
+]}
+EOF
+
+# --- concurrent drive: all ok, wall-clock shows overlap, plan order kept -----
+t0=$(date +%s)
+"$drive" --target t --plugin "$tmp/plugin" --host "$tmp/host" \
+  --scenarios "$tmp/scenarios.json" --run r1 --timeout 60 >/dev/null \
+  || fail "concurrent drive exited non-zero"
+t1=$(date +%s)
+[ $((t1 - t0)) -lt 30 ] || fail "3 one-second scenarios took $((t1-t0))s — no overlap?"
+python3 - "$TANUKI_ROOT/t/events/r1/manifest.json" <<'PY' || fail "manifest wrong"
+import json, sys
+m = json.load(open(sys.argv[1]))
+assert [r["scenario"] for r in m["results"]] == ["s-a", "s-b", "s-c"], "plan order lost"
+assert all(r["status"] == "ok" for r in m["results"])
+PY
+python3 - "$TANUKI_ROOT/t/events/r1/progress.json" <<'PY' || fail "final progress wrong"
+import json, sys
+p = json.load(open(sys.argv[1]))
+assert p["total"] == 3 and p["done"] == 3 and p["stage"] == "complete", p
+assert p["running"] == [], p["running"]
+PY
+pass "drive_concurrency=3: parallel drives, plan-ordered manifest, clean final progress"
+
+# --- failure isolation under concurrency -------------------------------------
+cat > "$tmp/scen-fail.json" <<'EOF'
+{"loop": {"drive_concurrency": 2},
+ "scenarios": [
+  {"id": "s-ok", "charter": "c", "prompt": "p", "max_turns": 3},
+  {"id": "s-bad", "charter": "c", "prompt": "BOOM", "max_turns": 3}
+]}
+EOF
+rc=0; "$drive" --target t --plugin "$tmp/plugin" --host "$tmp/host" \
+  --scenarios "$tmp/scen-fail.json" --run r2 --timeout 60 >/dev/null 2>&1 || rc=$?
+[ "$rc" = "1" ] || fail "a failed scenario must exit 1 (got $rc)"
+python3 - "$TANUKI_ROOT/t/events/r2/manifest.json" <<'PY' || fail "failure isolation wrong"
+import json, sys
+m = json.load(open(sys.argv[1]))
+by = {r["scenario"]: r["status"] for r in m["results"]}
+assert by["s-ok"] == "ok", by
+assert by["s-bad"] != "ok", by
+PY
+pass "a failing scenario is recorded per-scenario; its sibling still drives"
+
+# --- serial default: today's shape, no running entries left ------------------
+python3 - "$tmp/scenarios.json" "$tmp/serial.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d.pop("loop")
+json.dump(d, open(sys.argv[2], "w"))
+PY
+"$drive" --target t --plugin "$tmp/plugin" --host "$tmp/host" \
+  --scenarios "$tmp/serial.json" --run r3 --timeout 60 >/dev/null \
+  || fail "serial drive exited non-zero"
+python3 - "$TANUKI_ROOT/t/events/r3/progress.json" <<'PY' || fail "serial progress shape wrong"
+import json, sys
+p = json.load(open(sys.argv[1]))
+assert p["total"] == 3 and p["done"] == 3 and p["stage"] == "complete", p
+assert [r["scenario"] for r in p["results"]] == ["s-a", "s-b", "s-c"]
+assert p["running"] == []
+PY
+pass "serial default keeps today's totals/results shape (running empty)"
+
+# --- CLI override wins over the loop block -----------------------------------
+t0=$(date +%s)
+"$drive" --target t --plugin "$tmp/plugin" --host "$tmp/host" \
+  --scenarios "$tmp/scenarios.json" --run r4 --timeout 60 \
+  --drive-concurrency 1 >/dev/null || fail "override drive failed"
+t1=$(date +%s)
+[ $((t1 - t0)) -ge 3 ] || fail "forced serial finished in $((t1-t0))s — override ignored?"
+pass "--drive-concurrency 1 overrides the loop block (config < CLI)"
+
+echo "ALL PASS"

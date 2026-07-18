@@ -11,7 +11,7 @@ Usage:
   tanuki-drive --target <slug> --plugin <repo> [--plugin-ref <ref>] [--host <repo>] \
                --scenarios <config.json> --run <run-id> \
                [--only s1,s2] [--model <model>] [--max-turns N] [--timeout SECS] \
-               [--estimate] [--allow-extra]
+               [--drive-concurrency N] [--estimate] [--allow-extra]
 
 Scenario config (JSON):
   {"defaults": {<config overrides>}?,
@@ -50,18 +50,26 @@ Raw stream:  ~/.tanuki/<target>/events/<run>/<scenario>.raw.jsonl
 Manifest:    ~/.tanuki/<target>/events/<run>/manifest.json
 Progress:    ~/.tanuki/<target>/events/<run>/progress.json — live status
              (total/done, current scenario + stage, elapsed, per-scenario
-             results), atomically rewritten at every stage transition and
+             results, and a `running` list with one entry per in-flight
+             scenario), atomically rewritten at every stage transition and
              ~20s liveness tick, so an orchestrating session can relay real
-             progress while the drive runs in the background.
+             progress while the drive runs in the background. With
+             drive_concurrency > 1 (scenarios "loop" block, or
+             --drive-concurrency) scenarios drive in parallel and `running`
+             holds several entries; at 1 the top-level current/stage mirror
+             the single entry — the serial view is the N=1 case of the
+             aggregate (spec-tanuki-loop "Concurrent drives").
 Exit: 0 = all scenarios drove to completion (findings may still be plentiful),
       1 = one or more scenarios failed to execute, 2 = usage error.
 """
 
 import argparse
+import concurrent.futures
 import json
 import os
 import subprocess
 import sys
+import threading
 import time
 
 TANUKI_ROOT = os.environ.get("TANUKI_ROOT", os.path.expanduser("~/.tanuki"))
@@ -488,6 +496,54 @@ def save_progress(run_dir, prog):
     os.replace(tmp, os.path.join(run_dir, "progress.json"))
 
 
+# Concurrent drives (spec-tanuki-loop "Concurrent drives within one
+# iteration"; story 1.21): progress is one shared dict, so every mutation
+# goes through these lock-guarded helpers. `running` holds a per-scenario
+# entry {scenario, stage, ...}; the top-level current/stage mirror the single
+# in-flight entry, so at drive_concurrency=1 the serial view is the N=1 case
+# of the aggregate, not a second format.
+_PROG_LOCK = threading.Lock()
+
+
+def prog_stage(prog, run_dir, sid, name, **extra):
+    with _PROG_LOCK:
+        entry = next((e for e in prog["running"] if e["scenario"] == sid),
+                     None)
+        if entry is None:
+            entry = {"scenario": sid}
+            prog["running"].append(entry)
+        entry.update({"stage": name, **extra})
+        if len(prog["running"]) == 1:
+            prog.update({"current": sid, "stage": name, **extra})
+        else:
+            prog.update({"current": None,
+                         "stage": f"{len(prog['running'])} scenario(s) "
+                                  "running"})
+        save_progress(run_dir, prog)
+
+
+def prog_done(prog, run_dir, r):
+    with _PROG_LOCK:
+        prog["running"] = [e for e in prog["running"]
+                           if e["scenario"] != r["scenario"]]
+        prog["done"] += 1
+        prog["results"].append({"scenario": r["scenario"],
+                                "status": r["status"],
+                                "events": r["events"],
+                                "duration_s": r.get("duration_s")})
+        if len(prog["running"]) == 1:
+            e = prog["running"][0]
+            prog.update({"current": e["scenario"],
+                         "stage": e.get("stage", "?")})
+        else:
+            prog.update({"current": None,
+                         "stage": ("between scenarios"
+                                   if not prog["running"] else
+                                   f"{len(prog['running'])} scenario(s) "
+                                   "running")})
+        save_progress(run_dir, prog)
+
+
 def result_stats(events):
     """(cost_usd, num_turns) from the run's result event. cost_usd is kept as
     manifest data for estimate history; user-facing output shows turns/time."""
@@ -508,8 +564,7 @@ def drive_scenario(args, scenario, run_dir, cfg, prog=None):
 
     def stage(name, **extra):
         if prog is not None:
-            prog.update({"current": sid, "stage": name, **extra})
-            save_progress(run_dir, prog)
+            prog_stage(prog, run_dir, sid, name, **extra)
 
     # Host-source guard (spec-host-snapshot), pre-check: `host_setup` runs
     # shell=True and could reach the clone SOURCE (the live host, or a loop
@@ -779,6 +834,11 @@ def main():
     p.add_argument("--model", default=None)
     p.add_argument("--max-turns", type=int, default=None)
     p.add_argument("--timeout", type=int, default=None)
+    p.add_argument("--drive-concurrency", type=int, default=None,
+                   help="run up to N planned scenarios in parallel, one "
+                        "disposable workspace each (default: the scenarios "
+                        "loop block's drive_concurrency, else 1 = serial; "
+                        "story 1.21)")
     p.add_argument("--estimate", action="store_true")
     p.add_argument("--allow-extra", action="store_true")
     args = p.parse_args()
@@ -868,27 +928,40 @@ def main():
     os.makedirs(run_dir, exist_ok=True)
 
     prog = {"run": args.run, "total": len(scenarios), "done": 0,
-            "current": None, "stage": "starting", "results": []}
+            "current": None, "stage": "starting", "results": [],
+            "running": []}
     save_progress(run_dir, prog)
 
-    results = []
-    for s in scenarios:
+    # Drive concurrency (spec-tanuki-loop "Concurrent drives within one
+    # iteration"; story 1.21): default 1 is exactly the serial behavior; N>1
+    # drives up to N planned scenarios in parallel, one disposable workspace
+    # each (the per-scenario ws path already isolates them). A failing
+    # scenario is recorded per-scenario and never aborts its siblings; the
+    # manifest is written once, after every drive finishes (the mining
+    # barrier). Resource use is explicit: config < CLI.
+    conc = (args.drive_concurrency
+            if args.drive_concurrency is not None
+            else int((scenario_file.get("loop") or {})
+                     .get("drive_concurrency") or 1))
+
+    def one(s):
         print(f"driving {s['id']} …", flush=True)
         try:
-            results.append(drive_scenario(args, s, run_dir, cfg, prog))
+            r = drive_scenario(args, s, run_dir, cfg, prog)
         except (RuntimeError, OSError) as e:
-            results.append({"scenario": s["id"], "status": f"setup failed: {e}",
-                            "events": 0})
-        r = results[-1]
+            r = {"scenario": s["id"], "status": f"setup failed: {e}",
+                 "events": 0}
         print(f"  {r['status']}  ({r['events']} events, "
               f"{r.get('num_turns') or '?'} turns, "
               f"{int(r.get('duration_s') or 0)}s)", flush=True)
-        prog["done"] += 1
-        prog["results"].append({"scenario": r["scenario"], "status": r["status"],
-                                "events": r["events"],
-                                "duration_s": r.get("duration_s")})
-        prog.update({"current": None, "stage": "between scenarios"})
-        save_progress(run_dir, prog)
+        prog_done(prog, run_dir, r)
+        return r
+
+    if conc <= 1:
+        results = [one(s) for s in scenarios]
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=conc) as ex:
+            results = list(ex.map(one, scenarios))   # manifest keeps plan order
 
     manifest = {"run": args.run, "target": args.target,
                 "completed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
