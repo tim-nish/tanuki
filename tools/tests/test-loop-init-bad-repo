@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Issue #119: when `init --loop-repo` doesn't resolve to a git root, the error
+# must (a) echo the ABSOLUTE resolved path so a relative-resolution mistake is
+# visible, and (b) if cwd is inside a loop-managed worktree (a `.tanuki-loop-*`
+# path segment), say so and point back at the real repo. Read-only detection.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+loop="$here/tanuki-loop"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+
+L=("$loop" --target t)
+
+# --- (a) a relative --loop-repo that isn't a git root echoes the ABSOLUTE path
+mkdir -p "$tmp/plain/notarepo"
+rc=0
+( cd "$tmp/plain" && "${L[@]}" init --loop-repo notarepo --cap 1 --allow-stale-base ) \
+  >"$tmp/out1.txt" 2>&1 || rc=$?
+[ "$rc" = "2" ] || fail "bad --loop-repo must be a usage error (exit 2), got $rc: $(cat "$tmp/out1.txt")"
+grep -q "is not a git repo" "$tmp/out1.txt" || fail "missing the not-a-git-repo error: $(cat "$tmp/out1.txt")"
+grep -qF "$tmp/plain/notarepo" "$tmp/out1.txt" \
+  || fail "error must include the ABSOLUTE resolved path: $(cat "$tmp/out1.txt")"
+[ ! -e "$TANUKI_ROOT/t/loop/current" ] || fail "failed init must not create run state"
+pass "(a) bad --loop-repo error echoes the absolute resolved path"
+
+# --- (b) cwd inside a .tanuki-loop-* worktree gets the clearer signal
+wt="$tmp/.tanuki-loop-t-20200101-000000"
+git init -q "$wt" && git -C "$wt" config user.email t@e && git -C "$wt" config user.name t
+git -C "$wt" checkout -qb main && echo v0 > "$wt/f" && git -C "$wt" add -A \
+  && git -C "$wt" commit -qm base
+# From inside the loop worktree, a relative --loop-repo resolves into it.
+rc=0
+( cd "$wt" && "${L[@]}" init --loop-repo toy-repo --cap 1 --allow-stale-base ) \
+  >"$tmp/out2.txt" 2>&1 || rc=$?
+[ "$rc" = "2" ] || fail "expected usage error from inside a loop worktree, got $rc: $(cat "$tmp/out2.txt")"
+grep -qF "$wt/toy-repo" "$tmp/out2.txt" \
+  || fail "error must show the nested absolute path: $(cat "$tmp/out2.txt")"
+grep -q "loop worktree" "$tmp/out2.txt" \
+  || fail "error must flag that cwd is inside a loop worktree: $(cat "$tmp/out2.txt")"
+grep -q ".tanuki-loop-t-20200101-000000" "$tmp/out2.txt" \
+  || fail "error should name the offending worktree segment: $(cat "$tmp/out2.txt")"
+pass "(b) cwd inside a .tanuki-loop-* worktree gets the clearer signal"
+
+echo "all checks passed"
