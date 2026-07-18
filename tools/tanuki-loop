@@ -2932,7 +2932,12 @@ def run_verdict(state):
             v["summary"] += f" · delivered: PR #{d.get('pr')}"
         return v
     lb = state.get("last_breaker")
-    if lb:
+    # F118: a RECOVERED breaker is no longer a stop — recover --restore/--adopt
+    # (and the successful iter-start that follows) resumed the run. Honor the
+    # `recovered` flag exactly as run_lifecycle's breaker_open does, or the
+    # verdict reads "stopped" while lifecycle.active is true — a direct
+    # self-contradiction on one status screen.
+    if lb and not lb.get("recovered"):
         s = {"state": "stopped", "reason": lb.get("reason"), "at": lb.get("at"),
              "summary": f"stopped: {lb.get('reason')}"}
         if lb.get("hint"):
