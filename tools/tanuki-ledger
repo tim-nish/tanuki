@@ -56,14 +56,15 @@ Ledger growth policy (docs/tanuki-spec.md "Ledger growth policy").
      one-line tombstones (id, resolution, count): kept so nothing resurfaces
      as new on dedupe, but stripped of per-run detail (which lives in
      raw.jsonl).
-     PREREQUISITE (F75): "unseen for N runs" counts runs that RE-DROVE the
-     finding's scenario — a run directory with a manifest.json, as written by
-     `tanuki-drive`. Plain `ingest` of hand-written events never creates one,
-     so on an ingest-only ledger `compact` reports "nothing to compact"
-     indefinitely and this invariant never fires. Note that `status`'s
-     "runs: N" counter is NOT that number (it also counts runs merely named
-     inside ingested records), so a climbing "runs: N" is not evidence that
-     compaction can advance (F65).
+     "unseen for N runs" counts runs recorded under events/<run>/ with a
+     manifest.json. For a REAL scenario the run must have re-driven it
+     (driven-and-absent). For an ingest/no-scenario finding the elapsed-run
+     fallback counts any later run. Story 1.9 / #106: `ingest` and
+     `ingest-note` now write a minimal manual manifest (results: []), so a
+     hand-ingested ledger advances the counter too — earlier it wrote no run
+     directory and compaction could never fire on hand-written events (F65).
+     A manual run drives no scenario, so it advances only the elapsed-run
+     fallback, never false driven-absence for a real scenario.
 """
 
 import argparse
@@ -236,6 +237,7 @@ def cmd_ingest(args, ledger):
     occurrence count, capped at COLLAPSE_LIST_CAP lines."""
     new, dup = 0, 0
     collapsed = {}  # fingerprint -> event dict (identity listed once)
+    runs_seen = set()  # story 1.9 / #106: give each ingested run a manifest
     for path in args.files:
         with open(path, encoding="utf-8") as f:
             for line in f:
@@ -243,6 +245,8 @@ def cmd_ingest(args, ledger):
                 if not line:
                     continue
                 e = json.loads(line)
+                if e.get("run"):
+                    runs_seen.add(e["run"])
                 if ingest_event(ledger, e) == "new":
                     new += 1
                 else:
@@ -250,6 +254,12 @@ def cmd_ingest(args, ledger):
                     fp = event_fingerprint(e)
                     collapsed.setdefault(fp, ledger["events"][fp])
     save(args.target, ledger)
+    # Story 1.9 / #106: a plain `ingest` wrote no run directory, so all_run_ids
+    # never counted hand-ingested runs and compact's verify-by-absence fallback
+    # could not advance across manual runs. Give each ingested run a minimal
+    # manual manifest (skips any run that already has a driven one).
+    for run in sorted(runs_seen):
+        write_manual_manifest(args.target, run)
     print(f"ingested: {new} new event(s), {dup} exact duplicate(s) collapsed")
     for rec in list(collapsed.values())[:COLLAPSE_LIST_CAP]:
         detail = (rec.get("detail") or "")
@@ -289,6 +299,8 @@ def cmd_ingest_note(args, ledger):
         f.write(json.dumps(e, ensure_ascii=False) + "\n")
     status = ingest_event(ledger, e)
     save(args.target, ledger)
+    # Story 1.9 / #106: manifest the manual run so all_run_ids/compact see it.
+    write_manual_manifest(args.target, run)
     # Emit where the event landed so the command can run extraction + dedupe on
     # this run dir immediately and report the delta.
     print(json.dumps({"run": run, "events_file": events_file,
@@ -660,6 +672,31 @@ def cmd_consolidate(args, ledger):
                      indent=2, ensure_ascii=False))
 
 
+def write_manual_manifest(target, run):
+    """Ensure a hand-ingested run has a run manifest (story 1.9 / #106).
+
+    `all_run_ids` and `driven_scenarios_by_run` read `events/<run>/` and its
+    `manifest.json`; a plain `ingest` used to write neither, so hand-ingested
+    runs were invisible and `compact`'s verify-by-absence could never advance —
+    the elapsed-run fallback the spec promises ("a finding with no recorded
+    scenarios falls back to elapsed-run counting", spec-tanuki-scenario-lifecycle
+    "Driven-absence compaction") was unreachable. A manual run drives no
+    scenarios, so `results` is empty: it advances only the elapsed-run fallback
+    for ingest/no-scenario findings, never false driven-absence for a real
+    scenario. Idempotent and non-destructive — an existing (driven) manifest is
+    never overwritten."""
+    run_dir = os.path.join(TANUKI_ROOT, target, "events", run)
+    mpath = os.path.join(run_dir, "manifest.json")
+    if os.path.exists(mpath):
+        return
+    os.makedirs(run_dir, exist_ok=True)
+    manifest = {"run": run, "target": target,
+                "completed_at": date.today().isoformat(),
+                "source": "manual-ingest", "results": []}
+    with open(mpath, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+
+
 def all_run_ids(target):
     """Every run id under events/, sorted chronologically (by run_key —
     manual-<date> ingest runs interleave with dated driven runs)."""
@@ -776,9 +813,15 @@ def cmd_compact(args, ledger):
               f"intentionally dropped (bounded growth), id/title/resolution "
               f"kept so they never resurface")
     else:
-        print(f"nothing to compact (threshold: unseen for >= {n} run(s)); "
-              f"only re-DRIVEN runs advance a finding's unseen counter, so a "
-              f"hand-written / ingest-only ledger never reaches this threshold")
+        # Story 1.9 / #106: manual ingests now write a run manifest, so a
+        # hand-ingested ledger DOES advance the unseen counter — the message no
+        # longer claims it never can. A finding is simply not yet unseen for the
+        # threshold: its scenario must have been driven-and-absent (real
+        # scenarios) or the run count must elapse (ingest/no-scenario findings).
+        print(f"nothing to compact (threshold: unseen for >= {n} run(s)); an "
+              f"accepted finding tombstones once its scenario was driven-and-"
+              f"absent that many times, or — for ingest/no-scenario findings — "
+              f"once that many later runs (driven or manual) have elapsed")
 
 
 def cmd_scenario_yield(args, ledger):

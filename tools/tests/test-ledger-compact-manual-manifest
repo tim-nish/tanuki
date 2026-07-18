@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Story 1.9 / #106: hand-ingested ledgers can compact.
+#   - `ingest` and `ingest-note` write a minimal manual run manifest, so
+#     all_run_ids/compact see the run;
+#   - an accepted ingest/no-scenario finding tombstones once enough later
+#     manual runs have elapsed (the elapsed-run fallback now advances);
+#   - a manual manifest carries no driven scenarios (results: []), so it never
+#     manufactures false driven-absence;
+#   - an existing (driven) manifest is never overwritten.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
+export TANUKI_ROOT="$root"
+LG=("$here/tanuki-ledger" --target demo)
+
+"${LG[@]}" init >/dev/null
+
+# --- ingest writes a run manifest --------------------------------------------
+printf '{"run":"manual-20260101","scenario":"ingest","seq":1,"type":"note","detail":"boom"}\n' \
+  > "$root/r1.jsonl"
+"${LG[@]}" ingest "$root/r1.jsonl" >/dev/null
+[ -f "$root/demo/events/manual-20260101/manifest.json" ] \
+  || fail "ingest did not write a run manifest"
+grep -q '"source": "manual-ingest"' "$root/demo/events/manual-20260101/manifest.json" \
+  || fail "manual manifest missing source marker"
+grep -q '"results": \[\]' "$root/demo/events/manual-20260101/manifest.json" \
+  || fail "manual manifest should have empty results (no driven scenarios)"
+pass "ingest writes a minimal manual manifest"
+
+# --- ingest-note also writes a manifest ---------------------------------------
+"${LG[@]}" ingest-note --text "a manual observation" >/dev/null
+noteday="manual-$(date +%Y%m%d)"
+[ -f "$root/demo/events/$noteday/manifest.json" ] \
+  || fail "ingest-note did not write a run manifest"
+pass "ingest-note writes a manifest"
+
+# --- an accepted hand-ingested finding compacts after N later manual runs -----
+"${LG[@]}" upsert-finding --title "hand finding" --kind papercut \
+  --evidence "manual-20260101/ingest#1" >/dev/null
+"${LG[@]}" set-status --id F1 --status accepted >/dev/null
+
+# just-seen finding: not yet unseen -> nothing to compact
+out="$("${LG[@]}" compact --unseen-runs 3 2>&1 || true)"
+echo "$out" | grep -q "nothing to compact" \
+  || fail "a just-seen finding should not compact yet: [$out]"
+
+# three later, unrelated manual runs (no recurrence)
+for d in 02 03 04; do
+  printf '{"run":"manual-202601%s","scenario":"ingest","seq":1,"type":"note","detail":"other-%s"}\n' \
+    "$d" "$d" > "$root/r$d.jsonl"
+  "${LG[@]}" ingest "$root/r$d.jsonl" >/dev/null
+done
+out="$("${LG[@]}" compact --unseen-runs 3 2>&1)"
+echo "$out" | grep -q "tombstoned F1 (fixed)" \
+  || fail "hand-ingested finding did not compact after 3 manual runs: [$out]"
+pass "accepted hand-ingested finding compacts via the elapsed-run fallback"
+
+# --- a driven manifest is never overwritten -----------------------------------
+mkdir -p "$root/demo/events/driven-01"
+printf '{"run":"driven-01","results":[{"scenario":"s1","status":"ok"}]}\n' \
+  > "$root/demo/events/driven-01/manifest.json"
+printf '{"run":"driven-01","scenario":"s1","seq":1,"type":"note","detail":"x"}\n' \
+  > "$root/drv.jsonl"
+"${LG[@]}" ingest "$root/drv.jsonl" >/dev/null
+grep -q '"scenario": *"s1"' "$root/demo/events/driven-01/manifest.json" \
+  || grep -q '"scenario":"s1"' "$root/demo/events/driven-01/manifest.json" \
+  || fail "ingest overwrote an existing driven manifest"
+pass "existing driven manifest is preserved"
+
+echo "PASS: ledger compact manual manifest"
