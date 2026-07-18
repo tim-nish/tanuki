@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Fixture for the driver model tier (story 1.15 / issue #139): the scenarios
+# "loop" block's drive_model sets a target-level default for the simulated-user
+# driver; precedence is per-scenario "model" > --model (CLI) > drive_model >
+# config chain. The effective driver model is recorded per scenario in the
+# manifest. The plugin under test is never affected (the driver model only
+# feeds the stub claude invocation).
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+drive="$here/tanuki-drive"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+
+for r in plugin host; do
+  git init -q "$tmp/$r" && git -C "$tmp/$r" config user.email t@e && git -C "$tmp/$r" config user.name t
+  git -C "$tmp/$r" checkout -qb main && echo x > "$tmp/$r/x" && git -C "$tmp/$r" add -A && git -C "$tmp/$r" commit -qm base
+done
+
+cat > "$tmp/scenarios.json" <<'EOF'
+{"loop": {"drive_model": "claude-haiku-4-5-20251001"},
+ "scenarios": [
+  {"id": "s-plain", "charter": "c", "prompt": "p", "max_turns": 3},
+  {"id": "s-pinned", "charter": "c", "prompt": "p", "max_turns": 3,
+   "model": "claude-sonnet-5"}
+]}
+EOF
+
+jplan() { python3 -c "
+import json,sys
+plan=json.load(sys.stdin)['scenarios']
+print(json.dumps({e['id']: e['model'] for e in plan}))"; }
+
+# --- estimate: drive_model is the target default; per-scenario model wins ----
+est="$("$drive" --target t --plugin "$tmp/plugin" --host "$tmp/host" \
+  --scenarios "$tmp/scenarios.json" --run e1 --estimate | jplan)"
+echo "$est" | grep -q '"s-plain": "claude-haiku-4-5-20251001"' \
+  || fail "loop.drive_model must be the default driver model: $est"
+echo "$est" | grep -q '"s-pinned": "claude-sonnet-5"' \
+  || fail "a per-scenario model key must win over drive_model: $est"
+pass "estimate: drive_model default applied, per-scenario key wins"
+
+# --- CLI --model overrides drive_model (config < CLI), scenario key still wins
+est2="$("$drive" --target t --plugin "$tmp/plugin" --host "$tmp/host" \
+  --scenarios "$tmp/scenarios.json" --run e2 --estimate \
+  --model claude-sonnet-5 | jplan)"
+echo "$est2" | grep -q '"s-plain": "claude-sonnet-5"' \
+  || fail "--model must override loop.drive_model: $est2"
+pass "CLI --model overrides drive_model"
+
+# --- no drive_model: builtin default unchanged -------------------------------
+python3 - "$tmp/scenarios.json" "$tmp/scenarios-nodm.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d.pop("loop")
+json.dump(d, open(sys.argv[2], "w"))
+PY
+est3="$("$drive" --target t --plugin "$tmp/plugin" --host "$tmp/host" \
+  --scenarios "$tmp/scenarios-nodm.json" --run e3 --estimate | jplan)"
+echo "$est3" | grep -q '"s-plain": "claude-sonnet-5"' \
+  || fail "without drive_model the builtin default must apply: $est3"
+pass "absent drive_model: builtin default unchanged"
+
+# --- a real (stubbed) drive records the effective model in the manifest ------
+mkdir -p "$tmp/bin"
+cat > "$tmp/bin/claude" <<'EOF'
+#!/bin/sh
+cat <<'JSON'
+{"type":"assistant","message":{"content":[{"type":"text","text":"FRICTION LOG: none"}]}}
+{"type":"result","subtype":"success","num_turns":1,"duration_ms":10,"total_cost_usd":0.001,"is_error":false,"result":"done"}
+JSON
+EOF
+chmod +x "$tmp/bin/claude"
+export PATH="$tmp/bin:$PATH"
+
+"$drive" --target t --plugin "$tmp/plugin" --host "$tmp/host" \
+  --scenarios "$tmp/scenarios.json" --run r1 --timeout 60 >/dev/null \
+  || fail "drive exited non-zero"
+python3 - "$TANUKI_ROOT/t/events/r1/manifest.json" <<'PY' || fail "manifest models wrong"
+import json, sys
+m = json.load(open(sys.argv[1]))
+models = {r["scenario"]: r["model"] for r in m["results"]}
+assert models["s-plain"] == "claude-haiku-4-5-20251001", models
+assert models["s-pinned"] == "claude-sonnet-5", models
+PY
+pass "manifest records the effective driver model per scenario"
+
+echo "all checks passed"
