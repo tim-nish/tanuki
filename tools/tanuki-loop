@@ -84,7 +84,13 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
                                  — settlement is derived, owner ruling
                                  2026-07-17) — machine-readable; also deletes
                                  merged integration branches for the target
-                                 (unmerged tips kept) — issue #6.
+                                 (unmerged tips kept) — issue #6. A branch still
+                                 checked out in its worktree is SKIPPED, not
+                                 deleted (a live worktree can't be removed): so
+                                 finishing before the loop worktree is removed
+                                 leaves the merged branch behind. The skip
+                                 reason names the exact `git worktree remove`
+                                 to run, then re-finish (F138).
                                  The FIRST computational close (converged/cap/
                                  aborted) is recorded as the run's STOP REASON
                                  and never overwritten (aborted is recorded as

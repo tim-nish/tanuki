@@ -289,8 +289,9 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
    this one gate step is a hand-run git operation).
    **Check out the base branch first, and use its real name.** The merge runs
    in the operator's normal checkout and lands on whatever branch is currently
-   checked out — `git checkout <base>` before merging, or the batch lands
-   somewhere unintended. The base is **not** assumed to be `main`: take the
+   checked out — confirm where you are with `git branch --show-current`, then
+   `git checkout <base>` before merging, or the batch lands somewhere
+   unintended (F137). The base is **not** assumed to be `main`: take the
    actual name from `init`'s `base` / `base_upstream` output (it may be
    `master` or anything else); the `main` in these snippets is a placeholder
    (F100, F103).
@@ -335,7 +336,10 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
    *(Skipped along with step 5 when no tracker is configured.)*
 7. Remove the loop worktree (`git worktree remove` — if it refuses with a
    modified-file error naming regenerable output, see the note at the end of
-   this step). **No closing command follows** (owner ruling 2026-07-17): the
+   this step). **This worktree removal is the terminal action of the attended
+   gate — once the merge is pushed (step 4) and the worktree is gone, you are
+   done; do not reach for a closing command (F136).** **No closing command
+   follows** (owner ruling 2026-07-17): the
    merge's reachability from the base *is* the settlement, and the surfaces
    that need it derive it — `status` reports it, the next `init`'s
    merged-branch sweep deletes the integration branch (tip reachable from the
