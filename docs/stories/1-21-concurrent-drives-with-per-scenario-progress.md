@@ -2,7 +2,8 @@
 story: 1.21
 epic: 1
 title: "Story 1.21: tanuki-drive runs planned scenarios concurrently under a drive_concurrency cap, with per-scenario progress records"
-status: ready
+status: published
+issue: 148
 umbrella: 138
 ---
 

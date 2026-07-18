@@ -2,9 +2,10 @@
 story: 1.22
 epic: 1
 title: "Story 1.22: dashboard latest-drive aggregation and budget accounting summed at the mining barrier"
-status: ready
+status: published
+depends_on: ["1.21"]
+issue: 149
 umbrella: 138
-depends_on: [1.21]
 ---
 
 # Story 1.22: dashboard latest-drive aggregation and budget accounting summed at the mining barrier

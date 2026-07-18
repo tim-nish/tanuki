@@ -2,9 +2,10 @@
 story: 1.18
 epic: 1
 title: "Story 1.18: doctor warns when a declared entry fixture's provenance lags the live host"
-status: ready
+status: published
+depends_on: ["1.16"]
+issue: 145
 umbrella: 136
-depends_on: [1.16]
 ---
 
 # Story 1.18: doctor warns when a declared entry fixture's provenance lags the live host

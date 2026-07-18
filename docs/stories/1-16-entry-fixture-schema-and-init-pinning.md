@@ -2,7 +2,8 @@
 story: 1.16
 epic: 1
 title: "Story 1.16: Scenarios declare an entry_fixture; init pins stage artifacts with provenance"
-status: ready
+status: published
+issue: 143
 umbrella: 136
 ---
 
