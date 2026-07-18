@@ -1257,7 +1257,9 @@ def main():
             "run and seq are NOT part of it, so the same detail seen in two "
             "different runs collapses into one record with count=2 (F70)."))
     sp.add_argument("files", nargs="+",
-                    help="one or more .events.jsonl files to ingest")
+                    help="one or more event files to ingest — the driver names "
+                         "them <scenario>.events.jsonl by convention, but the "
+                         "name is not enforced: any readable JSONL file works")
     sp = sub.add_parser("ingest-note"); sp.add_argument("--text", required=True)
     sp = sub.add_parser(
         "findings",
