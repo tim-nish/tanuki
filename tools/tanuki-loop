@@ -1508,6 +1508,35 @@ def committed_artifacts(wt, start, head):
                    and is_build_artifact(n)})
 
 
+def iteration_commits(wt, start, head):
+    """The commits an iteration landed, `(start, head]` oldest-first, each with
+    its subject line and changed-file count. Recorded by `iter-verify` into
+    state.json so the dashboard can show WHAT landed without ever running git
+    in its render path (spec-tanuki-view D4 "render, don't compute"; the
+    dashboard is a state-file-only reader). git runs HERE — in iter-verify,
+    which already operates in the loop worktree. A no-patch iteration
+    (head == start) records an empty list, which is distinct from a legacy
+    iteration that has no `commits` key at all."""
+    if head == start:
+        return []
+    rc, o = git(wt, "rev-list", "--reverse", f"{start}..{head}")
+    if rc != 0:
+        return []
+    commits = []
+    for sha in o.splitlines():
+        sha = sha.strip()
+        if not sha:
+            continue
+        _, subject = git(wt, "log", "-1", "--format=%s", sha)
+        rc2, names = git(wt, "diff-tree", "--no-commit-id", "--name-only",
+                         "-r", sha)
+        files = (len([n for n in names.splitlines() if n.strip()])
+                 if rc2 == 0 else 0)
+        commits.append({"sha": sha, "subject": subject,
+                        "files_changed": files})
+    return commits
+
+
 def cmd_iter_start(args):
     """Open an iteration, tripping any breaker that should stop the run first.
 
@@ -1600,6 +1629,11 @@ def cmd_iter_verify(args):
                        + (f" (dirty: {shown})" if real else ""))
     it["end"] = head
     it["phase"] = "verified"
+    # Story 1.10: record each landed commit's subject + changed-file count so
+    # the dashboard's "this run" section can show what landed as a state-file
+    # read (spec-tanuki-view D4) — git runs here, never in the render path. A
+    # no-patch iteration records [] (distinct from a legacy run's absent key).
+    it["commits"] = iteration_commits(wt, start, head)
     state["head_expected"] = head
     save_state(state)
     audit(state, f"iter {it['n']}: verified, end @ {head[:12]}")
@@ -2438,6 +2472,12 @@ EMPTY_STATES = {
         reason="no ledger movement yet — no iteration has started, so nothing "
                "could have moved",
         next="tanuki-loop --target {t} iter-start"),
+    "run:commits-not-recorded": dict(
+        expected=True,
+        reason="commit subjects were not recorded for this run — it predates "
+               "per-iteration subject capture (story 1.10); review the "
+               "integration branch diff at the morning gate to see what landed",
+        next=None),
     # -- unresolved loop branches ---------------------------------------------
     "unresolved:none": dict(
         expected=True,
@@ -2704,6 +2744,28 @@ def cmd_dashboard(args):
         else:
             body, _ = empty_state("run:no-iteration-started", state["target"])
             lines.append(f"  this run: {body}")
+        # Story 1.10: what the integration commit(s) changed — subjects + file
+        # counts iter-verify recorded into state, so a cold reader sees what
+        # landed without diffing the branch. Read SOLELY from state (no git in
+        # the render path — spec-tanuki-view D4). A patch-bearing iteration
+        # that predates this capture degrades to a typed one-line note; a
+        # no-patch iteration shows no phantom commit line.
+        verified = [it for it in state["iterations"]
+                    if it.get("phase") == "verified"]
+        if any("commits" not in it and it.get("end") != it.get("start")
+               for it in verified):
+            body, _ = empty_state("run:commits-not-recorded", state["target"])
+            lines.append(f"    landed commits: {body}")
+        else:
+            landed = [c for it in verified for c in (it.get("commits") or [])]
+            if landed:
+                lines.append(f"    landed commits ({len(landed)}):")
+                for c in landed:
+                    fc = c.get("files_changed", 0)
+                    lines.append(
+                        f"      {c.get('sha', '')[:12]} "
+                        f"{_short(c.get('subject', ''))} "
+                        f"({fc} file{'' if fc == 1 else 's'})")
         if findings:
             by = {}
             for fd in findings:
