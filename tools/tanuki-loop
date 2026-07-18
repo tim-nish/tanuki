@@ -618,10 +618,12 @@ def drift_note(target, repo):
         return None
     worst = max(r["behind"] for r in rows)
     n = len(rows)
-    return (f"note: {n} unresolved loop branch(es) — the most stale is "
-            f"{worst} commit(s) behind. They hold work that never merged; "
+    staleness = (f"the most stale is {worst} commit(s) behind the base"
+                 if worst else "none has fallen behind the base yet")
+    return (f"note: {n} unresolved loop branch(es) — integration branches "
+            f"from earlier runs holding work that never merged; {staleness}. "
             f"`tanuki-loop --target {target} reconcile` reports what to do "
-            f"with it.")
+            f"with them.")
 
 
 def cmd_unresolved(args):
@@ -1197,8 +1199,11 @@ def cmd_init(args):
     # operators had to find(1) them. The cap is echoed because rolled-back
     # iterations consume it, which is only discoverable by tripping the breaker.
     _ld = loop_dir(args.target, run)
+    # "base" is the branch NAME, labeled and copy-pasteable into
+    # `git checkout <base>` at the morning gate — inferring it from
+    # base_upstream is the F100/F103 footgun.
     out({"run": run, "integration_branch": integration, "worktree": worktree,
-         "base_sha": base_sha, "base_upstream": upstream,
+         "base": base, "base_sha": base_sha, "base_upstream": upstream,
          "base_behind": n_behind, "branch_cleanup": cleaned,
          "host_fixture_path": host_fixture_path, "host_base_sha": host_base_sha,
          "host_freshness": host_note,
@@ -2358,7 +2363,17 @@ def cmd_finish(args):
                      f"{cleaned['kept'] or 'none'}; skipped: "
                      f"{cleaned['skipped_reasons'] or 'none'}")
     _ld = loop_dir(state["target"], state["run"])
-    payload = {"ok": True, "reason": args.reason, "branch_cleanup": cleaned,
+    # F138: a skipped branch (still checked out in its worktree) is a partial
+    # completion the operator must follow up on, but ok:true reads as "fully
+    # done" — surface it as a top-level warning, not only inside the
+    # branch_cleanup detail.
+    warning = None
+    if cleaned.get("skipped"):
+        warning = ("branch cleanup incomplete — skipped: "
+                   + ", ".join(f"{b} ({r})" for b, r in
+                               cleaned["skipped_reasons"].items()))
+    payload = {"ok": True, "reason": args.reason, "warning": warning,
+               "branch_cleanup": cleaned,
                "host_drift": host_drift,
                # The morning gate is told to present these three; point at them
                # instead of making the operator find(1) the run dir (F79).
