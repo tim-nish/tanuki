@@ -1320,7 +1320,10 @@ def cmd_doctor(args):
             "note": ("put the \"loop\" block in this file; its name must match "
                      "--target. doctor/init do NOT auto-load it — pass it with "
                      "--scenarios. $TANUKI_ROOT (default ~/.tanuki) sets the "
-                     "root."),
+                     "root. For a scratch or sandboxed run you may pass ANY "
+                     "path via --scenarios — it need not live in this shared "
+                     "directory, which sidesteps the cross-session slug "
+                     "collision this canonical location is prone to (F94)."),
         }
     checks.append(loop_check)
 
