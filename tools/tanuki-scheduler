@@ -403,6 +403,56 @@ def trajectory_view(target, sid, run_filter, as_json):
                       f"{e.get('detail', '')[:110]}{syn}")
 
 
+def plugin_surface(plugin_path):
+    """Enumerate the target plugin's coverage-checkable surface, READ-ONLY:
+    skill names (skills/*/SKILL.md directory names) and command names
+    (commands/*.md basenames). Returns [] when the plugin path or a surface
+    dir is absent (hostless target / missing checkout) — never raises."""
+    surface = []
+    if not plugin_path:
+        return surface
+    root = os.path.expanduser(plugin_path)
+    skills_dir = os.path.join(root, "skills")
+    if os.path.isdir(skills_dir):
+        for name in sorted(os.listdir(skills_dir)):
+            if os.path.exists(os.path.join(skills_dir, name, "SKILL.md")):
+                surface.append(("skill", name))
+    commands_dir = os.path.join(root, "commands")
+    if os.path.isdir(commands_dir):
+        for fn in sorted(os.listdir(commands_dir)):
+            if fn.endswith(".md"):
+                surface.append(("command", fn[:-3]))
+    return surface
+
+
+def feature_drift(target):
+    """Advisory, READ-ONLY feature-drift signal (spec-tanuki-scenario-lifecycle
+    §3, third generation trigger): name each plugin surface (skill/command)
+    that NO scenario charter or prompt covers, and point at the generate
+    invocation. Reads the canonical scenarios config and the target plugin
+    checkout; writes nothing, mutates nothing, triggers nothing. Coverage is a
+    coarse, documented heuristic — a surface is covered iff its name appears
+    (case-insensitive substring) in any charter or prompt. The signal is
+    advisory, so it errs toward silence: an empty `uncovered` (complete
+    coverage, absent config, or hostless target with no surface dirs) emits no
+    drift."""
+    scen_path = os.path.join(TANUKI_ROOT, "scenarios",
+                             f"{target}.scenarios.json")
+    try:
+        data = read_json(scen_path, None)
+    except (OSError, ValueError):
+        data = None
+    generate = f"/tanuki {target} generate"
+    if not isinstance(data, dict):
+        return {"uncovered": [], "generate": generate}
+    surface = plugin_surface(data.get("plugin"))
+    corpus = " ".join(f"{s.get('charter', '')} {s.get('prompt', '')}"
+                      for s in data.get("scenarios", [])).lower()
+    uncovered = [{"kind": kind, "name": name} for kind, name in surface
+                 if name.lower() not in corpus]
+    return {"uncovered": uncovered, "generate": generate}
+
+
 def cmd_history(args):
     """Cross-run scenario monitoring from persisted artifacts only.
     Default: the repo-wide scenario-state summary + selection history.
@@ -523,7 +573,9 @@ def cmd_history(args):
             cover["long_unrun"].append(sid)
         if recent_actionable:
             cover["productive"].append(sid)
+    drift = feature_drift(args.target)
     data = {"scenarios": rows, "coverage": cover,
+            "feature_drift": drift,
             "selection_history": sched.get("plans", [])[-args.plans:]}
     if args.json:
         out(data)
@@ -541,6 +593,11 @@ def cmd_history(args):
         print(f"  long-unrun: {', '.join(cover['long_unrun'])}")
     if cover["productive"]:
         print(f"  recently productive: {', '.join(cover['productive'])}")
+    if drift["uncovered"]:
+        names = ", ".join(f"{u['kind']} {u['name']}"
+                          for u in drift["uncovered"])
+        print(f"  feature-drift: uncovered {names} — "
+              f"run `{drift['generate']}` to charter it")
     for p in data["selection_history"]:
         print(f"  plan [{p.get('run') or '?'}] -> {', '.join(p['plan'])} "
               f"(verify {len(p['verify'])}, explore {len(p['explore'])}, "

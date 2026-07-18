@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Fixture for the feature-drift signal (story 1.12 / spec-tanuki-scenario-
+# lifecycle §3 third generation trigger). The scheduler's `history` surface
+# is READ-ONLY and ADVISORY: it names each plugin surface (skill/command) that
+# no scenario charter or prompt covers and points at the `generate`
+# invocation. It must NOT fire on complete coverage (no false positives),
+# must never mutate scheduler state or the matrix, and must degrade gracefully
+# when the plugin / its surface dirs are absent (hostless target).
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+sched="$here/tanuki-scheduler"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+jget() { python3 -c "import json,sys;print(json.load(sys.stdin)$1)"; }
+
+# --- a target plugin repo with two skills and one command ---------------------
+plugin="$tmp/work/demo-plugin"
+mkdir -p "$plugin/skills/alpha" "$plugin/skills/beta" "$plugin/commands"
+echo "# alpha" > "$plugin/skills/alpha/SKILL.md"
+echo "# beta"  > "$plugin/skills/beta/SKILL.md"
+echo "# do-thing" > "$plugin/commands/do-thing.md"
+
+canon="$TANUKI_ROOT/scenarios/demo.scenarios.json"
+mkdir -p "$(dirname "$canon")"
+
+write_matrix() {  # write_matrix <charter-text>
+  cat > "$canon" <<EOF
+{"target":"demo","plugin":"$plugin",
+ "scenarios":[{"id":"s1","charter":"$1","prompt":"exercise it"}]}
+EOF
+}
+
+# --- (a) drift IS reported for surface absent from every charter --------------
+# Charter mentions only the "alpha" skill; beta + do-thing are uncovered.
+write_matrix "First run covers the alpha skill only."
+h="$("$sched" --target demo history --json)"
+echo "$h" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)["feature_drift"]
+names = {(u["kind"], u["name"]) for u in d["uncovered"]}
+assert ("skill", "beta") in names, d
+assert ("command", "do-thing") in names, d
+assert ("skill", "alpha") not in names, d      # mentioned -> covered
+assert d["generate"] == "/tanuki demo generate", d
+' || fail "drift must name every uncovered skill/command + the generate invocation"
+# human-readable render carries the signal + the exact invocation
+"$sched" --target demo history | grep -q "feature-drift" \
+  || fail "human render must show the feature-drift line"
+"$sched" --target demo history | grep -q "/tanuki demo generate" \
+  || fail "human render must include the generate invocation"
+pass "drift reported: names each uncovered surface + points at generate"
+
+# --- signal is read-only: history must not create/mutate scheduler state ------
+[ ! -e "$TANUKI_ROOT/demo/scheduler.json" ] \
+  || fail "history must not write scheduler state (read-only signal)"
+pass "read-only: drift signal never writes scheduler state"
+
+# --- (b) drift is NOT reported when every surface is covered -------------------
+write_matrix "Covers the alpha skill, the beta skill, and the do-thing command."
+h="$("$sched" --target demo history --json)"
+echo "$h" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)["feature_drift"]
+assert d["uncovered"] == [], d
+' || fail "complete coverage must yield no drift (no false positives)"
+"$sched" --target demo history | grep -q "feature-drift" \
+  && fail "human render must emit no feature-drift line on complete coverage" || true
+pass "no false positive: complete coverage yields no drift signal"
+
+# --- hostless / missing plugin dir degrades gracefully (no crash, no drift) ---
+cat > "$canon" <<EOF
+{"target":"demo","plugin":"$tmp/work/does-not-exist",
+ "scenarios":[{"id":"s1","charter":"c","prompt":"p"}]}
+EOF
+h="$("$sched" --target demo history --json)" || fail "missing plugin dir must not crash"
+echo "$h" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)["feature_drift"]
+assert d["uncovered"] == [], d
+' || fail "absent plugin dir must report no drift, not raise"
+pass "graceful degrade: absent plugin dir -> no drift, no crash"
+
+# --- absent scenarios config also degrades (different target) -----------------
+h="$("$sched" --target ghost history --json)" || fail "absent config must not crash"
+echo "$h" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)["feature_drift"]
+assert d["uncovered"] == [] and d["generate"] == "/tanuki ghost generate", d
+' || fail "absent scenarios config must report no drift"
+pass "graceful degrade: absent scenarios config -> no drift"
+
+echo "all checks passed"
