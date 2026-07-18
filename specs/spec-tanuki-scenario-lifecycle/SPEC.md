@@ -2,7 +2,8 @@
 
 Status: RATIFIED 2026-07-16 (header sync — the revisions in this file were
 already treated as ratified by the 2026-07-15 umbrella reconcile, d17e6fa,
-and are implemented in the tools). Extends
+and are implemented in the tools). AMENDED 2026-07-18 (triage of issue #137 —
+see "Cheapest covering verify"). Extends
 `docs/tanuki-spec.md` — originally with Driver/Miner contracts unchanged;
 later revisions in this file also amend the Miner's compaction semantics
 (driven-absence, "Verify/cap" revision) and add Driver manifest fields
@@ -332,6 +333,45 @@ search enters selection):**
   longer manufactures a false "fixed" tombstone (it simply stops accruing
   absence and surfaces via `verify_deferred`). Scenarios are still never
   deleted — regression pool, not removal (unchanged rule).
+
+## Cheapest covering verify (AMENDED 2026-07-18 — triage of issue #137)
+
+Findings often surface in expensive end-to-end scenarios while touching a
+surface a cheap scenario also covers; pinning verify to the originating
+scenario makes verify cost track *where a finding happened to appear*, not
+what it takes to reproduce it.
+
+**The extension — deterministic arithmetic only, no new judgment in the
+loop:**
+
+- **`covers:` tags.** A scenario may declare `covers: [<surface tag>, …]`
+  (stage/surface names, target-local vocabulary). Mining records the
+  finding's surface tag(s) alongside its scenario link when the evidence
+  supports one; a finding may also carry none (then nothing changes for it).
+- **Cheapest covering selection.** For each verify-set entry, `plan` picks
+  the **cheapest scenario that covers the finding's surface** — by an
+  explicit cost key when present, else `max_turns` — with the originating
+  scenario as the fallback when no cheaper cover exists. A finding may be
+  **pinned** to its originating scenario (per-finding flag) when
+  reproduction genuinely needs the full path. Selection remains part of the
+  pre-approved plan: deterministic inputs, no mid-run judgment.
+- **Covering-absence compaction.** Driven-absence generalizes: a run counts
+  toward an accepted finding's verify-by-absence when a **covering**
+  scenario (originating included) was actually driven in it and the finding
+  did not recur. "Replayed N times and gone" now means replayed via any
+  declared cover.
+- **Under-reproduction guard (re-pin).** A cheap cover can fail to reproduce
+  what a full pipeline would. If a finding accrues cover-driven absence but
+  **recurs anywhere** before tombstoning, the recurrence resets absence (as
+  today) AND re-pins the finding's verify entry to its originating scenario
+  — ledger arithmetic, no model judgment. The LRU rotation and the reserved
+  exploration quota are unchanged; covers only change *which* scenario fills
+  a verify slot, never how many slots verify gets.
+
+**Consequences.** Verify cost decouples from surface-of-first-appearance;
+short scenarios (see spec-host-snapshot "Stage-entry fixtures") become the
+scheduler's preferred verify vehicles; a finding with no `covers` match
+behaves exactly as before (originating scenario, driven-absence).
 
 **Constraints carried by this spec** (folded so the implementation order needs
 no external attachment):

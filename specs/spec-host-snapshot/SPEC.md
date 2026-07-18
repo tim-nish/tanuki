@@ -2,7 +2,8 @@
 
 Status: RATIFIED 2026-07-15 (triage of issue #15; amended at ratification —
 genericized origin, additive skill rule, host_setup escape guard, read-only
-freshness). Touches `tools/tanuki-loop` (init, doctor, state),
+freshness). AMENDED 2026-07-18 (triage of issue #136): stage-entry fixtures —
+see "Stage-entry fixtures". Touches `tools/tanuki-loop` (init, doctor, state),
 `tools/tanuki-drive` (host resolution + touched-path guard), and
 `commands/tanuki-loop.md` (the out-of-scope rule). Depends on
 spec-tanuki-loop; refines the host side of tanuki-drive's isolation contract.
@@ -119,6 +120,46 @@ the clone, and `pollution_check` inspects the clone. Two gaps remain:
   written down. The skill never inspects or modifies any path outside the
   run dir and the loop worktree after init.
 
+## Stage-entry fixtures (AMENDED 2026-07-18 — triage of issue #136)
+
+A scenario that probes one pipeline stage should not pay for every stage
+before it. On multi-stage targets, most of a drive's turns re-derive state
+(e.g. a full harvest) that the charter does not vary — the scenario's cost is
+grain, not substance.
+
+**The extension.** A scenario may declare an **entry fixture**: a named
+stage-level artifact set the drive materializes into the scenario's
+disposable clone before the driver starts, so the scenario enters the
+pipeline at the stage it actually probes.
+
+- **Schema.** The scenarios file gains an optional per-scenario
+  `entry_fixture` key naming a fixture recipe. A recipe declares the artifact
+  paths (relative to the host root) and the producing stage. Scenarios
+  without the key are unchanged; full-pipeline charters (whose charter IS the
+  early stage) must not declare one.
+- **Pinned at `init`, provenance-stamped.** Stage artifacts are pinned into
+  the run's host fixture at `init` alongside the clone — same pin-once,
+  one-fixture-per-run contract as the host itself. Each pinned fixture
+  records provenance in `state.json`: `{source_commit,
+  producing_stage_version}` — where the artifacts came from and which
+  version of the producing stage made them. An entry fixture is host state,
+  so hostless targets are out of scope, exactly as before.
+- **Drive enters at the declared stage.** `tanuki-drive` materializes the
+  scenario's declared fixture into the disposable clone before the driver's
+  first turn. Everything else — `host_setup`, `pollution_check`,
+  touched-path guards — is unchanged; the fixture is ordinary clone content
+  by the time the scenario runs.
+- **Staleness is warned, never fatal.** `doctor` compares each declared
+  fixture's provenance against the live host tip and warns when the
+  producing stage or source has moved — the same informational,
+  never-a-breaker posture as host drift. A stale fixture is the operator's
+  call; a *missing* declared fixture fails closed at init (a run that cannot
+  pin its declared state must not start — the existing rule).
+- **Findings attribute to the entered stage.** A finding mined from a
+  stage-entry scenario is evidence about the entered stage onward; the
+  skipped stages were fixture, not execution. Mining/dedupe need no new
+  machinery — the scenario id already carries this via its charter.
+
 ## Alternatives rejected
 
 - **rsync/cp snapshot including `.git`** — captures dirty state, but copying
@@ -133,3 +174,8 @@ the clone, and `pollution_check` inspects the clone. Two gaps remain:
   long-run generalization for CI and third-party contributors, but out of
   scope here; the local-path pin is the contract, and a `host:` source with
   modes can extend it later without breaking `state.json`.
+- **Target-side fixtures only (rejected at the #136 triage, 2026-07-18)** —
+  targets bake pre-staged artifacts into their own host repo and charters
+  point at them. Zero tanuki work, but no isolation or provenance guarantee,
+  every target reinvents the convention, and fixture state pollutes the host
+  repo — the uncontrolled state this spec exists to exclude.
