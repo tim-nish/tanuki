@@ -1084,7 +1084,9 @@ def cmd_status(args, ledger):
     print(f"tanuki status — {args.target}")
     print(f"  runs: {len(runs)}" + (f" (latest: {runs[-1]})" if runs else ""))
     print(f"  latest brief: {os.path.join(briefs_dir, briefs[-1])}"
-          if briefs else "  latest brief: none")
+          if briefs else
+          "  latest brief: none (a brief is the consolidated findings "
+          "report `consolidate` writes; none has been produced yet)")
     print(f"  findings: {len(ledger['findings'])} ({counts})")
     if total_tomb:
         print(f"  tombstoned: {total_tomb} — compacted to one-line records "
