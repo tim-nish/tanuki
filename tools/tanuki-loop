@@ -2972,7 +2972,13 @@ def run_verdict(state):
             s["hint"] = lb["hint"]
         return s
     done, cap = len(state["iterations"]), state["cap"]
-    openb = [i for i in state["iterations"] if i.get("end") is None]
+    # An iteration is open iff its phase is "started" — the SAME definition
+    # run_lifecycle's iterations_open uses (F149). Testing `end is None` instead
+    # disagreed after a recover --restore/rollback (which can leave an iteration
+    # with no `end` but a non-"started" phase), so the one-line summary read
+    # "iteration N open" while lifecycle.iterations_open on the same screen was 0
+    # — a direct self-contradiction of the kind F118 already guards elsewhere.
+    openb = [i for i in state["iterations"] if i.get("phase") == "started"]
     where = (f"iteration {openb[-1]['n']} open" if openb
              else f"{done}/{cap} iterations done")
     return {"state": "running", "reason": None,
