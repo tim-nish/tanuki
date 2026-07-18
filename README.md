@@ -190,13 +190,35 @@ decisions, and the audit trail, and only you merge to `main`. No phase of the
 loop ever merges, pushes, or files issues unattended. Full contract:
 [spec-tanuki-loop](specs/spec-tanuki-loop/SPEC.md).
 
+If your default branch refuses direct pushes (required-check protection), set
+`"gate": "pr"` in the scenarios `"loop"` block: instead of a local merge, the
+overnight close pushes the integration branch and opens **one Draft PR**
+(`gate-pr`) — that PR *is* the morning-gate review material. It is delivery,
+not ratification; the loop still never merges. Review and merge the PR
+yourself (a merge commit, not a squash, to keep the intent-scoped commits).
+
 ```
 /tanuki-loop my-plugin                   # settings stored once in the scenarios file
-/tanuki-loop my-plugin --iterations 2    # cautious first run
+/tanuki-loop my-plugin --iterations 2    # cautious first run (the cap is a ceiling, not the goal)
+```
+
+The per-target `"loop"` block in the scenarios file stores the settings, so a
+normal run is zero-config. Any of them can be overridden per run:
+`--iterations N` (the cap), `--wall-time <dur>` and `--token-budget <N>` (the
+breakers that bound an unattended run — always set for an overnight run),
+`--phase 1|2|3` (supervision level; Phase 2/3 run headless). Before a headless
+(Phase 2/3) run, validate readiness read-only — it writes nothing and runs no
+pipeline, checking the required ceilings, base freshness, and that `test_cmd`
+passes on the base tip:
+
+```
+<plugin-root>/tools/tanuki-loop --target my-plugin doctor \
+  --loop-repo <plugin-root> --scenarios ~/.tanuki/scenarios/my-plugin.scenarios.json
 ```
 
 Watch it live with the dashboard (safe to run alongside the loop — it only
-reads state files):
+reads state files). `--follow 10` re-renders every 10s; `--live` renders only
+while a run is actually active (a closed run degrades to one historical line):
 
 ```
 <plugin-root>/tools/tanuki-loop --target my-plugin dashboard --follow 10
@@ -270,6 +292,14 @@ skips a step, including your own `ingest` feedback.
 | `tools/tests/` | test fixtures for the tools (`for t in tools/tests/test-*; do "$t"; done`) |
 | `templates/example.scenarios.json` | starting point for your scenario file |
 | `templates/config.example.json` | every config key with its default |
+
+Each tool prints its **complete** subcommand and option surface with `--help`
+(e.g. `tools/tanuki-loop --help`, `tools/tanuki-ledger --help`), and the
+`commands/*.md` files are the authoritative command docs. This README covers
+the surfaces you reach for by hand; the loop's internal steps (`iter-start`,
+`iter-verify`, `record-cycle`, `gate-check`/`gate-push`, `finish`, …) are
+driven by `/tanuki-loop`, not typed by you — so a subcommand you see the loop
+run but never invoke yourself is expected, not undocumented.
 
 Everything Tanuki generates lives under `~/.tanuki/`, **never in your
 repos**:
