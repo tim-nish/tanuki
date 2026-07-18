@@ -2,9 +2,10 @@
 story: 1.20
 epic: 1
 title: "Story 1.20: covering-absence compaction and the under-reproduction re-pin guard"
-status: ready
+status: published
+depends_on: ["1.19"]
+issue: 147
 umbrella: 137
-depends_on: [1.19]
 ---
 
 # Story 1.20: covering-absence compaction and the under-reproduction re-pin guard

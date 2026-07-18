@@ -2,9 +2,10 @@
 story: 1.17
 epic: 1
 title: "Story 1.17: tanuki-drive materializes the declared entry fixture so the scenario starts at its probed stage"
-status: ready
+status: published
+depends_on: ["1.16"]
+issue: 144
 umbrella: 136
-depends_on: [1.16]
 ---
 
 # Story 1.17: tanuki-drive materializes the declared entry fixture so the scenario starts at its probed stage

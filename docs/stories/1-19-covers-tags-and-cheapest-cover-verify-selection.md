@@ -2,7 +2,8 @@
 story: 1.19
 epic: 1
 title: "Story 1.19: covers: tags on scenarios, surface tags at mining, and cheapest-cover verify selection in plan"
-status: ready
+status: published
+issue: 146
 umbrella: 137
 ---
 
