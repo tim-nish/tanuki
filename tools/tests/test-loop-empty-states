@@ -41,6 +41,7 @@ drive:iterations-ran-none-drove
 drive:no-iteration-started
 live:never-initialized
 live:no-active-run
+run:commits-not-recorded
 run:no-iteration-started
 scheduler:never-synced-after-runs
 scheduler:never-synced-fresh
@@ -108,6 +109,26 @@ grep -q "GAP" <<<"$s3" \
 grep -q "cannot have chosen anything" <<<"$s3" \
   || fail "the gap reason must say why it matters: $s3"
 pass "scheduler:never-synced-after-runs — GAP (the distinction #66 asked for)"
+
+# run:commits-not-recorded — a run predating story 1.10's subject capture: a
+# verified, patch-bearing iteration with no `commits` key must degrade to the
+# typed one-line note, never crash and never invent subjects (spec-tanuki-view
+# D4). Strip the key to simulate the legacy state, then re-render.
+run="$(cat "$TANUKI_ROOT/t/loop/current")"
+python3 - "$TANUKI_ROOT/t/loop/$run/state.json" <<'EOF'
+import json, sys
+p = sys.argv[1]; s = json.load(open(p))
+for it in s["iterations"]:
+    it.pop("commits", None)
+json.dump(s, open(p, "w"))
+EOF
+out_legacy="$("${L[@]}" dashboard)" \
+  || fail "run:commits-not-recorded must not crash the dashboard"
+grep -q "landed commits: commit subjects were not recorded for this run" <<<"$out_legacy" \
+  || fail "run:commits-not-recorded reason wrong: $(grep 'landed commits' <<<"$out_legacy")"
+grep -q "landed commits: GAP" <<<"$out_legacy" \
+  && fail "a legacy run's missing subjects is expected, not a gap: $out_legacy"
+pass "run:commits-not-recorded — expected; typed note, never a crash"
 
 # --- the expected/gap verdict is the whole point ------------------------------
 # Same section, same absent substrate, opposite verdicts depending on state.

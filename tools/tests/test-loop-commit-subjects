@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# Fixture for story 1.10: the dashboard's "this run" section shows WHAT the
+# integration commit(s) changed — each commit's subject line and changed-file
+# count — so a cold reader sees what landed without diffing the branch.
+#
+# The load-bearing constraint (spec-tanuki-view D4 "render, don't compute";
+# the dashboard is a state-file-only reader): the subjects are RECORDED by
+# `iter-verify` (which already runs git in the loop worktree) into state.json,
+# and the dashboard renders those recorded values — it runs no git. This
+# fixture exercises the iter-verify → state → dashboard path end to end, plus
+# the no-patch (no phantom line) and legacy (typed one-line note) cases.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+loop="$here/tanuki-loop"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+jget() { python3 -c "import json,sys;print(json.load(sys.stdin)$1)"; }
+
+# A loop repo on main.
+repo="$tmp/repo"
+git init -q "$repo" && git -C "$repo" config user.email t@e && git -C "$repo" config user.name t
+git -C "$repo" checkout -qb main && echo v0 > "$repo/a" && echo v0 > "$repo/b" \
+  && git -C "$repo" add -A && git -C "$repo" commit -qm base
+
+L=("$loop" --target t)
+wt="$("${L[@]}" init --loop-repo "$repo" --cap 8 | jget '["worktree"]')"
+gwt() { git -C "$wt" "$@"; }
+run="$(cat "$TANUKI_ROOT/t/loop/current")"
+state="$TANUKI_ROOT/t/loop/$run/state.json"
+
+# --- an iteration that lands a commit records its subject + file count --------
+"${L[@]}" iter-start >/dev/null
+echo v1 > "$wt/a"; echo v1 > "$wt/b"        # two files changed in one commit
+gwt commit -qam "fix(view): show landed commit subjects on the dashboard"
+"${L[@]}" iter-verify | jget '["ok"]' | grep -q True || fail "iter-verify should pass on a real commit"
+
+# iter-verify recorded the commit into state.json (AC 1).
+python3 - "$state" <<'EOF' || fail "iter-verify did not record the commit into state.json"
+import json, sys
+s = json.load(open(sys.argv[1]))
+it = s["iterations"][-1]
+cs = it.get("commits")
+assert isinstance(cs, list) and len(cs) == 1, ("commits not recorded", cs)
+c = cs[0]
+assert c["subject"] == "fix(view): show landed commit subjects on the dashboard", c
+assert c["files_changed"] == 2, ("expected 2 files changed", c)
+assert c["sha"], c
+EOF
+pass "iter-verify records each landed commit's subject + changed-file count in state"
+
+# --- the dashboard renders the recorded subject + file count (AC 2) -----------
+"${L[@]}" finish --reason cap >/dev/null
+out="$("${L[@]}" dashboard)"
+grep -q "landed commits (1):" <<<"$out" \
+  || fail "dashboard 'this run' missing the landed-commits header: $out"
+grep -q "fix(view): show landed commit subjects on the dashboard" <<<"$out" \
+  || fail "dashboard 'this run' missing the commit subject a cold reader needs: $out"
+grep -qE "fix\(view\): show landed commit subjects on the dashboard \(2 files\)" <<<"$out" \
+  || fail "dashboard 'this run' missing the commit's file count: $out"
+pass "dashboard 'this run' shows the recorded commit subject and file count"
+
+# The dashboard is a state-file-only reader (spec-tanuki-view D4): it must
+# render the subjects even with the loop worktree gone — a git call keyed on
+# the worktree would fail, but the render reads state alone.
+mv "$wt" "$wt.gone"
+out_nogit="$("${L[@]}" dashboard)" \
+  || fail "dashboard crashed with the worktree removed — it must read state only (D4)"
+grep -q "fix(view): show landed commit subjects on the dashboard" <<<"$out_nogit" \
+  || fail "dashboard must render subjects from STATE with the worktree gone (D4): $out_nogit"
+mv "$wt.gone" "$wt"
+pass "dashboard renders subjects from state alone — no git in the render path (D4)"
+
+# --- a no-patch iteration shows no phantom commit line (AC 3) ------------------
+L2=("$loop" --target np)
+git -C "$repo" checkout -q main
+"${L2[@]}" init --loop-repo "$repo" --cap 2 >/dev/null
+"${L2[@]}" iter-start >/dev/null
+"${L2[@]}" iter-verify --no-patch | jget '["ok"]' | grep -q True || fail "--no-patch should accept a no-op"
+"${L2[@]}" finish --reason cap >/dev/null
+out_np="$("${L2[@]}" dashboard)"
+grep -q "landed commits" <<<"$out_np" \
+  && fail "a no-patch iteration must not print a phantom commit line: $out_np"
+grep -q "^  this run:" <<<"$out_np" || fail "the 'this run' section must still render for a no-patch run"
+pass "no-patch iteration: 'this run' reads cleanly with no phantom commit line"
+
+# --- a legacy run (no recorded commits) degrades to a typed note (AC 4) --------
+# Simulate state written before this change: drop the `commits` key from a
+# verified, patch-bearing iteration. The dashboard must NOT crash and must
+# state the one-line note rather than inventing subjects or running git.
+L3=("$loop" --target lg)
+git -C "$repo" checkout -q main
+wt3="$("${L3[@]}" init --loop-repo "$repo" --cap 2 | jget '["worktree"]')"
+run3="$(cat "$TANUKI_ROOT/lg/loop/current")"
+state3="$TANUKI_ROOT/lg/loop/$run3/state.json"
+"${L3[@]}" iter-start >/dev/null
+echo legacy > "$wt3/a"; git -C "$wt3" commit -qam "legacy iteration"
+"${L3[@]}" iter-verify >/dev/null
+python3 - "$state3" <<'EOF'
+import json, sys
+p = sys.argv[1]; s = json.load(open(p))
+for it in s["iterations"]:
+    it.pop("commits", None)     # predate the story-1.10 capture
+json.dump(s, open(p, "w"))
+EOF
+"${L3[@]}" finish --reason cap >/dev/null
+out_lg="$("${L3[@]}" dashboard)" || fail "dashboard crashed on a legacy run with no recorded commits"
+grep -q "landed commits: commit subjects were not recorded for this run" <<<"$out_lg" \
+  || fail "a legacy run must degrade to the typed one-line note: $out_lg"
+pass "legacy run (no recorded commits): dashboard degrades to a typed note, never errors"
+
+echo "all commit-subject checks passed"
