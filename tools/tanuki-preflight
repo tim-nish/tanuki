@@ -49,7 +49,10 @@ def check_skills(repo):
                 if os.path.isdir(commands_dir) else [])
         record("skills-dir", bool(cmds),
                f"no skills/; {len(cmds)} command file(s)" if cmds
-               else "no skills/ and no commands/*.md")
+               else "no skills/ and no commands/*.md — N/A if this repo is "
+                    "not a Claude plugin: this check assumes one; for a "
+                    "plain code repo skip preflight instead of scaffolding "
+                    "to satisfy it (F39)")
         return
     found = 0
     for entry in sorted(os.listdir(skills_dir)):
