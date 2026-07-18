@@ -16,6 +16,9 @@ Ledger: ~/.tanuki/<target>/ledger.json
 Usage:
   tanuki-ledger --target <slug> init
   tanuki-ledger --target <slug> ingest <events.jsonl> [...]
+      event line: {"run": <run-id>, "scenario": <slug>, "seq": <int>,
+                   "type": "tool_error|note|result|…", "detail": <str>}
+      (full field semantics: `ingest --help`)
   tanuki-ledger --target <slug> ingest-note --text "<human feedback>"
   tanuki-ledger --target <slug> findings [--status open|proposed|accepted|dismissed]
   tanuki-ledger --target <slug> upsert-finding --title T --kind friction|papercut|gap \
@@ -202,7 +205,17 @@ def save(target, ledger):
 
 
 def cmd_init(args, ledger):
+    # F164: init on an existing slug used to print the same "ledger ready" as
+    # a fresh one, silently reusing another session's data (~/.tanuki is
+    # machine-wide, F94). State the reuse and its size; never a prompt.
+    existed = os.path.isfile(ledger_path(args.target))
     save(args.target, ledger)
+    if existed:
+        print(f"note: target '{args.target}' already exists — reusing its "
+              f"ledger ({len(ledger.get('events', {}))} event record(s), "
+              f"{len(ledger.get('findings', []))} finding(s)). If you "
+              f"expected a fresh target, pick an unused slug: ~/.tanuki/ is "
+              f"shared machine-wide.", file=sys.stderr)
     print(f"ledger ready: {ledger_path(args.target)}")
 
 
@@ -269,7 +282,11 @@ def cmd_ingest(args, ledger):
     # manual manifest (skips any run that already has a driven one).
     for run in sorted(runs_seen):
         write_manual_manifest(args.target, run)
-    print(f"ingested: {new} new event(s), {dup} exact duplicate(s) collapsed")
+    # flush: piped stdout is block-buffered while stderr is not, so without it
+    # the collapsed detail lines (stderr) overtake this summary in a merged
+    # capture and the output reads backwards (F121).
+    print(f"ingested: {new} new event(s), {dup} exact duplicate(s) collapsed",
+          flush=True)
     for rec in list(collapsed.values())[:COLLAPSE_LIST_CAP]:
         detail = (rec.get("detail") or "")
         if len(detail) > 60:
@@ -406,7 +423,15 @@ def cmd_upsert(args, ledger):
         finding["notes"] = [args.note]
     ledger["findings"].append(finding)
     save(args.target, ledger)
-    print(f"created {fid}: {args.title}")
+    # F22: a multi-pointer creation still starts at recurrence:1 (recurrence
+    # counts upsert calls, not evidence pointers — F72). Say so at the exact
+    # moment the mismatch is visible, instead of leaving it to --help.
+    tail = ""
+    if len(evidence) > 1:
+        tail = (f" ({len(evidence)} evidence pointers, recurrence:1 — "
+                f"recurrence counts upsert calls, not pointers; "
+                f"bump with --match {fid})")
+    print(f"created {fid}: {args.title}{tail}")
 
 
 def cmd_promote(args, ledger):
@@ -1083,7 +1108,9 @@ def cmd_status(args, ledger):
     print(f"tanuki status — {args.target}")
     print(f"  runs: {len(runs)}" + (f" (latest: {runs[-1]})" if runs else ""))
     print(f"  latest brief: {os.path.join(briefs_dir, briefs[-1])}"
-          if briefs else "  latest brief: none")
+          if briefs else
+          "  latest brief: none (a brief is the consolidated findings "
+          "report `consolidate` writes; none has been produced yet)")
     print(f"  findings: {len(ledger['findings'])} ({counts})")
     if total_tomb:
         print(f"  tombstoned: {total_tomb} — compacted to one-line records "

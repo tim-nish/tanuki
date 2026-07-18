@@ -45,6 +45,10 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
        out of nowhere (F91).
        Not-ready follows the breaker convention ({"breaker": …} + exit 3)
        but persists nothing — there is no run state to write.
+       `doctor --help` carries the fullest scenarios-file documentation
+       (the exact "loop"-block JSON shape, the canonical path formula, and
+       per-key CLI equivalents) — read it before writing a scenarios file
+       (F132).
   iter-start                     cap / wall-time / external-modification breakers;
                                  records the iteration start SHA + ledger snapshot
   iter-verify [--no-patch]       the four-part integration invariant; records end SHA
@@ -93,9 +97,12 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
                                  to run, then re-finish (F138).
                                  The FIRST computational close (converged/cap/
                                  aborted) is recorded as the run's STOP REASON
-                                 and never overwritten (aborted is recorded as
-                                 `cancelled`); settlement is derived, never a
-                                 stop reason — the two are separate facts.
+                                 and never overwritten. (`--reason aborted` is
+                                 the CLI value — pass exactly that; the stop
+                                 reason is then STORED/DISPLAYED as
+                                 `cancelled`, which is not itself a valid
+                                 --reason, F165.) Settlement is derived, never
+                                 a stop reason — the two are separate facts.
                                  Execution time ends at the first close
                                  (wall_end); review/merge wait never accrues
   recover --restore | --adopt    ATTENDED recovery from the external-modification
@@ -627,10 +634,12 @@ def drift_note(target, repo):
         return None
     worst = max(r["behind"] for r in rows)
     n = len(rows)
-    return (f"note: {n} unresolved loop branch(es) — the most stale is "
-            f"{worst} commit(s) behind. They hold work that never merged; "
+    staleness = (f"the most stale is {worst} commit(s) behind the base"
+                 if worst else "none has fallen behind the base yet")
+    return (f"note: {n} unresolved loop branch(es) — integration branches "
+            f"holding work that never merged; {staleness}. "
             f"`tanuki-loop --target {target} reconcile` reports what to do "
-            f"with it.")
+            f"with them.")
 
 
 def cmd_unresolved(args):
@@ -832,10 +841,32 @@ def _derive_merge_settlement(state):
                           "derived; never assumed merged (direct-merge gate)"}
     rc_t, tip = git(repo, "rev-parse", integ)
     if rc_t != 0 or not tip:
+        # F158: the optional post-merge `finish` deletes the merged branch, so
+        # the ref is legitimately gone exactly when the merge landed. gate-check
+        # already proves reachability from the run's recorded verified HEAD
+        # (head_expected); use the same fallback here so status and gate-check
+        # cannot disagree on a provable fact. A deleted branch whose recorded
+        # tip is NOT reachable stays unknown — never optimistic.
+        tip = state.get("head_expected")
+        if (tip and tip != state.get("base_sha")
+                and git(repo, "merge-base", "--is-ancestor",
+                        tip, base_sha)[0] == 0):
+            delivered = {"gate": "merge", "head_sha": tip,
+                         "base_sha": base_sha,
+                         "merge_commit": _find_merge_commit(repo, tip,
+                                                            base_sha)}
+            return {"result": "landed", "observed_at": now,
+                    "local_synced": True, "delivered": delivered,
+                    "branch_deleted": True,
+                    "detail": f"branch '{integ}' is deleted but its recorded "
+                              f"verified tip {tip[:12]} is reachable from "
+                              f"local '{base}' (merged, then cleaned up — "
+                              "direct-merge gate)"}
         return {"result": "unknown", "observed_at": now,
-                "detail": f"integration branch '{integ}' does not resolve — "
-                          "reachability cannot be proven; never assumed merged "
-                          "(direct-merge gate)"}
+                "detail": f"integration branch '{integ}' does not resolve, "
+                          "and no recorded verified tip is reachable from the "
+                          "base — reachability cannot be proven; never "
+                          "assumed merged (direct-merge gate)"}
     # No divergence from the init base ⇒ nothing was ever delivered; trivial
     # reachability is not a landed merge (this is not the null the story guards).
     if tip == state.get("base_sha"):
@@ -1230,8 +1261,11 @@ def cmd_init(args):
     # operators had to find(1) them. The cap is echoed because rolled-back
     # iterations consume it, which is only discoverable by tripping the breaker.
     _ld = loop_dir(args.target, run)
+    # "base" is the branch NAME, labeled and copy-pasteable into
+    # `git checkout <base>` at the morning gate — inferring it from
+    # base_upstream is the F100/F103 footgun.
     out({"run": run, "integration_branch": integration, "worktree": worktree,
-         "base_sha": base_sha, "base_upstream": upstream,
+         "base": base, "base_sha": base_sha, "base_upstream": upstream,
          "base_behind": n_behind, "branch_cleanup": cleaned,
          "host_fixture_path": host_fixture_path, "host_base_sha": host_base_sha,
          "host_freshness": host_note,
@@ -1346,17 +1380,26 @@ def cmd_doctor(args):
                 "accepted but leaves the run with NO regression gate; doctor "
                 "cannot tell the difference, so it is your call.")
         # Name the canonical path so the operator knows WHERE the "loop" block
-        # goes and that it is not auto-loaded (F38).
+        # goes and that it is not auto-loaded (F38). Also say whether a file
+        # already EXISTS there (F159): the scenarios dir is machine-wide
+        # (F94), so a colliding target slug would silently inherit a foreign
+        # loop block — existence is the signal that needs a manual ls today.
+        _canon = os.path.join(
+            TANUKI_ROOT, "scenarios", f"{args.target}.scenarios.json")
         loop_check["scenarios_file"] = {
-            "canonical": os.path.join(
-                TANUKI_ROOT, "scenarios", f"{args.target}.scenarios.json"),
+            "canonical": _canon,
+            "canonical_file_exists": os.path.isfile(_canon),
             "note": ("put the \"loop\" block in this file; its name must match "
                      "--target. doctor/init do NOT auto-load it — pass it with "
                      "--scenarios. $TANUKI_ROOT (default ~/.tanuki) sets the "
-                     "root. For a scratch or sandboxed run you may pass ANY "
-                     "path via --scenarios — it need not live in this shared "
-                     "directory, which sidesteps the cross-session slug "
-                     "collision this canonical location is prone to (F94)."),
+                     "root. canonical_file_exists says whether a file is "
+                     "already there — the scenarios dir is machine-wide, so "
+                     "an existing file under your slug may be another "
+                     "session's config. For a scratch or sandboxed run you "
+                     "may pass ANY path via --scenarios — it need not live "
+                     "in this shared directory, which sidesteps the "
+                     "cross-session slug collision this canonical location "
+                     "is prone to (F94)."),
         }
     checks.append(loop_check)
 
@@ -1785,6 +1828,16 @@ def cmd_rollback(args):
     it["removed"] = removed_paths
     it["phase"] = "rolled_back"
     state["head_expected"] = start
+    # F118: rollback is the documented remedy for breakers that fire with an
+    # iteration open (test failure, invariant violation); once it succeeds the
+    # stop is resolved, and the verdict must not keep reading "stopped"
+    # against an active lifecycle. External modification stays armed — that
+    # breaker is recover's, not rollback's.
+    lb = state.get("last_breaker")
+    if lb and not lb.get("recovered") and \
+            "external modification" not in lb.get("reason", ""):
+        lb["recovered"] = {"mode": "rollback",
+                           "at": time.strftime("%Y-%m-%d %H:%M:%S")}
     save_state(state)
     audit(state, f"iter {it['n']}: rolled back to {start[:12]}; "
                  f"removed untracked: {removed_paths or 'none'}")
@@ -1840,6 +1893,12 @@ def cmd_recover(args):
         rc, preview = git(wt, "clean", "-nd")
         removed = [ln[len("Would remove "):] for ln in preview.splitlines()
                    if ln.startswith("Would remove ")]
+        # F168: `discarded` names external COMMITS only, but reset --hard also
+        # throws away uncommitted tracked edits — list those separately or a
+        # dirty-tree restore reads as a no-op ("discarded": []).
+        dirty = [ln[3:] for ln in
+                 git(wt, "status", "--porcelain")[1].splitlines()
+                 if ln and not ln.startswith("??")]
         discarded = []
         if head and git(wt, "merge-base", "--is-ancestor", expected, head)[0] == 0:
             discarded = git(wt, "rev-list", "--oneline",
@@ -1851,10 +1910,13 @@ def cmd_recover(args):
                            f"tree at {expected}")
         mode = "restore"
         note = (f"worktree reset to {expected[:12]}; discarded external "
-                f"commits: {discarded or 'none'}; removed untracked: "
-                f"{removed or 'none'} (reflog-recoverable)")
+                f"commits: {discarded or 'none'}; discarded uncommitted "
+                f"edits: {dirty or 'none'}; removed untracked: "
+                f"{removed or 'none'} (commits reflog-recoverable; "
+                f"uncommitted edits are not)")
         result = {"ok": True, "mode": mode, "head_expected": expected,
-                  "discarded": discarded, "removed": removed}
+                  "discarded": discarded,
+                  "discarded_uncommitted_edits": dirty, "removed": removed}
     else:  # --adopt
         # Re-baseline around the external change: the human accepts the
         # current worktree HEAD as the loop's expected state. The adopted
@@ -2394,7 +2456,28 @@ def cmd_finish(args):
                      f"{cleaned['kept'] or 'none'}; skipped: "
                      f"{cleaned['skipped_reasons'] or 'none'}")
     _ld = loop_dir(state["target"], state["run"])
-    payload = {"ok": True, "reason": args.reason, "branch_cleanup": cleaned,
+    # F138: a skipped branch (still checked out in its worktree) is a partial
+    # completion the operator must follow up on, but ok:true reads as "fully
+    # done" — surface it as a top-level warning, not only inside the
+    # branch_cleanup detail.
+    warning = None
+    if cleaned.get("skipped"):
+        warning = ("branch cleanup incomplete — skipped: "
+                   + ", ".join(f"{b} ({r})" for b, r in
+                               cleaned["skipped_reasons"].items()))
+    # F170: after a second finish, `reason` is just THIS call's argument while
+    # `previously_finished.reason` is the earlier call's — neither is labeled
+    # authoritative. The run's computational stop reason is state["stop"]
+    # (first close wins, never overwritten); echo it so downstream consumers
+    # have one field to read.
+    payload = {"ok": True, "reason": args.reason,
+               "stop_reason": (state.get("stop") or {}).get("reason"),
+               "stop_reason_note": ("stop_reason is the run's authoritative "
+                                    "computational close (first finish wins); "
+                                    "'reason' is only this invocation's "
+                                    "argument"),
+               "warning": warning,
+               "branch_cleanup": cleaned,
                "host_drift": host_drift,
                # The morning gate is told to present these three; point at them
                # instead of making the operator find(1) the run dir (F79).
@@ -3197,6 +3280,16 @@ def run_verdict(state):
     # "iteration N open" while lifecycle.iterations_open on the same screen was 0
     # — a direct self-contradiction of the kind F118 already guards elsewhere.
     openb = [i for i in state["iterations"] if i.get("phase") == "started"]
+    # F78: when every cap slot is consumed and the run is still unclosed,
+    # closing it was a manual inference from comparing iterations_done to cap
+    # on one screen — name the next action instead.
+    if not openb and done >= cap:
+        return {"state": "running", "reason": None,
+                "next_action": ("iteration cap consumed — close the run: "
+                                "finish --reason cap (or --reason converged "
+                                "if record-cycle reported converged)"),
+                "summary": (f"running: {done}/{cap} iterations consumed — "
+                            f"cap reached, close with finish")}
     where = (f"iteration {openb[-1]['n']} open" if openb
              else f"{done}/{cap} iterations done")
     return {"state": "running", "reason": None,
@@ -3396,7 +3489,20 @@ def main():
                          "\"PR-protected targets\")")
     sp.add_argument("--allow-stale-base", action="store_true")
 
-    sub.add_parser("iter-start")
+    # F93: the breaker precedence lives in cmd_iter_start's docstring but was
+    # invisible from --help until a description surfaced it here.
+    sub.add_parser(
+        "iter-start",
+        description=(
+            "Open an iteration, tripping any breaker that should stop the "
+            "run first. Check PRECEDENCE (first match wins): sequencing "
+            "violation, then iteration cap, then wall-time, then external "
+            "modification (HEAD mismatch, then dirty worktree). So once the "
+            "cap is reached, 'cap reached' shadows the external-modification "
+            "check permanently — a capped run's worktree is no longer "
+            "guarded; re-init for a fresh guarded run. Rolled-back "
+            "iterations consume cap slots (F27)."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     sp = sub.add_parser(
         "iter-verify",
         help="close the open iteration: integration invariants + the build-"
@@ -3452,10 +3558,11 @@ def main():
                     help="advisory only; ignored if it disagrees with the "
                          "ledger-computed count")
     sp.add_argument("--patched", dest="patched", action="store_true",
-                    help="advisory only; ignored if it disagrees with the "
-                         "SHA-computed value")
+                    help="bare flag, takes NO value — '--patched 1' fails; "
+                         "the opposite is --no-patched (F163). Advisory only; "
+                         "ignored if it disagrees with the SHA-computed value")
     sp.add_argument("--no-patched", dest="patched", action="store_false",
-                    help="advisory only (see --patched)")
+                    help="bare flag, the pair of --patched; advisory only")
     sp.set_defaults(patched=None)
     sp = sub.add_parser("defer")
     sp.add_argument("--finding", required=True); sp.add_argument("--reason", required=True)
