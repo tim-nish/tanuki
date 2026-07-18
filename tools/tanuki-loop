@@ -135,11 +135,16 @@ Breakers — what actually trips each one, and where (every breaker prints
                              rolled-back iterations count toward the cap — a
                              rollback does not give the attempt back.
   wall-time exceeded         iter-start, when now - wall_start > wall_limit_s.
-  external modification      iter-start, when the worktree HEAD is not the
-                             head_expected the last iter-verify recorded (i.e.
-                             something committed outside the loop). Fires on the
-                             NEXT iter-start, not at the moment of the edit; clear
-                             it with `recover --restore|--adopt`, never `rollback`.
+  external modification      iter-start, when EITHER the worktree HEAD is not
+                             the head_expected the last iter-verify recorded
+                             (something committed outside the loop) OR the
+                             worktree is not clean at iteration start (stray
+                             uncommitted edits). Both are edits to the loop's
+                             OWN worktree; a commit on the base branch does NOT
+                             trip it (base is out of scope after init —
+                             spec-host-snapshot). Fires on the NEXT iter-start,
+                             not at the moment of the edit; clear it with
+                             `recover --restore|--adopt`, never `rollback`.
   sequencing violation       iter-start on an unclosed iteration, or record-cycle
                              with an iteration still open.
   test failure               test, when the configured test_cmd exits non-zero.
