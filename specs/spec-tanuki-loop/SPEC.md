@@ -2,7 +2,8 @@
 
 Status: RATIFIED 2026-07-16 (header sync — proposed 2026-07-13, since
 implemented and amended through 2026-07-15; the PROPOSED header had gone
-stale). Supersedes the blanket never-automate reading of the operator's
+stale). AMENDED 2026-07-18 (triage of issue #138): concurrent drive phase —
+see "Concurrent drives within one iteration". Supersedes the blanket never-automate reading of the operator's
 2026-07-11 decision record for mechanical (non-spec, non-outward) work
 executed against snapshot-isolated state (integration worktree, host
 fixture); the relocated morning gate is the surviving human gate
@@ -370,6 +371,44 @@ prior successful iterations are untouched.
    (d) the worktree is clean. It records the end SHA.
 7. **Ready for the next drive.** Loop back to step 1 until convergence or the
    cap or a breaker.
+
+## Concurrent drives within one iteration (AMENDED 2026-07-18 — triage of issue #138)
+
+The cumulative rule ("one integration branch, never fan out") governs
+**implementation** — code must stack. The **drive phase** carries no such
+dependency: scenarios already run against snapshot-isolated fixture clones,
+so within one iteration the planned scenario set may drive concurrently.
+
+- **`drive_concurrency` loop-block key (default 1).** 1 is exactly today's
+  serial behavior and remains the default; N>1 lets `tanuki-drive` run up to
+  N planned scenarios in parallel, one disposable host-fixture clone per
+  scenario (the fixture is already a clone — this is N clones instead of 1).
+  Resource use is explicit, never inferred.
+- **The iteration bracket is unchanged.** `iter-start → drives → mine →
+  classify/implement → iter-verify` — only the drives overlap. Mining is a
+  **barrier**: one mining pass over the combined transcripts after all
+  drives finish. Ledger writes happen only at mining, so concurrency
+  introduces no concurrent ledger writes.
+- **Progress contract generalizes.** With N>1 there is no single "current
+  scenario": the progress substrate records **per-scenario progress
+  entries** (stage, elapsed, KB, result), and the dashboard's latest-drive
+  section renders the aggregation — running scenarios listed with their
+  stages, done/total across the set. At `drive_concurrency: 1` the rendered
+  output is today's (one current scenario) — the serial view is the N=1
+  case of the aggregate, not a second format.
+- **Budget accounting sums at the barrier.** Token/cost accounting for the
+  iteration is the **sum across concurrent drives**, folded in at the
+  mining barrier — before the next `iter-start` breaker evaluation, so the
+  token-budget breaker sees the true total. The budget remains a stored,
+  harness-tripped ceiling (unchanged posture).
+- **Anomaly classification is unchanged.** Results stay per-scenario;
+  drive concurrency is invisible to the ledger, the scheduler, and the
+  morning gate.
+
+Rejected at the same triage: keeping drives serial as a simplicity invariant
+(wall-clock addressed only by stage-entry fixtures and cheap verify covers) —
+declined because concurrency is the one lever that raises **coverage per
+wall-clock hour**, and the isolation model already paid for it.
 
 ## Convergence and stop conditions
 
