@@ -124,6 +124,15 @@ def cap_evidence(pointers, cap=EVIDENCE_CAP):
     return [uniq[0]] + uniq[-(cap - 1):]
 
 
+# Evidence pointers are always 'run/scenario#seq' (the driver's format; the
+# reserved 'ingest' pseudo-scenario carries manual ingests, e.g. 'run/ingest#seq').
+# A pointer missing the '/scenario' or '#seq' segment parses silently into a
+# garbage scenario/last_seen_run (upsert derived scenario from split('#')[0]
+# .split('/')[-1] and the run from split('/',1)[0], so 'run1#9' yielded scenario
+# 'run1' and run 'run1#9') — reject it instead of guessing (F133).
+EVIDENCE_RE = re.compile(r"^[^/#\s]+/[^/#\s]+#[^/#\s]+$")
+
+
 def run_of(pointer):
     """The run id embedded in an evidence pointer 'run/scenario#seq'."""
     return pointer.split("/", 1)[0] if pointer else None
@@ -351,6 +360,17 @@ def cmd_findings(args, ledger):
 
 def cmd_upsert(args, ledger):
     evidence = [e.strip() for e in args.evidence.split(",") if e.strip()]
+    # Validate the pointer shape up front: a malformed pointer used to parse
+    # into a garbage scenario/last_seen_run silently (F133). Reject it with the
+    # convention spelled out — including the reserved 'ingest' pseudo-scenario
+    # for a manual ingest that had no driven scenario (F134).
+    bad = [e for e in evidence if not EVIDENCE_RE.match(e)]
+    if not evidence or bad:
+        detail = f"malformed pointer(s) {bad}" if bad else "no evidence pointers"
+        print(f"error: {detail}; each --evidence must be '<run>/<scenario>#<seq>' "
+              f"(for a manual ingest with no driven scenario, use the reserved "
+              f"'ingest' scenario, e.g. '<run>/ingest#<seq>')", file=sys.stderr)
+        sys.exit(2)
     scenarios = sorted({e.split("#")[0].split("/")[-1] for e in evidence})
     if args.match:
         for f in ledger["findings"]:
@@ -818,10 +838,40 @@ def cmd_compact(args, ledger):
         # longer claims it never can. A finding is simply not yet unseen for the
         # threshold: its scenario must have been driven-and-absent (real
         # scenarios) or the run count must elapse (ingest/no-scenario findings).
-        print(f"nothing to compact (threshold: unseen for >= {n} run(s)); an "
-              f"accepted finding tombstones once its scenario was driven-and-"
-              f"absent that many times, or — for ingest/no-scenario findings — "
-              f"once that many later runs (driven or manual) have elapsed")
+        # One generic message used to fire for three distinct causes and forced
+        # the reader into the source to tell which (F135): name the per-finding
+        # cause so the caller sees exactly how far each candidate is from the bar.
+        reasons = []
+        for f in ledger["findings"]:
+            if f.get("tombstone"):
+                continue
+            status = f.get("status")
+            if status == "accepted":
+                k = verified_absent_runs(f)
+                if k >= n:
+                    continue  # (would have compacted; handled above)
+                scen = set(f.get("scenarios", [])) - {"ingest"}
+                how = ("driven-and-absent run(s)" if scen
+                       else "later run(s) elapsed (ingest/no-scenario)")
+                reasons.append(f"  {f['id']}: accepted, {k}/{n} {how} "
+                               f"— {n - k} more to verify the fix")
+            elif status == "dismissed":
+                k = runs_since(f.get("last_seen_run"))
+                if k >= n:
+                    continue
+                reasons.append(f"  {f['id']}: dismissed, {k}/{n} run(s) elapsed "
+                               f"— detail kept until it is truly quiet")
+        head = (f"nothing to compact (threshold: unseen for >= {n} run(s)); an "
+                f"accepted finding tombstones once its scenario was driven-and-"
+                f"absent that many times, or — for ingest/no-scenario findings — "
+                f"once that many later runs (driven or manual) have elapsed")
+        if reasons:
+            print(head + "\ncandidates below the threshold:")
+            for line in reasons:
+                print(line)
+        else:
+            print(head + "\nno accepted or dismissed findings are awaiting "
+                  "compaction (nothing has been resolved yet)")
 
 
 def cmd_scenario_yield(args, ledger):
@@ -1238,7 +1288,10 @@ def main():
     # from `upsert-finding --help` and not only from the top-level usage (F124).
     sp.add_argument("--evidence", required=True,
                     help="one or more run/scenario#seq pointers, comma-joined "
-                         "(e.g. runA/scen#1,runB/scen#2)")
+                         "(e.g. runA/scen#1,runB/scen#2); for a manual ingest "
+                         "with no driven scenario use the reserved 'ingest' "
+                         "scenario, e.g. runA/ingest#1. A malformed pointer is "
+                         "rejected, never silently parsed (F133/F134)")
     # --match takes an existing finding id to accumulate onto (bumps recurrence
     # and scenario spread) instead of creating a duplicate (F62); omit it to
     # create a new finding (then --title is required).
