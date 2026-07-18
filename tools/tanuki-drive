@@ -543,6 +543,46 @@ def drive_scenario(args, scenario, run_dir, cfg, prog=None):
     plugin_clone, host_clone = prepare_workspace(
         ws, args.plugin, args.host, scenario.get("host_setup"), args.plugin_ref)
 
+    # Stage-entry fixture (story 1.17): the declared artifacts are committed
+    # host state, so the clone already carries them — verify BEFORE the
+    # driver's first turn and record what the scenario entered from. A
+    # missing artifact fails this scenario informatively (the clone source —
+    # a loop run's pinned fixture, or the live host on an attended run —
+    # did not hold the declared state).
+    entered_fixture = None
+    recipe = scenario.get("_entry_fixture")
+    if recipe:
+        missing = [p for p in recipe["paths"]
+                   if not os.path.exists(os.path.join(host_clone, p))]
+        if missing:
+            events = [{"run": args.run, "scenario": sid, "seq": 1,
+                       "type": "note",
+                       "detail": (f"entry fixture '{recipe['name']}' not "
+                                  f"materializable: missing from the host "
+                                  f"clone: {missing}"),
+                       "evidence": f"{sid}/entry-fixture-missing"}]
+            events_path = os.path.join(run_dir, f"{sid}.events.jsonl")
+            with open(events_path, "w", encoding="utf-8") as f:
+                for e in events:
+                    f.write(json.dumps(e, ensure_ascii=False) + "\n")
+            return {"scenario": sid,
+                    "status": (f"entry-fixture-missing: '{recipe['name']}' "
+                               f"absent from the host clone: {missing}"),
+                    "events": len(events), "model": model, "cost_usd": None,
+                    "num_turns": None, "duration_s": 0.0,
+                    "events_path": events_path,
+                    "decision_points": scenario.get("decision_points") or [],
+                    "entry_fixture": None,
+                    "host_clone_changes": 0, "plugin_clone_dirty": False,
+                    "execution_escape": False, "host_escape": False,
+                    "workspace": ws}
+        rc_h = sh(["git", "-C", host_clone, "rev-parse", "HEAD"])
+        entered_fixture = {
+            "name": recipe["name"], "paths": list(recipe["paths"]),
+            "source_commit": (rc_h.stdout.strip()
+                              if rc_h.returncode == 0 else None),
+            "producing_stage_version": recipe.get("producing_stage")}
+
     raw_path = os.path.join(run_dir, f"{sid}.raw.jsonl")
     pins = decision_pins(scenario)
     pin_block = ""
@@ -691,6 +731,11 @@ def drive_scenario(args, scenario, run_dir, cfg, prog=None):
             # of one scenario down different internal branches
             # (specs/spec-tanuki-scenario-lifecycle, History & coverage).
             "decision_points": scenario.get("decision_points") or [],
+            # What stage state this scenario entered from (story 1.17):
+            # {name, paths, source_commit, producing_stage_version}, null
+            # when the scenario declared none — findings attribute to the
+            # entered stage onward.
+            "entry_fixture": entered_fixture,
             "trajectory_markers_dropped": markers_dropped,
             "host_clone_changes": len(pollution_check(host_clone)),
             "plugin_clone_dirty": bool(plugin_dirt),
@@ -742,6 +787,34 @@ def main():
         scenario_file = json.load(f)
     scenarios = scenario_file["scenarios"]
     cfg = load_config(scenario_file)
+    # Stage-entry fixtures (spec-host-snapshot "Stage-entry fixtures"; story
+    # 1.17): resolve per-scenario entry_fixture references against the
+    # top-level registry up front — a dangling reference or a hostless
+    # declaration is a usage error, not a mid-run surprise. The recipe rides
+    # on the scenario dict; materialization happens per scenario after the
+    # clone (the artifacts are committed host state, so the clone carries
+    # them — the drive verifies and records, it never writes the fixture).
+    registry = scenario_file.get("entry_fixtures") or {}
+    for s in scenarios:
+        name = s.get("entry_fixture")
+        if not name:
+            continue
+        if not args.host:
+            print(f"error: scenario '{s.get('id')}' declares entry_fixture "
+                  f"'{name}' but this drive is HOSTLESS — an entry fixture "
+                  "is host state (spec-host-snapshot), out of scope",
+                  file=sys.stderr)
+            return 2
+        if name not in registry:
+            print(f"error: scenario '{s.get('id')}' declares entry_fixture "
+                  f"'{name}' but the scenarios file has no "
+                  f"entry_fixtures['{name}'] recipe", file=sys.stderr)
+            return 2
+        if not registry[name].get("paths"):
+            print(f"error: entry_fixture '{name}' declares no artifact "
+                  "paths", file=sys.stderr)
+            return 2
+        s["_entry_fixture"] = {"name": name, **registry[name]}
     if args.only:
         wanted = set(args.only.split(","))
         scenarios = [s for s in scenarios if s["id"] in wanted]
