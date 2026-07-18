@@ -825,10 +825,32 @@ def _derive_merge_settlement(state):
                           "derived; never assumed merged (direct-merge gate)"}
     rc_t, tip = git(repo, "rev-parse", integ)
     if rc_t != 0 or not tip:
+        # F158: the optional post-merge `finish` deletes the merged branch, so
+        # the ref is legitimately gone exactly when the merge landed. gate-check
+        # already proves reachability from the run's recorded verified HEAD
+        # (head_expected); use the same fallback here so status and gate-check
+        # cannot disagree on a provable fact. A deleted branch whose recorded
+        # tip is NOT reachable stays unknown — never optimistic.
+        tip = state.get("head_expected")
+        if (tip and tip != state.get("base_sha")
+                and git(repo, "merge-base", "--is-ancestor",
+                        tip, base_sha)[0] == 0):
+            delivered = {"gate": "merge", "head_sha": tip,
+                         "base_sha": base_sha,
+                         "merge_commit": _find_merge_commit(repo, tip,
+                                                            base_sha)}
+            return {"result": "landed", "observed_at": now,
+                    "local_synced": True, "delivered": delivered,
+                    "branch_deleted": True,
+                    "detail": f"branch '{integ}' is deleted but its recorded "
+                              f"verified tip {tip[:12]} is reachable from "
+                              f"local '{base}' (merged, then cleaned up — "
+                              "direct-merge gate)"}
         return {"result": "unknown", "observed_at": now,
-                "detail": f"integration branch '{integ}' does not resolve — "
-                          "reachability cannot be proven; never assumed merged "
-                          "(direct-merge gate)"}
+                "detail": f"integration branch '{integ}' does not resolve, "
+                          "and no recorded verified tip is reachable from the "
+                          "base — reachability cannot be proven; never "
+                          "assumed merged (direct-merge gate)"}
     # No divergence from the init base ⇒ nothing was ever delivered; trivial
     # reachability is not a landed merge (this is not the null the story guards).
     if tip == state.get("base_sha"):
@@ -1318,14 +1340,22 @@ def cmd_doctor(args):
                 "accepted but leaves the run with NO regression gate; doctor "
                 "cannot tell the difference, so it is your call.")
         # Name the canonical path so the operator knows WHERE the "loop" block
-        # goes and that it is not auto-loaded (F38).
+        # goes and that it is not auto-loaded (F38). Also say whether a file
+        # already EXISTS there (F159): the scenarios dir is machine-wide
+        # (F94), so a colliding target slug would silently inherit a foreign
+        # loop block — existence is the signal that needs a manual ls today.
+        _canon = os.path.join(
+            TANUKI_ROOT, "scenarios", f"{args.target}.scenarios.json")
         loop_check["scenarios_file"] = {
-            "canonical": os.path.join(
-                TANUKI_ROOT, "scenarios", f"{args.target}.scenarios.json"),
+            "canonical": _canon,
+            "canonical_file_exists": os.path.isfile(_canon),
             "note": ("put the \"loop\" block in this file; its name must match "
                      "--target. doctor/init do NOT auto-load it — pass it with "
                      "--scenarios. $TANUKI_ROOT (default ~/.tanuki) sets the "
-                     "root."),
+                     "root. canonical_file_exists says whether a file is "
+                     "already there — the scenarios dir is machine-wide, so "
+                     "an existing file under your slug may be another "
+                     "session's config."),
         }
     checks.append(loop_check)
 
@@ -3375,7 +3405,20 @@ def main():
                          "\"PR-protected targets\")")
     sp.add_argument("--allow-stale-base", action="store_true")
 
-    sub.add_parser("iter-start")
+    # F93: the breaker precedence lives in cmd_iter_start's docstring but was
+    # invisible from --help until a description surfaced it here.
+    sub.add_parser(
+        "iter-start",
+        description=(
+            "Open an iteration, tripping any breaker that should stop the "
+            "run first. Check PRECEDENCE (first match wins): sequencing "
+            "violation, then iteration cap, then wall-time, then external "
+            "modification (HEAD mismatch, then dirty worktree). So once the "
+            "cap is reached, 'cap reached' shadows the external-modification "
+            "check permanently — a capped run's worktree is no longer "
+            "guarded; re-init for a fresh guarded run. Rolled-back "
+            "iterations consume cap slots (F27)."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     sp = sub.add_parser(
         "iter-verify",
         help="close the open iteration: integration invariants + the build-"
