@@ -379,6 +379,10 @@ def cleanup_merged_integration_branches(repo, base, target):
     # a live worktree can't be deleted, and a merged branch whose delete failed
     # is a different (and more alarming) situation than the routine former.
     skipped_reasons = {}
+    # `kept` used to carry no reason while `skipped` did, so a reader had to
+    # infer from the help that "kept" means unmerged (F143). State it, for the
+    # same "never opaque on-screen" reason skipped_reasons exists.
+    kept_reasons = {}
     for b in branches:
         if b in checked_out:
             skipped.append(b)                       # can't delete a live branch
@@ -396,8 +400,12 @@ def cleanup_merged_integration_branches(repo, base, target):
                 skipped_reasons[b] = "merged but 'git branch -D' failed"
         else:
             kept.append(b)                          # unmerged tip — never delete
+            kept_reasons[b] = ("tip not reachable from %s (unmerged) — kept "
+                               "deliberately; only a merged branch is deleted "
+                               "(reconcile or merge it, or `/repo-cleanup` after "
+                               "an attended decision)" % base)
     return {"deleted": deleted, "kept": kept, "skipped": skipped,
-            "skipped_reasons": skipped_reasons}
+            "skipped_reasons": skipped_reasons, "kept_reasons": kept_reasons}
 
 
 # --- unresolved: the reconcile pass's discovery + mechanical signals ---------
@@ -3067,6 +3075,17 @@ def main():
     # hand-aligned table and argparse would otherwise reflow it to mush.
     p = argparse.ArgumentParser(
         description=__doc__,
+        # A concrete, copy-pasteable example so the --target-before-subcommand
+        # ordering (F40) and the required paths are shown, not only described in
+        # prose a reader has to reconstruct (F144).
+        epilog=(
+            "examples (note --target precedes the subcommand):\n"
+            "  tanuki-loop --target myrepo doctor --loop-repo ~/work/myrepo "
+            "--scenarios ~/.tanuki/scenarios/myrepo.scenarios.json\n"
+            "  tanuki-loop --target myrepo init --loop-repo ~/work/myrepo "
+            "--scenarios ~/.tanuki/scenarios/myrepo.scenarios.json --phase 1\n"
+            "  tanuki-loop --target myrepo iter-start\n"
+            "  tanuki-loop --target myrepo status"),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     # --target is a global option and must precede the subcommand, e.g.
     # `tanuki-loop --target foo iter-start` (F40); it is a namespace slug, not a
