@@ -36,7 +36,7 @@ Argument handling ($ARGUMENTS):
 - `"<free text>"` (with or without a preceding `<target>`): an **ad-hoc
   scenario** — see "Ad-hoc scenarios" below. Disambiguation, in order: a
   **mode word** (`init`, `decide`, `status`, `history`, `view`, `mine`,
-  `ingest`) always wins — the closed set above is reserved, so a target or
+  `ingest`, `generate`) always wins — the closed set above is reserved, so a target or
   scenario sharing one of those names is addressed as `/tanuki <target>
   <mode>` (the mode word is only read in mode position, after the target);
   then an argument matching a configured target is a target; then one
@@ -77,6 +77,20 @@ Argument handling ($ARGUMENTS):
   *Alias:* `--ingest "<feedback>"`.
   The human never classifies; the tool stores the note verbatim and the
   normal extraction + dedupe passes decide everything downstream.
+- `<target> generate`: the **regeneration pass** — the first-class,
+  option-free entry to charter generation (a bare word: it does not drive,
+  spec-short-command-surface D6). Runs the same frontier-judgment, human-gated
+  generation the init flow's step 4 runs (§3 "Generation" in
+  `${CLAUDE_PLUGIN_ROOT}/specs/spec-tanuki-scenario-lifecycle/SPEC.md`),
+  reachable on any of its three triggers — **feature-drift** (the target
+  gained a skill/command/decision-point no charter covers), an **empty
+  unexplored pool**, or on demand. Candidate pool: the plugin's docs, the
+  ledger's friction history, and **trajectory-observed unexplored branches**
+  (decision-point alternatives recorded runs never took). Proposes charters at
+  the plan gate; the user approves/edits/rejects; only then are they written
+  and `tanuki-scheduler sync`'d (new ids enter as unexplored). Advisory and
+  operator-invoked — never automatic, never during an unattended loop, and no
+  tool mutates the matrix. No driving.
 
 ## Init (`/tanuki init` — the normal onboarding flow)
 
@@ -106,7 +120,9 @@ Manual alternative (still supported): copy an existing scenarios file (or the
 bundled `${CLAUDE_PLUGIN_ROOT}/templates/example.scenarios.json`) to
 `~/.tanuki/scenarios/<new-target>.scenarios.json` and edit `plugin`/`host`/
 scenarios. Offer init when the user names a target that has no config yet.
-Regenerate more charters (same gate) whenever the unexplored pool empties.
+Regenerate more charters through the first-class `generate` mode (`/tanuki
+<target> generate`) on any of its triggers — feature-drift, an empty
+unexplored pool, or on demand (same plan gate).
 
 ## Views (`/tanuki [target] view [name]` — the read-only surface)
 

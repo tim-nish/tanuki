@@ -79,11 +79,28 @@ configured target is a target; one that matches scenario id(s) selects them
 ## 3. Adaptive exploration (the scheduler)
 
 ### Generation (frontier judgment, human-gated)
-At init — and whenever the unexplored pool empties — the orchestrating
+Generation runs on **three triggers**: at **init**, whenever the **unexplored
+pool empties**, and on **feature-drift** — the target plugin gained surface
+(a new skill, command, or decision point) that no existing charter covers.
+The first two alone leave a gap the exploration quota exists to prevent,
+reintroduced one level up: the quota protects unexplored *declared* charters,
+but pool-empty fires once and then never again (nothing new enters the pool),
+so a plugin can grow indefinitely while every existing scenario passes and the
+loop converges on a **false quiet** — the newest surface never dogfooded. The
+feature-drift trigger closes that gap. It is **advisory and operator-invoked**,
+never automatic: a drift signal *informs*, and the operator invokes generation
+through the first-class `generate` entry (see `commands/tanuki.md`) — an
+unattended loop never grows the matrix, and no tool mutates it.
+
+On any trigger the orchestrating
 session generates charter candidates from: the plugin's README, `skills/*/
-SKILL.md`, and commands (external axes × intra-command decision points), plus
-the **ledger's friction history** (past finding clusters seed probes the docs
-would never suggest — the blind-spot mitigation). Generated charters are
+SKILL.md`, and commands (external axes × intra-command decision points), the
+**ledger's friction history** (past finding clusters seed probes the docs
+would never suggest — the blind-spot mitigation), and the **trajectory-observed
+unexplored branches** — decision-point alternatives that recorded runs took a
+*different* branch of (from `tanuki-scheduler history --scenario <id>
+--trajectory`), which are exploration candidates the docs alone would never
+surface. Generated charters are
 presented at a plan gate; the user approves/edits/rejects before anything is
 written. Generation is the charter row of the model-tier table — frontier or
 human, never delegated below.

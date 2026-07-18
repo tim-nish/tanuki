@@ -125,7 +125,7 @@ repeated renames):
 /tanuki <t>                  — drive (default)
 /tanuki <t> <scenario-ids>   — drive a subset
 /tanuki <t> "<free text>"    — drive ad-hoc
-/tanuki <t> init | decide | status | history | view
+/tanuki <t> init | decide | status | history | view | generate
 /tanuki <t> mine <run> | ingest "<text>"
   flags: --follow, --json, … (true modifiers only)
 ```
