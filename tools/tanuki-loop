@@ -621,7 +621,7 @@ def drift_note(target, repo):
     staleness = (f"the most stale is {worst} commit(s) behind the base"
                  if worst else "none has fallen behind the base yet")
     return (f"note: {n} unresolved loop branch(es) — integration branches "
-            f"from earlier runs holding work that never merged; {staleness}. "
+            f"holding work that never merged; {staleness}. "
             f"`tanuki-loop --target {target} reconcile` reports what to do "
             f"with them.")
 
@@ -3474,10 +3474,11 @@ def main():
                     help="advisory only; ignored if it disagrees with the "
                          "ledger-computed count")
     sp.add_argument("--patched", dest="patched", action="store_true",
-                    help="advisory only; ignored if it disagrees with the "
-                         "SHA-computed value")
+                    help="bare flag, takes NO value — '--patched 1' fails; "
+                         "the opposite is --no-patched (F163). Advisory only; "
+                         "ignored if it disagrees with the SHA-computed value")
     sp.add_argument("--no-patched", dest="patched", action="store_false",
-                    help="advisory only (see --patched)")
+                    help="bare flag, the pair of --patched; advisory only")
     sp.set_defaults(patched=None)
     sp = sub.add_parser("defer")
     sp.add_argument("--finding", required=True); sp.add_argument("--reason", required=True)
