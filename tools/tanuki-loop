@@ -275,7 +275,8 @@ def breaker_hint(reason):
         # the generic "inspect the worktree" hint the other four-part failures
         # get. The iteration simply committed nothing.
         return ("this iteration produced no commit — stage the work and "
-                "commit it, or `rollback` if the iteration should be undone")
+                "commit it; or re-run `iter-verify --no-patch` if no change was "
+                "expected this iteration; or `rollback` to undo the iteration")
     if "integration invariant" in r:
         return ("the four-part integration check failed — the iteration is in an "
                 "inconsistent state; reset it with `tanuki-loop --target <t> "
