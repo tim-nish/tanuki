@@ -264,6 +264,12 @@ def breaker_hint(reason):
         return ("test_cmd likely left untracked artifacts (e.g. __pycache__, "
                 ".pyc, coverage files) — add them to .gitignore or clean them; "
                 "the dirty paths are named in the breaker reason")
+    if "HEAD == start SHA but a patch was expected" in r:
+        # F131: the no-patch case has a concrete remedy — don't fall through to
+        # the generic "inspect the worktree" hint the other four-part failures
+        # get. The iteration simply committed nothing.
+        return ("this iteration produced no commit — stage the work and "
+                "commit it, or `rollback` if the iteration should be undone")
     if "integration invariant" in r:
         return ("the four-part integration check failed — the iteration is in an "
                 "inconsistent state; reset it with `tanuki-loop --target <t> "
@@ -2624,6 +2630,19 @@ def cmd_dashboard(args):
                  f"  iterations: {n_done}/{state['cap']} consumed "
                  f"({n_rolled_back} rolled back) · execution {elapsed // 60}m"
                  + ("" if lifecycle["active"] else " (frozen at close)")]
+        # F129: the same build-artifact warning `status` and `iter-verify`
+        # surface, on the live screen — a cold operator monitoring only the
+        # dashboard would otherwise miss regenerable output the loop's own
+        # commits swept onto the integration branch, which `gate-push` will
+        # refuse. Conditional like status's warning (null when empty), placed
+        # high so it is read before the merge decision below.
+        swept = _committed_artifacts(state)
+        if swept:
+            shown = ", ".join(swept[:8]) + (" …" if len(swept) > 8 else "")
+            lines.append(
+                f"  build-artifact WARNING: {shown} committed to the "
+                "integration branch — gate-push will refuse until they are "
+                "removed (also in `status`)")
         lines += drive_lines
 
         # -- (section 3) this run's ledger movement — ALWAYS present; lifetime
@@ -2919,7 +2938,12 @@ def run_verdict(state):
             v["summary"] += f" · delivered: PR #{d.get('pr')}"
         return v
     lb = state.get("last_breaker")
-    if lb:
+    # F118: a RECOVERED breaker is no longer a stop — recover --restore/--adopt
+    # (and the successful iter-start that follows) resumed the run. Honor the
+    # `recovered` flag exactly as run_lifecycle's breaker_open does, or the
+    # verdict reads "stopped" while lifecycle.active is true — a direct
+    # self-contradiction on one status screen.
+    if lb and not lb.get("recovered"):
         s = {"state": "stopped", "reason": lb.get("reason"), "at": lb.get("at"),
              "summary": f"stopped: {lb.get('reason')}"}
         if lb.get("hint"):
@@ -2933,6 +2957,15 @@ def run_verdict(state):
             "summary": f"running (healthy): {where}, no breaker"}
 
 
+def _committed_artifacts(state):
+    """Build-artifact paths the loop's own commits swept onto the integration
+    branch (F102). `status` surfaces these as its `warning`, `gate-push`
+    refuses to push them, and the dashboard flags them (F129) so an operator
+    watching only the live screen sees what the gate will later block on."""
+    return sorted({p for it in state["iterations"]
+                   for p in (it.get("build_artifacts_committed") or [])})
+
+
 def cmd_status(args):
     state = load_state(args.target, args.run)
     # The gate reads status before approving the merge, and it is the last
@@ -2940,8 +2973,7 @@ def cmd_status(args):
     # the audit trail would not be read in time (F102/F106). Always present,
     # explicitly null when empty: absence and "nothing to warn about" must not
     # be indistinguishable.
-    swept = sorted({p for it in state["iterations"]
-                    for p in (it.get("build_artifacts_committed") or [])})
+    swept = _committed_artifacts(state)
     warning = None
     if swept:
         shown = ", ".join(swept[:8]) + (" …" if len(swept) > 8 else "")
