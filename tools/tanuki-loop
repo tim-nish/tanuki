@@ -1030,6 +1030,57 @@ def resolve_base(repo, base):
     return base, base_sha
 
 
+def resolve_entry_fixtures(args):
+    """Stage-entry fixture declarations from the scenarios file
+    (spec-host-snapshot "Stage-entry fixtures"; story 1.16): a top-level
+    "entry_fixtures" registry {name: {"paths": [...], "producing_stage": s}}
+    plus per-scenario "entry_fixture": <name> references. Returns
+    {name: recipe} for every referenced recipe. Dies on a dangling reference
+    or a path-less recipe — a run that cannot pin its declared state must
+    not start (the same fail-closed rule as an uncloneable host)."""
+    if not args.scenarios:
+        return {}
+    with open_scenarios(args.scenarios, args.target) as f:
+        data = json.load(f)
+    registry = data.get("entry_fixtures") or {}
+    referenced = {}
+    for s in data.get("scenarios") or []:
+        name = s.get("entry_fixture")
+        if not name:
+            continue
+        if name not in registry:
+            die(f"scenario '{s.get('id')}' declares entry_fixture '{name}' "
+                f"but the scenarios file has no entry_fixtures['{name}'] "
+                "recipe")
+        recipe = registry[name]
+        if not recipe.get("paths"):
+            die(f"entry_fixture '{name}' declares no artifact paths")
+        referenced[name] = recipe
+    return referenced
+
+
+def pin_entry_fixtures(entry_fixtures, host_fixture_path, host_base_sha):
+    """Verify each declared recipe is materializable inside the pinned host
+    fixture and return its provenance record ({source_commit,
+    producing_stage_version} — spec-host-snapshot "Stage-entry fixtures").
+    The fixture clone is immutable, so presence at init IS the pin-once
+    guarantee: every iteration sees the identical artifacts. Raises
+    RuntimeError naming the missing paths otherwise (init fails closed)."""
+    pinned = {}
+    for name, recipe in sorted(entry_fixtures.items()):
+        missing = [p for p in recipe["paths"]
+                   if not os.path.exists(os.path.join(host_fixture_path, p))]
+        if missing:
+            raise RuntimeError(
+                f"entry_fixture '{name}' cannot be materialized — missing "
+                f"from the host fixture: {missing} — a run that cannot pin "
+                "its declared state must not start")
+        pinned[name] = {"paths": list(recipe["paths"]),
+                        "source_commit": host_base_sha,
+                        "producing_stage_version": recipe.get("producing_stage")}
+    return pinned
+
+
 def check_base_freshness(repo, base):
     """The staleness guard's measurement (issue #2), shared by `init` (which
     fails closed on it) and `doctor` (which reports it): best-effort fetch of
@@ -1210,6 +1261,24 @@ def cmd_init(args):
             host_base_sha = pin_host_fixture(host, host_fixture_path)
         except RuntimeError as e:
             die(str(e))                          # a run that cannot pin its host must not start
+    # Stage-entry fixtures (spec-host-snapshot amendment; story 1.16): pin
+    # the declared stage artifacts with provenance. An entry fixture is host
+    # state — on a hostless target the declaration is reported out of scope,
+    # never silently ignored.
+    entry_fixtures = resolve_entry_fixtures(args)
+    pinned_fixtures, entry_fixtures_note = {}, None
+    if entry_fixtures and not host:
+        entry_fixtures_note = (
+            f"entry_fixtures declared ({', '.join(sorted(entry_fixtures))}) "
+            "but this target is HOSTLESS — an entry fixture is host state "
+            "(spec-host-snapshot), so the declarations are out of scope and "
+            "nothing was pinned")
+    elif entry_fixtures:
+        try:
+            pinned_fixtures = pin_entry_fixtures(
+                entry_fixtures, host_fixture_path, host_base_sha)
+        except RuntimeError as e:
+            die(str(e))
     policy = {}
     if args.policy and os.path.exists(os.path.expanduser(args.policy)):
         with open(os.path.expanduser(args.policy), encoding="utf-8") as f:
@@ -1241,6 +1310,10 @@ def cmd_init(args):
         # note), diffed, written, or "restored".
         "host": host, "host_fixture_path": host_fixture_path,
         "host_base_sha": host_base_sha,
+        # Stage-entry fixtures pinned this run (story 1.16): {name:
+        # {paths, source_commit, producing_stage_version}}. The fixture
+        # clone is immutable, so these are identical for every iteration.
+        "entry_fixtures": pinned_fixtures,
     }
     save_state(state)
     with open(os.path.join(TANUKI_ROOT, args.target, "loop", "current"),
@@ -1255,6 +1328,13 @@ def cmd_init(args):
         audit(state, f"host fixture pinned @ {host_base_sha[:12]} from {host} "
                      f"-> {host_fixture_path}"
                      + (f" ({host_note})" if host_note else ""))
+    if pinned_fixtures:
+        audit(state, "entry fixtures pinned (identical for every iteration): "
+                     + ", ".join(f"{n} @ {p['source_commit'][:12]}"
+                                 f" (stage {p['producing_stage_version']})"
+                                 for n, p in sorted(pinned_fixtures.items())))
+    if entry_fixtures_note:
+        audit(state, f"note: {entry_fixtures_note}")
     # Name the cap (F78) and the artifact paths (F79) on the way in: the
     # morning gate is told to present audit.md/state.json/queue.md, and the
     # ~/.tanuki/<target>/loop/<run>/ convention is otherwise undocumented —
@@ -1269,6 +1349,8 @@ def cmd_init(args):
          "base_behind": n_behind, "branch_cleanup": cleaned,
          "host_fixture_path": host_fixture_path, "host_base_sha": host_base_sha,
          "host_freshness": host_note,
+         "entry_fixtures": pinned_fixtures or None,
+         "entry_fixtures_note": entry_fixtures_note,
          "cap": cap,
          "cap_note": ("%d iteration(s) max; rolled-back iterations count "
                       "toward the cap" % cap),
@@ -1576,6 +1658,38 @@ def cmd_doctor(args):
                            "detail": str(e)})
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+    # 6. Entry fixtures (spec-host-snapshot "Stage-entry fixtures"; story
+    #    1.16) — declared stage artifacts must be materializable or init
+    #    fails closed; a hostless declaration is out of scope, stated rather
+    #    than silently ignored. Reported in every report (F91).
+    try:
+        efx = resolve_entry_fixtures(args)
+    except SystemExit:
+        raise
+    if not efx:
+        checks.append({"check": "entry-fixtures", "ok": True,
+                       "detail": "no entry fixtures declared in the "
+                                 "scenarios file"})
+    elif not host:
+        checks.append({"check": "entry-fixtures", "ok": True,
+                       "detail": (f"declared ({', '.join(sorted(efx))}) but "
+                                  "the target is HOSTLESS — an entry fixture "
+                                  "is host state (spec-host-snapshot), so "
+                                  "the declarations are out of scope; init "
+                                  "will pin nothing")})
+    else:
+        missing = {n: [p for p in r["paths"]
+                       if not os.path.exists(os.path.join(host, p))]
+                   for n, r in efx.items()}
+        missing = {n: m for n, m in missing.items() if m}
+        checks.append({"check": "entry-fixtures", "ok": not missing,
+                       "detail": ("declared fixture(s) "
+                                  f"({', '.join(sorted(efx))}) all "
+                                  "materializable from the live host"
+                                  if not missing else
+                                  "init would FAIL CLOSED — missing from "
+                                  f"the live host: {missing}")})
 
     # PR-gate tooling (spec-tanuki-loop "PR-protected targets"): a target whose
     # gate mode is "pr" delivers its review material via `gh` — validate that

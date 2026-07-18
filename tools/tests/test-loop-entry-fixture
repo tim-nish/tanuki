@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# spec-host-snapshot "Stage-entry fixtures" / story 1.16: scenarios may
+# declare an entry_fixture recipe; init pins the declared stage artifacts
+# into the run's host fixture with {source_commit, producing_stage_version}
+# provenance, fails closed when a declared fixture cannot be materialized,
+# reports a hostless declaration as out of scope (never silently ignored),
+# and files without the key behave exactly as before. doctor carries an
+# entry-fixtures check in every report (F91).
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+loop="$here/tanuki-loop"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+jget() { python3 -c "import json,sys;print(json.load(sys.stdin)$1)"; }
+jcheck() { python3 -c "
+import json,sys
+r=json.load(sys.stdin)
+print(json.dumps(next(c for c in r['checks'] if c['check']=='$1')))"; }
+
+# loop repo (plugin) on main
+repo="$tmp/repo"
+git init -q "$repo" && git -C "$repo" config user.email t@e && git -C "$repo" config user.name t
+git -C "$repo" checkout -qb main && echo v0 > "$repo/f" && git -C "$repo" add -A && git -C "$repo" commit -qm base
+
+# live host with a committed stage artifact
+host="$tmp/host"
+git init -q "$host" && git -C "$host" config user.email t@e && git -C "$host" config user.name t
+git -C "$host" checkout -qb main && mkdir -p "$host/facts" \
+  && echo harvested > "$host/facts/sheet.md" \
+  && git -C "$host" add -A && git -C "$host" commit -qm h0
+host_tip="$(git -C "$host" rev-parse HEAD)"
+
+sc="$tmp/hosted.scenarios.json"
+cat > "$sc" <<EOF
+{"target":"ef","plugin":"$repo","host":"$host",
+ "loop":{"iterations":2},
+ "entry_fixtures":{"harvested":{"paths":["facts/sheet.md"],
+                                "producing_stage":"harvest-v1"}},
+ "scenarios":[{"id":"s1","charter":"c","prompt":"p",
+               "entry_fixture":"harvested"},
+              {"id":"s2","charter":"c","prompt":"p"}]}
+EOF
+
+# --- init pins the declared fixture with provenance --------------------------
+"$loop" --target ef init --loop-repo "$repo" --scenarios "$sc" > /tmp/ef1.json 2>&1 \
+  || { cat /tmp/ef1.json; fail "hosted init with entry_fixture exited non-zero"; }
+run="$(jget "['run']" < /tmp/ef1.json)"
+src="$(jget "['entry_fixtures']['harvested']['source_commit']" < /tmp/ef1.json)"
+stage="$(jget "['entry_fixtures']['harvested']['producing_stage_version']" < /tmp/ef1.json)"
+[ "$src" = "$host_tip" ] || fail "provenance source_commit ($src) != host tip ($host_tip)"
+[ "$stage" = "harvest-v1" ] || fail "provenance producing_stage_version wrong: $stage"
+grep -q '"entry_fixtures"' "$TANUKI_ROOT/ef/loop/$run/state.json" \
+  || fail "state.json missing entry_fixtures"
+grep -q "entry fixtures pinned" "$TANUKI_ROOT/ef/loop/$run/audit.md" \
+  || fail "audit missing the pin record"
+pass "init pins the declared fixture and records provenance in state + audit"
+
+# --- unmaterializable fixture: init fails closed -----------------------------
+sc_bad="$tmp/bad.scenarios.json"
+python3 - "$sc" "$sc_bad" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["entry_fixtures"]["harvested"]["paths"] = ["facts/nonexistent.md"]
+json.dump(d, open(sys.argv[2], "w"))
+PY
+rc=0; "$loop" --target ef2 init --loop-repo "$repo" --scenarios "$sc_bad" >/tmp/ef2.out 2>&1 || rc=$?
+[ "$rc" != "0" ] || fail "init must fail closed on an unmaterializable fixture"
+grep -q "cannot be materialized" /tmp/ef2.out \
+  || fail "failure must name the unmaterializable fixture: $(cat /tmp/ef2.out)"
+pass "unmaterializable declared fixture fails init closed"
+
+# --- no entry_fixture keys: unchanged behavior -------------------------------
+sc_plain="$tmp/plain.scenarios.json"
+python3 - "$sc" "$sc_plain" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d.pop("entry_fixtures")
+for s in d["scenarios"]: s.pop("entry_fixture", None)
+json.dump(d, open(sys.argv[2], "w"))
+PY
+"$loop" --target ef3 init --loop-repo "$repo" --scenarios "$sc_plain" > /tmp/ef3.json 2>&1 \
+  || fail "plain init exited non-zero"
+[ "$(jget "['entry_fixtures']" < /tmp/ef3.json)" = "None" ] \
+  || fail "no declaration must leave entry_fixtures null"
+pass "scenarios without the key round-trip unchanged"
+
+# --- hostless target with a declaration: out of scope, stated ----------------
+sc_hostless="$tmp/hostless.scenarios.json"
+python3 - "$sc" "$sc_hostless" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d.pop("host")
+json.dump(d, open(sys.argv[2], "w"))
+PY
+"$loop" --target ef4 init --loop-repo "$repo" --scenarios "$sc_hostless" > /tmp/ef4.json 2>&1 \
+  || fail "hostless init exited non-zero"
+jget "['entry_fixtures_note']" < /tmp/ef4.json | grep -q "HOSTLESS" \
+  || fail "hostless declaration must be reported out of scope"
+[ "$(jget "['entry_fixtures']" < /tmp/ef4.json)" = "None" ] \
+  || fail "hostless init must pin nothing"
+pass "hostless declaration: out of scope stated, nothing pinned"
+
+# --- doctor: entry-fixtures check present in every report --------------------
+D=("$loop" --target ef doctor --loop-repo "$repo")
+"${D[@]}" --scenarios "$sc" --test-cmd "test -f f" > /tmp/efd1.json 2>&1 || true
+jcheck entry-fixtures < /tmp/efd1.json | jget '["ok"]' | grep -q True \
+  || fail "hosted+materializable must pass the entry-fixtures check"
+rc=0; "${D[@]}" --scenarios "$sc_bad" --test-cmd "test -f f" > /tmp/efd2.json 2>&1 || rc=$?
+jcheck entry-fixtures < /tmp/efd2.json | jget '["ok"]' | grep -q False \
+  || fail "missing artifact must fail the entry-fixtures check"
+jcheck entry-fixtures < /tmp/efd2.json | grep -q "FAIL CLOSED" \
+  || fail "doctor must state that init would fail closed"
+"${D[@]}" --scenarios "$sc_hostless" --test-cmd "test -f f" > /tmp/efd3.json 2>&1 || true
+jcheck entry-fixtures < /tmp/efd3.json | grep -q "out of scope" \
+  || fail "hostless declaration must be reported out of scope by doctor"
+"${D[@]}" --scenarios "$sc_plain" --test-cmd "test -f f" > /tmp/efd4.json 2>&1 || true
+jcheck entry-fixtures < /tmp/efd4.json | grep -q "no entry fixtures declared" \
+  || fail "the check must be present even with nothing declared (F91)"
+pass "doctor entry-fixtures check: pass, fail-closed, out-of-scope, always present"
+
+echo "ALL PASS"
