@@ -1070,11 +1070,35 @@ def pin_host_fixture(host, dest):
 
 # --- subcommands -------------------------------------------------------------
 
+def bad_loop_repo_message(raw, repo):
+    """Build the '--loop-repo is not a git repo' error (issue #119).
+
+    Always echoes the ABSOLUTE resolved path so a relative-resolution mistake
+    (a stray `cd` earlier in the session) is visible. If the current working
+    directory looks like it's inside a loop-managed worktree — a path segment
+    matching `.tanuki-loop-*`, or a git toplevel that isn't the passed repo —
+    say so explicitly and point back at the real repo. Read-only detection."""
+    lines = [f"--loop-repo is not a git repo: {repo}"]
+    if raw != repo:
+        lines.append(f"  (resolved from '{raw}' relative to {os.getcwd()})")
+    cwd = os.getcwd()
+    stray = next((seg for seg in cwd.split(os.sep)
+                  if seg.startswith(".tanuki-loop-")), None)
+    rc, top = git(cwd, "rev-parse", "--show-toplevel")
+    inside_other = rc == 0 and os.path.abspath(top) != repo
+    if stray or inside_other:
+        lines.append(f"  cwd ({cwd}) is inside another run's loop worktree"
+                     + (f" ('{stray}')" if stray else "") + ";")
+        lines.append("  --loop-repo resolved against it. cd back to the real "
+                     "repo (or pass an absolute --loop-repo) and re-run.")
+    return "\n".join(lines)
+
+
 def cmd_init(args):
     repo = os.path.abspath(os.path.expanduser(args.loop_repo))
     rc, _ = git(repo, "rev-parse", "--git-dir")
     if rc != 0:
-        die(f"--loop-repo is not a git repo: {repo}")
+        die(bad_loop_repo_message(args.loop_repo, repo))
     # Per-target loop config from the scenarios file's "loop" block — so a
     # run needs no repo-specific flags typed each time. CLI flags override.
     cfg = resolve_loop_config(args)
