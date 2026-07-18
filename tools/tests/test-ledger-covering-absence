@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# spec-tanuki-scenario-lifecycle "Cheapest covering verify" / story 1.20:
+# driven-absence compaction counts a run when any scenario COVERING the
+# finding's surface was driven (finding absent) — untagged findings keep the
+# originating-only behavior byte-for-byte — and an accepted, surface-tagged
+# finding that RECURS is re-pinned to its originating scenario (the
+# under-reproduction guard, plain ledger arithmetic).
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+ledger="$here/tanuki-ledger"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+
+t=ca
+mkdir -p "$TANUKI_ROOT/$t"
+# Scheduler state with covers: review-only covers the 'review' surface.
+cat > "$TANUKI_ROOT/$t/scheduler.json" <<'EOF'
+{"scenarios": {"e2e-review": {"covers": ["review"]},
+               "review-only": {"covers": ["review"]}},
+ "runs_recorded": []}
+EOF
+
+"$ledger" --target $t init >/dev/null
+"$ledger" --target $t upsert-finding --title "tagged" --kind gap \
+  --evidence "20260701-r1/e2e-review#1" --surface review >/dev/null
+"$ledger" --target $t set-status --id F1 --status accepted >/dev/null 2>&1
+"$ledger" --target $t upsert-finding --title "untagged" --kind gap \
+  --evidence "20260701-r1/e2e-review#2" >/dev/null
+"$ledger" --target $t set-status --id F2 --status accepted >/dev/null 2>&1
+
+# Three later runs drive ONLY the cheap cover (review-only), never e2e-review.
+for r in 20260702-r2 20260703-r3 20260704-r4; do
+  mkdir -p "$TANUKI_ROOT/$t/events/$r"
+  cat > "$TANUKI_ROOT/$t/events/$r/manifest.json" <<'EOF'
+{"results": [{"scenario": "review-only", "status": "ok"}]}
+EOF
+done
+
+# --- covering-absence: the tagged finding tombstones; the untagged does not --
+"$ledger" --target $t compact --unseen-runs 3 >/dev/null 2>&1 || true
+py="$ledger --target $t findings"
+$py | python3 -c "
+import json,sys
+fs={f['id']:f for f in json.load(sys.stdin)}
+assert fs['F1'].get('tombstone'), 'F1 (tagged) must tombstone via cover-driven absence: %r' % fs['F1']
+assert not fs['F2'].get('tombstone'), 'F2 (untagged) must NOT tombstone — its scenario was never re-driven'
+" || fail "covering-absence compaction wrong"
+pass "cover-driven absence tombstones the tagged finding; untagged unchanged"
+
+# --- re-pin guard: an accepted tagged finding that recurs gets pinned --------
+"$ledger" --target $t upsert-finding --title "tagged2" --kind gap \
+  --evidence "20260705-r5/e2e-review#1" --surface review >/dev/null
+"$ledger" --target $t set-status --id F3 --status accepted >/dev/null 2>&1
+outp="$("$ledger" --target $t upsert-finding --match F3 \
+  --evidence "20260706-r6/review-only#4" --title x 2>&1)"
+echo "$outp" | grep -q "RE-PINNED" || fail "recurrence must announce the re-pin: $outp"
+$py | python3 -c "
+import json,sys
+fs={f['id']:f for f in json.load(sys.stdin)}
+assert fs['F3'].get('verify_pin') is True, fs['F3']
+" || fail "verify_pin not set on recurrence"
+pass "recurrence of an accepted tagged finding re-pins to the originating scenario"
+
+# --- an open (not accepted) tagged finding does not re-pin on bump -----------
+"$ledger" --target $t upsert-finding --title "open tagged" --kind gap \
+  --evidence "20260705-r5/e2e-review#2" --surface review >/dev/null
+outp2="$("$ledger" --target $t upsert-finding --match F4 \
+  --evidence "20260706-r6/e2e-review#5" --title x 2>&1)"
+echo "$outp2" | grep -q "RE-PINNED" && fail "an open finding must not re-pin" || true
+pass "open findings never re-pin (guard applies to accepted only)"
+
+echo "ALL PASS"
