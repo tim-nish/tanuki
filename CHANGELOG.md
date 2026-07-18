@@ -6,6 +6,8 @@ All notable changes to Tanuki are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-18
+
 ### Removed
 - The **coverage function**, end to end (operator decision, 2026-07-18 — no
   demand: in four days of operation no target ever declared `axes`, and the
@@ -25,12 +27,32 @@ All notable changes to Tanuki are documented here. The format follows
   paging problem.
 
 ### Added
+- PR-protected targets: `"gate": "pr"` in the scenarios `"loop"` block
+  reshapes the morning gate for a base branch that refuses direct pushes —
+  the overnight close delivers **one Draft PR** via `tanuki-loop gate-pr`
+  (pushes the integration branch, never forced; idempotent and
+  failure-safe), and the Human Gate becomes PR approval + merge on the
+  forge. The loop ends at delivery (owner ruling 2026-07-17): no closing
+  command; `status`, `init`, and `unresolved` **derive** the settlement
+  (landed | pending | declined | unknown) from the forge and the current
+  base, offline-safe with a stale-marked cache.
+- `tanuki-loop unresolved` + the `/tanuki-loop <target> reconcile` sitting —
+  the debt-paydown path for integration branches that outlived their merge
+  window: `unresolved` reports which loop branches never merged, their
+  staleness, and per-commit mechanical signals (files touched, clean
+  cherry-pick, cited findings with current status) — **signals, never
+  verdicts**; `reconcile` classifies every hunk against the current base
+  (already-landed / superseded / conflicting / still-applicable /
+  worth-preserving), produces a landing plan, and mutates nothing until one
+  explicit gate. `~/.tanuki/<target>/unresolved.md` is the stable-path
+  brief.
 - `/tanuki <target> view [name]` — one option-free door to every read-only
   view (`specs/spec-tanuki-view/SPEC.md` D1/D2): bare `view` opens a picker
-  over the closed catalog — `status`, `live`, `history`, `coverage`,
-  `trajectory` — each with a state-derived hint; `view <name>` jumps
-  straight there. `coverage` and `trajectory` gain named doors of their own
-  (previously reachable only as a conditional block inside `--history` and
+  over the closed catalog — `status`, `live`, `history`, `trajectory` (the
+  catalog shipped with `coverage` as a fifth view; removed in this same
+  release, see Removed above) — each with a state-derived hint; `view <name>`
+  jumps straight there. `trajectory` gains a named door of its own
+  (previously reachable only through
   the `--history <scenario>` flag overload). The surface reads and renders
   only; the `tanuki-*` tools remain the fully-optioned computing substrate,
   and no view writes. View vocabulary is target-local in v1: axis names
@@ -65,7 +87,46 @@ All notable changes to Tanuki are documented here. The format follows
   resolve and the remote never diverges under a concurrent workflow. A diverged
   remote is refused (reconcile + re-run), never force-pushed. (#5)
 
+### Changed
+- The README documents the operator-facing loop surfaces that existed only
+  in `--help` and the command docs: `doctor` (with its required
+  `--loop-repo`/`--scenarios`), the unattended-run ceilings
+  (`--wall-time`/`--token-budget`/`--phase`), the `"gate": "pr"` Draft-PR
+  flow, `dashboard --live` vs `--follow`, and a standing pointer that each
+  tool's `--help` is the complete surface — loop-internal subcommands the
+  skill drives (`iter-start`, `record-cycle`, …) are expected, not
+  undocumented.
+
 ### Fixed
+- `tanuki-ledger compact` now works on hand-ingested ledgers: `ingest` and
+  `ingest-note` write a minimal manual run manifest (`results: []`, never
+  overwriting a driven one), so the elapsed-run verify-by-absence fallback
+  the spec already promised can actually advance — previously an accepted
+  finding on a hand-built ledger reported "nothing to compact" forever.
+  A manual run drives no scenario, so it can never manufacture false
+  driven-absence for a real one. (#106)
+- The `tanuki-loop` dashboard surfaces the committed build-artifact warning
+  that `status` and `iter-verify` already report (same computation, shared),
+  so an operator watching only the live screen sees what `gate-push` will
+  later refuse. (F129)
+- `tanuki-loop status` `verdict` honors a recovered breaker: after
+  `recover --restore`/`--adopt` (and the successful `iter-start` that
+  follows) the verdict no longer reads "stopped" with the stale breaker
+  reason while `lifecycle.active` is true. (F118)
+- The no-patch `iter-verify` breaker ("HEAD == start SHA but a patch was
+  expected") gives a concrete remedy — commit the work, or `rollback` —
+  instead of the generic four-part-failure hint. (F131)
+- `view live`'s empty states explain the pre-`init` window: a just-launched
+  loop is invisible until `init` persists state (target resolution,
+  `doctor`, and preflight are deliberately stateless, and doctor can take
+  minutes), so the `live:no-active-run` / `live:never-initialized` reasons
+  now say so instead of misleading the operator who just started a loop.
+  (#102)
+- The bare `view` picker is pinned to **all four** catalog views as named
+  options — the four-view catalog fits the interactive picker's four-option
+  cap exactly, so a view is never demoted behind the free-text/`Other`
+  affordance and never dropped because it was already viewed this session.
+  (#103)
 - `view live` means an actively running loop, never the final dashboard of
   the latest completed run (`specs/spec-tanuki-view/SPEC.md` D2, amended):
   `tanuki-loop dashboard --live` renders the dashboard only while the run is
@@ -128,5 +189,6 @@ First public release — Tanuki packaged as a Claude Code plugin.
 - Deterministic tools (zero runtime dependencies): `tanuki-drive`,
   `tanuki-ledger`, `tanuki-scheduler`, `tanuki-loop`, `tanuki-preflight`.
 
-[Unreleased]: https://github.com/tim-nish/tanuki/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/tim-nish/tanuki/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/tim-nish/tanuki/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/tim-nish/tanuki/releases/tag/v0.1.0
