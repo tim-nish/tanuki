@@ -251,6 +251,11 @@ one.
 
 ## 2. Morning gate (attended — invariant in every phase)
 
+**Every `main` in this section is a placeholder** (F100/F103): the base
+branch's real name is `init`'s labeled `base` field (it may be `master` or
+anything else) — take `base`, `base_sha`, and `integration_branch` from
+`init`'s output before running any snippet below.
+
 Do not end at "here is what ran." Present, for one review:
 - the **integration branch diff** (the relocated Human Gate). Copy-pasteable,
   using the `base_sha` and `integration_branch` that `init` printed:
