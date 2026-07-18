@@ -406,11 +406,24 @@ def cmd_upsert(args, ledger):
                     f["surface"] = args.surface
                 if args.verify_pin:
                     f["verify_pin"] = True
+                # Under-reproduction guard (story 1.20): an ACCEPTED,
+                # surface-tagged finding that recurs was being verified by
+                # absence — possibly via a cheaper cover that under-
+                # reproduces. Re-pin its verify entry to the originating
+                # scenario (ledger arithmetic; the recurrence itself already
+                # reset absence by advancing last_seen_run).
+                repinned = False
+                if (f.get("status") == "accepted" and f.get("surface")
+                        and not f.get("verify_pin")):
+                    f["verify_pin"] = repinned = True
                 save(args.target, ledger)
                 # before->after so the Miner can report the run delta without
                 # a separate pre-mine snapshot (spec §2).
                 print(f"bumped {f['id']}: recurrence={before}->{f['recurrence']}, "
-                      f"scenarios={len(f['scenarios'])}")
+                      f"scenarios={len(f['scenarios'])}"
+                      + (" — RE-PINNED to its originating scenario: it "
+                         "recurred during cover-driven verification "
+                         "(under-reproduction guard)" if repinned else ""))
                 return
         print(f"error: no finding {args.match}", file=sys.stderr)
         sys.exit(2)
@@ -796,6 +809,26 @@ def cmd_compact(args, ledger):
          else cfg["compaction_unseen_runs"])
     runs = all_run_ids(args.target)
     driven = driven_scenarios_by_run(args.target)
+    # Covering scenarios (story 1.20 / spec "Cheapest covering verify"):
+    # the scheduler's synced covers tags generalize driven-absence — a run
+    # counts when any scenario COVERING the finding's surface was driven and
+    # the finding did not recur. Read once, tolerantly: no scheduler state
+    # (or no covers) degrades to the originating-scenario behavior exactly.
+    covers_by_sid = {}
+    try:
+        with open(os.path.join(TANUKI_ROOT, args.target, "scheduler.json"),
+                  encoding="utf-8") as _f:
+            covers_by_sid = {sid: set(st.get("covers") or [])
+                             for sid, st in
+                             json.load(_f).get("scenarios", {}).items()}
+    except (OSError, ValueError):
+        pass
+
+    def covering_scenarios(f):
+        tag = f.get("surface")
+        if not tag:
+            return set()
+        return {sid for sid, tags in covers_by_sid.items() if tag in tags}
 
     def runs_since(last_run):
         # Runs recorded after the finding was last seen. A missing last_seen_run
@@ -819,7 +852,12 @@ def cmd_compact(args, ledger):
         # elapsed runs (legacy; manual-reported findings still verify by time).
         # A real scenario merely absent from recent manifests keeps `scen`
         # non-empty, so it does NOT fall back — it just accrues no absence.
-        scen = set(f.get("scenarios", [])) - {"ingest"}
+        # Covering-absence (story 1.20): any scenario covering the finding's
+        # surface counts alongside the originating ones — "replayed N times
+        # and gone" now means replayed via any declared cover. Untagged
+        # findings keep the originating-only set, byte-for-byte.
+        scen = ((set(f.get("scenarios", [])) - {"ingest"})
+                | covering_scenarios(f))
         if not scen:
             return runs_since(f.get("last_seen_run"))
         last = f.get("last_seen_run")
