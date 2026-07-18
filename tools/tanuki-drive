@@ -32,6 +32,11 @@ redundant only when they also repeat its internal path.
 
 Configuration (docs/tanuki-spec.md "Configuration"): built-in defaults <
 ~/.tanuki/config.json < the scenario file's "defaults" block < CLI flags.
+The scenario file's "loop" block may set "drive_model" — a target-level
+default tier for the simulated-user DRIVER only (issue #139): per-scenario
+"model" wins for its scenario, then --model, then drive_model, then the
+config chain. The plugin under test is never affected. The effective driver
+model is recorded per scenario in the manifest.
 Per-scenario "model" must stay at or below model_ceiling (haiku < sonnet <
 opus; Fable/Mythos-class is above every ceiling; unknown names fail closed) —
 a frontier driver copes with the friction the run exists to surface.
@@ -106,6 +111,14 @@ def load_config(scenario_file_data=None):
             cfg.update(json.load(f))
     if scenario_file_data:
         cfg.update(scenario_file_data.get("defaults", {}))
+        # story 1.15 / issue #139: the scenarios "loop" block may set a
+        # target-level driver tier (drive_model). Precedence stays
+        # config < CLI: a per-scenario "model" key wins for its scenario,
+        # then --model, then this, then defaults/config.json. Applies only
+        # to the simulated-user driver; the plugin under test is untouched.
+        drive_model = (scenario_file_data.get("loop") or {}).get("drive_model")
+        if drive_model:
+            cfg["driver_model"] = drive_model
     return cfg
 
 
