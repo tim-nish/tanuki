@@ -264,6 +264,12 @@ def breaker_hint(reason):
         return ("test_cmd likely left untracked artifacts (e.g. __pycache__, "
                 ".pyc, coverage files) — add them to .gitignore or clean them; "
                 "the dirty paths are named in the breaker reason")
+    if "HEAD == start SHA but a patch was expected" in r:
+        # F131: the no-patch case has a concrete remedy — don't fall through to
+        # the generic "inspect the worktree" hint the other four-part failures
+        # get. The iteration simply committed nothing.
+        return ("this iteration produced no commit — stage the work and "
+                "commit it, or `rollback` if the iteration should be undone")
     if "integration invariant" in r:
         return ("the four-part integration check failed — the iteration is in an "
                 "inconsistent state; reset it with `tanuki-loop --target <t> "
