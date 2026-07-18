@@ -1976,6 +1976,23 @@ def cmd_iter_verify(args):
     # read (spec-tanuki-view D4) — git runs here, never in the render path. A
     # no-patch iteration records [] (distinct from a legacy run's absent key).
     it["commits"] = iteration_commits(wt, start, head)
+    # Budget accounting at the barrier (spec-tanuki-loop "Concurrent drives";
+    # story 1.22): the iteration's cost/turn totals are the SUM across every
+    # drive result in its manifest — concurrent drives included — folded in
+    # here, before the next iter-start's breaker evaluation, so the stored
+    # harness-tripped ceiling reads the true total. Absent manifest (no drive
+    # recorded) leaves the key out, exactly as before.
+    mpath = os.path.join(TANUKI_ROOT, state["target"], "events",
+                         f"{state['run']}-iter{it['n']}", "manifest.json")
+    try:
+        with open(mpath, encoding="utf-8") as f:
+            _res = json.load(f).get("results", [])
+        it["drive_totals"] = {
+            "scenarios": len(_res),
+            "cost_usd": round(sum(r.get("cost_usd") or 0 for r in _res), 4),
+            "num_turns": sum(r.get("num_turns") or 0 for r in _res)}
+    except (OSError, ValueError):
+        pass
     state["head_expected"] = head
     save_state(state)
     audit(state, f"iter {it['n']}: verified, end @ {head[:12]}")
@@ -3038,11 +3055,29 @@ def cmd_dashboard(args):
                        and cur is not None and cur["phase"] == "started"
                        and drive_it is cur)
             if driving:
-                drive_lines.append(
-                    f"  NOW: iter {cur['n']} driving "
-                    f"[{p['done']}/{p['total']}] {p.get('current')} — "
-                    f"{p.get('stage')} ({p.get('elapsed_s', 0)}s, "
-                    f"{p.get('captured_kb', 0)}KB)")
+                # Concurrent drives (spec-tanuki-loop "Concurrent drives";
+                # story 1.22): with several scenarios in flight there is no
+                # single "current" — render every `running` entry, straight
+                # from the progress substrate (render, don't compute). One
+                # (or zero, for a pre-concurrency progress file) in flight
+                # keeps the serial line.
+                running = p.get("running") or []
+                if len(running) > 1:
+                    stages = ", ".join(
+                        f"{e['scenario']} ({e.get('stage', '?')}"
+                        + (f", {e['elapsed_s']}s"
+                           if e.get("elapsed_s") is not None else "")
+                        + ")" for e in running)
+                    drive_lines.append(
+                        f"  NOW: iter {cur['n']} driving "
+                        f"[{p['done']}/{p['total']}] {len(running)} in "
+                        f"parallel: {stages}")
+                else:
+                    drive_lines.append(
+                        f"  NOW: iter {cur['n']} driving "
+                        f"[{p['done']}/{p['total']}] {p.get('current')} — "
+                        f"{p.get('stage')} ({p.get('elapsed_s', 0)}s, "
+                        f"{p.get('captured_kb', 0)}KB)")
             # F46 / issue #65: "drive" is tanuki-drive, an internal term a cold
             # reader has never met — define it inline, the way the 'fixed'
             # counter does (F6), rather than renaming the fixed-skeleton

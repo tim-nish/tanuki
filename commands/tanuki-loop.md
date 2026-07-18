@@ -150,9 +150,12 @@ breakers, records the start SHA, and snapshots the ledger (exit 3 +
    While the drive runs in the background, follow /tanuki's
    **background-liveness rule**: read `<run-dir>/progress.json` on a periodic
    check (~2–3 min) and relay one compact `[done/total] …` line per update —
-   never a bare "waiting" turn. In a supervised (Phase 1) run this is the
-   operator's window into the loop; unattended, the same lines go to the
-   audit trail.
+   never a bare "waiting" turn. Under `drive_concurrency > 1` the relay line
+   reflects the aggregate from the progress file's `running` list — e.g.
+   `[3/6] two running: s2 (80s), s5 (40s)` — always sourced from the
+   substrate, never re-derived (story 1.22). In a supervised (Phase 1) run
+   this is the operator's window into the loop; unattended, the same lines
+   go to the audit trail.
 2. **Mine.** Ingest events; run extraction + frontier dedupe into the ledger
    (`${CLAUDE_PLUGIN_ROOT}/docs/tanuki-spec.md` §2). Recurrence updates as normal.
 3. **Classify (internal — forked rules copied from the operator's attended
