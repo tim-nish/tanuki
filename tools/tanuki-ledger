@@ -269,7 +269,11 @@ def cmd_ingest(args, ledger):
     # manual manifest (skips any run that already has a driven one).
     for run in sorted(runs_seen):
         write_manual_manifest(args.target, run)
-    print(f"ingested: {new} new event(s), {dup} exact duplicate(s) collapsed")
+    # flush: piped stdout is block-buffered while stderr is not, so without it
+    # the collapsed detail lines (stderr) overtake this summary in a merged
+    # capture and the output reads backwards (F121).
+    print(f"ingested: {new} new event(s), {dup} exact duplicate(s) collapsed",
+          flush=True)
     for rec in list(collapsed.values())[:COLLAPSE_LIST_CAP]:
         detail = (rec.get("detail") or "")
         if len(detail) > 60:
@@ -406,7 +410,15 @@ def cmd_upsert(args, ledger):
         finding["notes"] = [args.note]
     ledger["findings"].append(finding)
     save(args.target, ledger)
-    print(f"created {fid}: {args.title}")
+    # F22: a multi-pointer creation still starts at recurrence:1 (recurrence
+    # counts upsert calls, not evidence pointers — F72). Say so at the exact
+    # moment the mismatch is visible, instead of leaving it to --help.
+    tail = ""
+    if len(evidence) > 1:
+        tail = (f" ({len(evidence)} evidence pointers, recurrence:1 — "
+                f"recurrence counts upsert calls, not pointers; "
+                f"bump with --match {fid})")
+    print(f"created {fid}: {args.title}{tail}")
 
 
 def cmd_promote(args, ledger):
