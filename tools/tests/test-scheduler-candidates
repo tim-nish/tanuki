@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# Fixture for the trajectory-observed unexplored-branch candidate pool
+# (specs/spec-tanuki-scenario-lifecycle §3, story 1.14):
+# `tanuki-scheduler --target t candidates` derives, READ-ONLY from persisted
+# per-run event files, the decision-point alternatives that no recorded run
+# ever selected. Asserts (a) an untaken alternative becomes a candidate naming
+# it, (b) a fully-explored point contributes none, and that the derivation
+# degrades gracefully (no trajectories / pre-trajectory runs -> no candidates,
+# never a crash) and never writes scheduler state.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+sched="$here/tanuki-scheduler"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+jq_py() { python3 -c "import json,sys;print(json.load(sys.stdin)$1)"; }
+S=("$sched" --target t)
+
+ev() {  # ev <run> <scenario> : reads jsonl lines from stdin into the event file
+  local run="$1" scen="$2"
+  mkdir -p "$TANUKI_ROOT/t/events/$run"
+  cat > "$TANUKI_ROOT/t/events/$run/$scen.events.jsonl"
+}
+
+# --- no trajectories at all: empty, not a crash --------------------------------
+[ "$("${S[@]}" candidates --json | jq_py "['candidates']")" = "[]" ] \
+  || fail "a target with no recorded trajectories must yield no candidates"
+pass "graceful: no recorded trajectories -> empty candidate pool"
+
+# --- fixture: two runs of one scenario -----------------------------------------
+# recover-mode: alternatives --restore|--adopt, but every run took --restore
+#               -> --adopt is an unexplored branch (candidate).
+# log-level:    alternatives quiet|verbose, taken quiet in r001 and verbose in
+#               r002 -> fully explored (NO candidate).
+ev r001 s1 <<'EOF'
+{"type":"user_choice","seq":1,"point":"recover-mode","selected":"--restore","alternatives":["--restore","--adopt"]}
+{"type":"user_choice","seq":2,"point":"log-level","selected":"quiet","alternatives":["quiet","verbose"]}
+{"type":"outcome","seq":3,"disposition":"ok","detail":"done"}
+EOF
+ev r002 s1 <<'EOF'
+{"type":"user_choice","seq":1,"point":"recover-mode","selected":"--restore","alternatives":["--restore","--adopt"]}
+{"type":"user_choice","seq":2,"point":"log-level","selected":"verbose","alternatives":["quiet","verbose"]}
+{"type":"outcome","seq":3,"disposition":"ok","detail":"done"}
+EOF
+
+before="$(ls -la "$TANUKI_ROOT/t" 2>/dev/null)"
+cand="$("${S[@]}" candidates --json)"
+
+# (a) untaken alternative surfaces as a candidate naming it ---------------------
+echo "$cand" | python3 -c '
+import json, sys
+c = json.load(sys.stdin)["candidates"]
+rm = [x for x in c if x["scenario"] == "s1" and x["point"] == "recover-mode"]
+assert len(rm) == 1, rm
+assert rm[0]["untaken"] == ["--adopt"], rm[0]
+assert rm[0]["taken"] == ["--restore"], rm[0]
+' || fail "an untaken alternative must be a candidate naming the untaken value"
+pass "(a) unexplored branch -> candidate names scenario, point, untaken alternative"
+
+# (b) fully-explored point contributes no candidate -----------------------------
+echo "$cand" | python3 -c '
+import json, sys
+c = json.load(sys.stdin)["candidates"]
+assert not any(x["point"] == "log-level" for x in c), \
+    "a point whose alternatives were all taken must yield no candidate: %r" % c
+' || fail "a fully-explored decision point must contribute no candidate"
+pass "(b) fully-explored decision point -> no candidate"
+
+# human-readable surface names the untaken alternative --------------------------
+"${S[@]}" candidates | grep -q -- "--adopt" \
+  || fail "text output must name the untaken alternative"
+pass "text surface names the untaken alternative"
+
+# --scenario filter is honored --------------------------------------------------
+[ "$("${S[@]}" candidates --scenario s2 --json | jq_py "['candidates']")" = "[]" ] \
+  || fail "--scenario filter must restrict to the named scenario"
+pass "--scenario filter restricts the pool"
+
+# read-only: derivation writes no scheduler state -------------------------------
+[ ! -e "$TANUKI_ROOT/t/scheduler.json" ] \
+  || fail "candidates must not create scheduler state"
+[ "$(ls -la "$TANUKI_ROOT/t" 2>/dev/null)" = "$before" ] \
+  || fail "candidates must not mutate any target artifact"
+pass "read-only: no scheduler state written, no artifact mutated"
+
+# --- pre-trajectory run (no user_choice events) degrades to no candidates ------
+ev r003 s3 <<'EOF'
+{"type":"tool_error","seq":1,"detail":"boom"}
+{"type":"result","seq":2,"detail":"done"}
+EOF
+[ "$("${S[@]}" candidates --scenario s3 --json | jq_py "['candidates']")" = "[]" ] \
+  || fail "a pre-trajectory run must yield no candidates, never a crash"
+pass "graceful: pre-trajectory run (no choices) -> no candidates"
+
+echo "all checks passed"

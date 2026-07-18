@@ -55,6 +55,16 @@ Subcommands (JSON out):
                                    coverage diff REMOVED 2026-07-18 —
                                    operator decision; spec-tanuki-view D2
                                    amendment)
+  candidates [--scenario ID] [--json]
+                                   trajectory-observed unexplored decision-
+                                   point branches as regeneration candidates:
+                                   per recorded run, a `user_choice` event
+                                   names the point, the selected alternative,
+                                   and the alternatives; an alternative NO run
+                                   ever selected is surfaced (scenario, point,
+                                   untaken alternative). A fully-explored point
+                                   yields none. Read-only — event files only,
+                                   no ledger, no state or matrix mutation.
   status                           machine-readable scheduler state
 
 Config (~/.tanuki/config.json, all optional): demote_after 2 ·
@@ -403,6 +413,84 @@ def trajectory_view(target, sid, run_filter, as_json):
                       f"{e.get('detail', '')[:110]}{syn}")
 
 
+def unexplored_branches(target, scenario_filter=None):
+    """Derive trajectory-observed unexplored decision-point branches, READ-ONLY
+    (spec-tanuki-scenario-lifecycle §3, generation candidate source). Across
+    every recorded run's per-scenario event file, each decision point records
+    which alternative that run took (a `user_choice` event with `point`,
+    `selected`, `alternatives` — the same markers trajectory_view renders). The
+    union of a point's alternatives minus the union of alternatives any run ever
+    SELECTED = the branches no recorded run explored. Each surviving branch is a
+    regeneration candidate naming the scenario, the decision point, and the
+    untaken alternative. A point whose alternatives were all taken contributes
+    nothing. Reads per-run event files only — loads no ledger, touches no
+    scheduler state, mutates no matrix. Degrades to [] for targets/scenarios
+    with no recorded trajectories and for pre-trajectory runs (no `user_choice`
+    events), never raising."""
+    events_dir = os.path.join(TANUKI_ROOT, target, "events")
+    # scenario -> point -> {"alternatives": set, "selected": set}
+    seen = {}
+    if os.path.isdir(events_dir):
+        for run in sorted(os.listdir(events_dir)):
+            run_dir = os.path.join(events_dir, run)
+            if not os.path.isdir(run_dir):
+                continue
+            for fn in sorted(os.listdir(run_dir)):
+                if not fn.endswith(".events.jsonl"):
+                    continue
+                sid = fn[: -len(".events.jsonl")]
+                if scenario_filter and sid != scenario_filter:
+                    continue
+                with open(os.path.join(run_dir, fn), encoding="utf-8",
+                          errors="replace") as f:
+                    for line in f:
+                        try:
+                            e = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if e.get("type") != "user_choice" or not e.get("point"):
+                            continue
+                        rec = seen.setdefault(sid, {}).setdefault(
+                            e["point"],
+                            {"alternatives": set(), "selected": set()})
+                        alts = e.get("alternatives")
+                        if isinstance(alts, list):
+                            rec["alternatives"].update(a for a in alts
+                                                       if a is not None)
+                        if e.get("selected") is not None:
+                            # A selected value is by definition an alternative
+                            # that was taken, even if the marker omitted it.
+                            rec["selected"].add(e["selected"])
+                            rec["alternatives"].add(e["selected"])
+    candidates = []
+    for sid in sorted(seen):
+        for point in sorted(seen[sid]):
+            rec = seen[sid][point]
+            untaken = sorted(rec["alternatives"] - rec["selected"])
+            if untaken:
+                candidates.append({"scenario": sid, "point": point,
+                                   "untaken": untaken,
+                                   "taken": sorted(rec["selected"])})
+    return candidates
+
+
+def cmd_candidates(args):
+    """List trajectory-observed unexplored decision-point branches as
+    regeneration candidates (read-only; the operator still approves at the
+    plan gate). Machine surface for the `generate` command's candidate pool."""
+    cands = unexplored_branches(args.target, args.scenario)
+    if args.json:
+        out({"candidates": cands})
+        return
+    if not cands:
+        print("no unexplored trajectory branches")
+        return
+    for c in cands:
+        print(f"{c['scenario']}  {c['point']}: untaken "
+              f"{', '.join(c['untaken'])} "
+              f"(taken {', '.join(c['taken']) or '-'})")
+
+
 def plugin_surface(plugin_path):
     """Enumerate the target plugin's coverage-checkable surface, READ-ONLY:
     skill names (skills/*/SKILL.md directory names) and command names
@@ -655,13 +743,17 @@ def main():
                     help="with --trajectory: filter to one run")
     sp.add_argument("--plans", type=int, default=10)
     sp.add_argument("--json", action="store_true")
+    sp = sub.add_parser("candidates")
+    sp.add_argument("--scenario", default=None,
+                    help="restrict to one scenario id (default: all)")
+    sp.add_argument("--json", action="store_true")
     sub.add_parser("status")
     args = p.parse_args()
     if args.cmd != "resolve" and not args.target:
         die("--target is required for this subcommand")
     {"register": cmd_register, "resolve": cmd_resolve, "sync": cmd_sync,
      "plan": cmd_plan, "record-run": cmd_record_run, "history": cmd_history,
-     "status": cmd_status}[args.cmd](args)
+     "candidates": cmd_candidates, "status": cmd_status}[args.cmd](args)
 
 
 if __name__ == "__main__":
