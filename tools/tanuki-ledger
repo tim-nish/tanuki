@@ -991,6 +991,30 @@ def classify_ledger(ledger, runs):
     return "fresh"
 
 
+def compaction_hint(awaiting):
+    """One-line pointer for accepted findings awaiting compaction. Names the
+    `--unseen-runs` threshold (config `compaction_unseen_runs`, default 3) so a
+    reader of `status`/`next` learns it without running `compact`, and — reusing
+    cmd_compact's real-scenario distinction (scenarios minus the reserved
+    `ingest` pseudo-scenario) — notes that a finding evidenced against a real
+    scenario advances only when that scenario is re-driven (hand-ingest will
+    not), while an ingest/no-scenario finding advances on any later run."""
+    n = load_config()["compaction_unseen_runs"]
+    real = [f for f in awaiting if set(f.get("scenarios", [])) - {"ingest"}]
+    ingest = [f for f in awaiting if not (set(f.get("scenarios", [])) - {"ingest"})]
+    msg = (f"compaction tombstones each once it is unseen (driven-and-absent) "
+           f"for >= {n} run(s) (`--unseen-runs`)")
+    clauses = []
+    if real:
+        clauses.append("a finding with a real scenario advances only when that "
+                       "scenario is re-driven (hand-ingest will not)")
+    if ingest:
+        clauses.append("an ingest/no-scenario finding advances on any later run")
+    if clauses:
+        msg += "; " + ", while ".join(clauses)
+    return msg
+
+
 def render_next(state, target, ledger):
     """The single next command for an enumerated state — a /tanuki form where
     one exists, the tool form otherwise. Raises on a state outside the
@@ -1024,7 +1048,7 @@ def render_next(state, target, ledger):
             f"this one in the plugin's tools/ dir, not a subcommand of it) "
             f"then `ingest` its events here "
             f"(or the /tanuki {target} slash command in Claude Code, which "
-            f"drives both)"),
+            f"drives both). " + compaction_hint(awaiting)),
         "watching-only": (
             "promote chronic/high-confidence open findings with "
             "'promote --min-recurrence N', then decide them with the "
@@ -1106,6 +1130,7 @@ def cmd_status(args, ledger):
         print("\n  ACCEPTED — awaiting fix verification (should stop recurring):")
         for f in awaiting:
             print(f"    {f['id']} rec:{f['recurrence']} — {f['title'][:90]}")
+        print(f"    hint: {compaction_hint(awaiting)}")
     watching = sorted(by["open"], key=lambda f: (-f["recurrence"],
                                                  -len(f["scenarios"])))
     if watching:
@@ -1284,9 +1309,9 @@ def main():
             "run and seq are NOT part of it, so the same detail seen in two "
             "different runs collapses into one record with count=2 (F70)."))
     sp.add_argument("files", nargs="+",
-                    help="one or more JSONL files to ingest; any filename "
-                         "works — '.events.jsonl' is only the drive "
-                         "pipeline's naming convention, not enforced (F150)")
+                    help="one or more event files to ingest — the driver names "
+                         "them <scenario>.events.jsonl by convention, but the "
+                         "name is not enforced: any readable JSONL file works")
     sp = sub.add_parser("ingest-note"); sp.add_argument("--text", required=True)
     sp = sub.add_parser(
         "findings",

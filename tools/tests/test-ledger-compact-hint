@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Fixture for #116: `status`/`next` must surface the compaction picture for an
+# accepted finding awaiting fix verification WITHOUT the reader having to run
+# `compact` — namely the `--unseen-runs` threshold (config
+# compaction_unseen_runs, default 3), and the real-scenario-vs-ingest fork (a
+# finding evidenced against a real scenario advances only on a re-drive of that
+# scenario; an ingest/no-scenario one advances on any later run). Read-only
+# reporting; the same distinction cmd_compact uses is reused.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
+export TANUKI_ROOT="$root"
+L=("$here/tanuki-ledger" --target t)
+
+"${L[@]}" init >/dev/null
+
+# --- real-scenario accepted finding: only a re-drive advances verification ----
+printf '{"run":"r001","scenario":"login","seq":1,"type":"note","detail":"x"}\n' \
+  > "$root/e.jsonl"
+"${L[@]}" ingest "$root/e.jsonl" >/dev/null
+"${L[@]}" upsert-finding --title "Real scenario finding" --kind papercut \
+  --evidence "r001/login#1" >/dev/null
+"${L[@]}" set-status --id F1 --status accepted >/dev/null
+
+status="$("${L[@]}" status)"
+nxt="$("${L[@]}" next)"
+
+# (a) threshold is named on both surfaces, from config (default 3).
+echo "$status" | grep -q "hint:" \
+  || fail "status must carry a compaction hint under the ACCEPTED block"
+echo "$status" | grep -Eq -- '>= 3 run\(s\).*--unseen-runs|--unseen-runs' \
+  || fail "status hint must name the --unseen-runs threshold (3)"
+echo "$status" | grep -q "3 run(s)" \
+  || fail "status hint must name the default threshold count (3)"
+echo "$nxt" | grep -q "3 run(s)" \
+  || fail "next must name the default threshold count (3)"
+echo "$nxt" | grep -q -- "--unseen-runs" \
+  || fail "next must name the --unseen-runs threshold"
+
+# (b) real scenario -> re-drive, hand-ingest will not advance it.
+echo "$status" | grep -q "re-driven" \
+  || fail "status hint must say a real-scenario finding advances on a re-drive"
+echo "$status" | grep -q "hand-ingest will not" \
+  || fail "status hint must warn hand-ingest will not advance a real scenario"
+echo "$nxt" | grep -q "hand-ingest will not" \
+  || fail "next hint must warn hand-ingest will not advance a real scenario"
+
+# status trailing `next:` line is the same derivation as bare `next`.
+status_nxt="$(echo "$status" | sed -n 's/^  next: //p')"
+[ "$status_nxt" = "$nxt" ] \
+  || fail "status trailing next line [$status_nxt] != next [$nxt]"
+pass "real-scenario finding: threshold + re-drive fork surfaced in status/next"
+
+# --- config override is honoured (threshold comes from config, not hardcoded) -
+printf '{"compaction_unseen_runs": 5}\n' > "$root/config.json"
+echo "$("${L[@]}" status)" | grep -q "5 run(s)" \
+  || fail "hint must reflect compaction_unseen_runs from config (5, not 3)"
+rm -f "$root/config.json"
+pass "config override: threshold reflects compaction_unseen_runs"
+
+# --- ingest/no-scenario accepted finding: advances on any later run -----------
+root2="$(mktemp -d)"; trap 'rm -rf "$root" "$root2"' EXIT
+export TANUKI_ROOT="$root2"
+"${L[@]}" init >/dev/null
+printf '{"run":"r001","scenario":"ingest","seq":1,"type":"note","detail":"y"}\n' \
+  > "$root2/e.jsonl"
+"${L[@]}" ingest "$root2/e.jsonl" >/dev/null
+"${L[@]}" upsert-finding --title "Ingest-only finding" --kind papercut \
+  --evidence "r001/ingest#1" >/dev/null
+"${L[@]}" set-status --id F1 --status accepted >/dev/null
+
+status2="$("${L[@]}" status)"
+echo "$status2" | grep -q "3 run(s)" \
+  || fail "ingest-only hint must still name the threshold"
+# With NO real scenario in play the re-drive clause must not fire (fork honoured).
+echo "$status2" | grep -q "hand-ingest will not" \
+  && fail "ingest-only finding must NOT get the real-scenario re-drive clause"
+echo "$status2" | grep -q "any later run" \
+  || fail "ingest-only hint must note advance on any later run"
+pass "ingest-only finding: threshold named, re-drive fork correctly omitted"
+
+echo "ALL OK"
