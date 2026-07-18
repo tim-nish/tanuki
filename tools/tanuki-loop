@@ -152,6 +152,15 @@ Breakers — what actually trips each one, and where (every breaker prints
   integration invariant      iter-verify, when the four-part check fails.
   rollback failed            rollback, when the worktree could not be reset.
 
+NOT a breaker — base-branch drift. The base is snapshotted at `init` and is
+out of scope for the rest of the run (spec-host-snapshot): a commit landing on
+the base branch mid-run is INTENTIONALLY not detected — `iter-verify` succeeds
+even if the base moved behind the loop's back, and no breaker fires. Base
+freshness is checked once, at `init`/`doctor` (which fail closed on a stale
+base), never again mid-run. So "the base changed under me" is expected
+behavior, not a missed breaker; only edits to the loop's OWN worktree trip the
+external-modification breaker above.
+
 The token budget is stored but NOT enforced here — token accounting is the
 runtime's; the loop treats it as an operator-supplied ceiling the harness trips.
 """
