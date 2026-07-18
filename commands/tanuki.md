@@ -121,12 +121,17 @@ prompts in headless mode (the picker is an attended convenience only).
 **Entry (D1).** Resolve the target exactly as this command always does (the
 fixed order above — nothing view-specific). Then:
 
-- Bare `view`: present the **view picker** via AskUserQuestion — every
-  catalog view as a selectable option with its one-line description and a
+- Bare `view`: present the **view picker** via AskUserQuestion — **all four**
+  catalog views (`status`, `live`, `history`, `trajectory`) as named,
+  selectable options, each with its one-line description and a
   **state-derived hint** of whether it currently has anything to say (e.g.
   `status — 4 proposed awaiting decision`, `live — no loop run yet`). Hints come
   from the substrates' own outputs (`--json` where it exists), never from
-  re-derivation. Selection beats typing.
+  re-derivation. The four views fit AskUserQuestion's four-option cap exactly,
+  so **every view is always one of the named options** — never demote a view to
+  the harness's free-text / `Other` affordance, and never drop a view because it
+  was already viewed this session: membership and order come from the D2 catalog
+  (below), not from session history (issue #103). Selection beats typing.
 - `view <name>`: jump straight to that view. Names come from the catalog
   below and nowhere else; an unknown name gets the picker plus a one-line
   note, never a guess.
