@@ -263,14 +263,22 @@ def cmd_plan(args):
                 plan.append(s)
                 seen.add(s)
     quota_met = (not unexplored) or any(s in seen for s in unexplored)
-    for s in plan:
-        scen[s]["last_planned"] = tick
     record = {"run": args.run, "plan": plan, "quota_met": quota_met,
               "verify": sorted(verify & seen),
               "verify_deferred": sorted(verify_deferred),
               "explore": [s for s in explore if s in seen],
               "due_regression": [s for s in due if s in seen],
               "unexplored_remaining": [s for s in unexplored if s not in seen]}
+    # F162: a what-if plan must be possible without mutating rotation order or
+    # the selection history — --dry-run computes the identical record and
+    # persists nothing.
+    if args.dry_run:
+        out({**record, "dry_run": True,
+             "note": "nothing persisted — rotation counters and the plan "
+                     "history are untouched"})
+        return
+    for s in plan:
+        scen[s]["last_planned"] = tick
     # Selection history with reasons — persisted, not just printed.
     sched.setdefault("plans", []).append(record)
     write_json(sched_path(args.target), sched)
@@ -588,9 +596,13 @@ def cmd_history(args):
                 y["actionable"] = len(y["findings"])
                 approx = True
             pins = r.get("decision_points")
+            # A manifest result with no "status" is legal (the field is not
+            # required anywhere); default it here so every renderer below can
+            # assume a string — history --scenario crashed on None[:16] (F161).
             executions.setdefault(sid, []).append({
                 "run": run, "at": when, "events": r.get("events", 0),
-                "status": r.get("status"), "actionable": y["actionable"],
+                "status": r.get("status") or "(no status)",
+                "actionable": y["actionable"],
                 "findings": y["findings"],
                 "decision_points": pins if isinstance(pins, list) else [],
                 "approx": approx})
@@ -733,6 +745,10 @@ def main():
     sp.add_argument("--scenarios", required=True)
     sp.add_argument("--max", type=int, default=None)
     sp.add_argument("--run", default=None)
+    sp.add_argument("--dry-run", action="store_true",
+                    help="compute the plan without persisting it — rotation "
+                         "counters and the selection history are untouched "
+                         "(a plain plan call is stateful, F162)")
     sp = sub.add_parser("record-run"); sp.add_argument("--run", required=True)
     sp = sub.add_parser("history")
     sp.add_argument("--scenario", default=None)
