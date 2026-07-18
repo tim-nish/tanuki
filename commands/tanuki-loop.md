@@ -345,19 +345,20 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
    modified-file error naming regenerable output, see the note at the end of
    this step). **This worktree removal is the terminal action of the attended
    gate — once the merge is pushed (step 4) and the worktree is gone, you are
-   done; do not reach for a closing command (F136).** **No closing command
-   follows** (owner ruling 2026-07-17): the
+   done.** **The one rule about `finish` (F136/F149/F151): it is never
+   required here, and running it after the merge landed is harmless.** Nothing
+   in this workflow invokes it; skipping it loses nothing; running it anyway
+   simply deletes the merged integration branch immediately (a repo-state
+   change — the branch would otherwise wait for the next `init` sweep) and
+   returns `ok`. That is the whole decision — optional, not forbidden, not
+   unsafe. Why no closing command is needed (owner ruling 2026-07-17): the
    merge's reachability from the base *is* the settlement, and the surfaces
    that need it derive it — `status` reports it, the next `init`'s
    merged-branch sweep deletes the integration branch (tip reachable from the
    base; an unmerged tip is never deleted), and `/repo-cleanup` owns any
    earlier branch/worktree removal. `finish --reason gate-ratified` remains
-   accepted for compatibility only — nothing in this workflow invokes it, and
-   invoked anyway it refuses unless the delivery verifiably landed. **"Not
-   required" is not "unsafe": once the merge has landed, running `finish` is
-   harmless — it simply deletes the merged integration branch immediately
-   instead of leaving it for the next `init` sweep, and returns `ok`. Optional,
-   not forbidden; you lose nothing by stopping at worktree removal (F151).**
+   accepted for compatibility only, and invoked without a verifiably landed
+   delivery it refuses.
    **What a repeated `finish` reports** (F108): it echoes `previously_finished`
    with the earlier close's reason and timestamp rather than overwriting it
    silently, so a double close is visible and deliberate.
