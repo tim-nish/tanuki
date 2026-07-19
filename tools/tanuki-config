@@ -37,10 +37,20 @@ Subcommands (JSON out with --json; human text default):
                                with value + SOURCE LAYER + scope/type;
                                undeclared config keys render read-only —
                                visible, never editable here
-  --target T set --field F --value V
-                               typed validation, then an ATOMIC write
+  --target T set --field F --value V [--dry-run] [--override-doctor]
+                               typed validation, then the field's opaque
+                               doctor command when declared (`doctor` key —
+                               command line echoed first, candidate handed
+                               over via TANUKI_TARGET/FIELD/VALUE/SCENARIOS
+                               env, output relayed verbatim; a failing
+                               doctor blocks persist unless
+                               --override-doctor), then an ATOMIC write
                                (temp + rename) of the field's binds path in
-                               the scenarios file. Refuses undeclared fields.
+                               the scenarios file. --dry-run prints the
+                               resulting change + exact storage path with
+                               nothing written and no doctor run (the
+                               review-before-persist substrate, story 1.28).
+                               Refuses undeclared fields.
                                Hand-edits to the JSON remain legal; show
                                re-displays them (the file is the source of
                                truth, this tool is an editor of it)
@@ -130,7 +140,35 @@ def load_inputs(data):
         if not isinstance(binds, str) or not binds:
             die(f"inputs.{name}: missing `binds` (a dot-path into the "
                 "scenarios file, e.g. `host` or `defaults.max_turns`)")
+        doctor = d.get("doctor")
+        if doctor is not None and (not isinstance(doctor, str) or not doctor):
+            die(f"inputs.{name}: `doctor` must be a non-empty command string")
     return block
+
+
+def run_doctor(decl, target, value):
+    """Run the field's target-owned doctor command (story 1.28 / #172).
+    The command is OPAQUE: Tanuki echoes the exact command line before
+    running it (the test_cmd posture), hands the candidate over via generic
+    env (TANUKI_TARGET/TANUKI_FIELD/TANUKI_VALUE/TANUKI_SCENARIOS — never
+    parsed arguments Tanuki would have to understand), relays its output
+    verbatim, and interprets nothing but the exit code. Returns the exit
+    code; the caller decides whether a failure blocks."""
+    cmd = decl.get("doctor")
+    if not cmd:
+        return 0
+    print(f"doctor: {cmd}", file=sys.stderr)
+    env = dict(os.environ, TANUKI_TARGET=target, TANUKI_FIELD=decl["name"],
+               TANUKI_VALUE=str(value), TANUKI_SCENARIOS=scen_path(target))
+    r = subprocess.run(cmd, shell=True, env=env, capture_output=True,
+                       text=True)
+    # Verbatim relay — Tanuki-side interpretation of doctor content is a
+    # contract bug (writing-assistant#409).
+    if r.stdout:
+        sys.stderr.write(r.stdout)
+    if r.stderr:
+        sys.stderr.write(r.stderr)
+    return r.returncode
 
 
 def get_path(obj, dotted):
@@ -267,6 +305,24 @@ def cmd_set(args):
             "read-only here (hand-editing the JSON remains legal)")
     decl = dict(inputs[args.field], name=args.field)
     value = validate(args.field, decl, args.value)
+    old, _ = get_path(data, decl["binds"])
+    if args.dry_run:
+        # Review-before-persist substrate (story 1.28): the resulting change
+        # and the exact storage path, with nothing written and no doctor
+        # run — the command layer shows this, asks, then calls the real set.
+        out({"dry_run": True, "field": args.field, "old": old, "new": value,
+             "binds": decl["binds"], "path": scen_path(args.target),
+             "doctor": decl.get("doctor")})
+        return
+    rc = run_doctor(decl, args.target, value)
+    if rc != 0:
+        if not args.override_doctor:
+            die(f"doctor failed (exit {rc}) running `{decl['doctor']}` — "
+                "value NOT persisted (pass --override-doctor to persist "
+                "anyway; the doctor's output above is the target's own "
+                "verdict, relayed verbatim)")
+        print(f"warning: doctor failed (exit {rc}); persisting anyway "
+              "(--override-doctor)", file=sys.stderr)
     set_path(data, decl["binds"], value)
     # Atomic: temp + rename. The file stays the source of truth; a crash
     # mid-write must never leave a half-written config.
@@ -308,6 +364,15 @@ def main():
         sp = sub.add_parser(name)
         sp.add_argument("--field", required=True)
         sp.add_argument("--value", required=True)
+        if name == "set":
+            sp.add_argument("--dry-run", action="store_true",
+                            help="show the resulting change and storage path "
+                                 "without writing or running the doctor "
+                                 "(review-before-persist substrate)")
+            sp.add_argument("--override-doctor", action="store_true",
+                            help="persist even when the doctor fails — the "
+                                 "explicit operator override, never the "
+                                 "default")
     args = p.parse_args()
     {"show": cmd_show, "set": cmd_set, "check": cmd_check}[args.cmd](args)
 
