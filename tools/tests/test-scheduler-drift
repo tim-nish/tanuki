@@ -93,4 +93,51 @@ assert d["uncovered"] == [] and d["generate"] == "/tanuki ghost generate", d
 ' || fail "absent scenarios config must report no drift"
 pass "graceful degrade: absent scenarios config -> no drift"
 
+# --- (#168) status carries the advisory trigger signals ------------------------
+# No scheduler state yet: drift renders, but zero scenarios is onboarding,
+# never an "empty pool".
+write_matrix "First run covers the alpha skill only."
+"$sched" --target demo status | python3 -c '
+import json, sys
+a = json.load(sys.stdin)["advisories"]
+assert {(u["kind"], u["name"]) for u in a["feature_drift"]} \
+    == {("skill", "beta"), ("command", "do-thing")}, a
+assert a["unexplored_pool_empty"] is False, a
+assert a["generate"] == "/tanuki demo generate", a
+' || fail "status must emit drift advisories and no pool-empty before any state"
+pass "(#168) status advisories: drift named, zero-scenario state is not pool-empty"
+
+# First sync marks s1 active -> the unexplored pool is genuinely empty.
+"$sched" --target demo sync --scenarios "$canon" > /dev/null
+"$sched" --target demo status | python3 -c '
+import json, sys
+a = json.load(sys.stdin)["advisories"]
+assert a["unexplored_pool_empty"] is True, a
+' || fail "an all-active state must report unexplored_pool_empty"
+"$sched" --target demo history | grep -q "unexplored pool empty" \
+  || fail "history text must name the empty pool (a named generation trigger)"
+"$sched" --target demo history | grep -q "/tanuki demo generate" \
+  || fail "the pool-empty line must point at the generate invocation"
+"$sched" --target demo history --json | python3 -c '
+import json, sys
+assert json.load(sys.stdin)["unexplored_pool_empty"] is True
+' || fail "history --json must carry unexplored_pool_empty"
+pass "(#168) empty pool renders in status + history, pointing at generate"
+
+# A later sync adds s2 as unexplored -> the pool is no longer empty.
+cat > "$canon" <<EOF
+{"target":"demo","plugin":"$plugin",
+ "scenarios":[{"id":"s1","charter":"alpha only","prompt":"p"},
+              {"id":"s2","charter":"beta too","prompt":"p"}]}
+EOF
+"$sched" --target demo sync --scenarios "$canon" > /dev/null
+"$sched" --target demo status | python3 -c '
+import json, sys
+a = json.load(sys.stdin)["advisories"]
+assert a["unexplored_pool_empty"] is False, a
+' || fail "an unexplored scenario must clear the pool-empty advisory"
+"$sched" --target demo history | grep -q "unexplored pool empty" \
+  && fail "history must not print pool-empty while unexplored scenarios exist" || true
+pass "(#168) an unexplored scenario clears the pool-empty advisory"
+
 echo "all checks passed"

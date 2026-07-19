@@ -62,7 +62,11 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
                                  SHAs (--new-actionable / --patched override); a
                                  cycle is quiet only if the iteration's persisted
                                  scheduler plan reported quota_met (the
-                                 spec-tanuki-scenario-lifecycle loop amendment)
+                                 spec-tanuki-scenario-lifecycle loop amendment);
+                                 on convergence, attaches the scheduler's
+                                 advisory generation-trigger signals (feature
+                                 drift / empty unexplored pool) so a false
+                                 quiet is named, never silent (#168)
   defer --finding F --reason "…" append to the morning queue
   log --audit "…"                append to the audit artifact
   gate-check                     integration HEAD reachable from base after the merge
@@ -381,6 +385,40 @@ def plan_record(state, iter_n):
         plans = json.load(f).get("plans", [])
     rid = f"{state['run']}-iter{iter_n}"
     return next((p for p in reversed(plans) if p.get("run") == rid), None)
+
+
+def generate_advisory(target):
+    """Advisory generation-trigger signals for the convergence report (issue
+    #168): uncovered plugin surface (feature drift) and an empty unexplored
+    pool are the two `generate` triggers that previously surfaced nowhere near
+    the moment they matter most — a loop declaring convergence (the false-quiet
+    risk spec-tanuki-scenario-lifecycle §3 names). The arithmetic is owned by
+    the sibling scheduler (`status` emits it as `advisories`); this only reads
+    and phrases it. Advisory means advisory: any failure — missing sibling,
+    old scheduler without advisories, bad JSON — degrades to None and can
+    never break record-cycle. Returns {"notes": [...], "generate": "..."} or
+    None when there is nothing to say."""
+    try:
+        sched_tool = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "tanuki-scheduler")
+        r = subprocess.run([sys.executable, sched_tool, "--target", target,
+                            "status"], capture_output=True, text=True,
+                           timeout=30)
+        if r.returncode != 0:
+            return None
+        adv = json.loads(r.stdout).get("advisories") or {}
+        notes = []
+        if adv.get("feature_drift"):
+            names = ", ".join(f"{u['kind']} {u['name']}"
+                              for u in adv["feature_drift"])
+            notes.append(f"uncovered plugin surface: {names}")
+        if adv.get("unexplored_pool_empty"):
+            notes.append("unexplored pool empty")
+        if not notes:
+            return None
+        return {"notes": notes, "generate": adv.get("generate")}
+    except Exception:
+        return None
 
 
 def cleanup_merged_integration_branches(repo, base, target):
@@ -2288,13 +2326,23 @@ def cmd_record_cycle(args):
                            "patched": patched, "quota_met": quota_met,
                            "quiet": quiet}
     save_state(state)
+    # Convergence is exactly where a false quiet would go unnoticed: every
+    # scenario passed, but the plugin grew surface no charter covers or the
+    # unexplored pool drained (issue #168). Attach the scheduler's advisory
+    # signals to the convergence report — advisory text only; the trigger
+    # stays operator-invoked and this run still never grows the matrix.
+    advisory = generate_advisory(state["target"]) if converged else None
     audit(state, f"cycle: new_actionable={new_actionable} "
                  f"patched={patched} quota_met={quota_met} "
                  f"quiet_streak={state['quiet_streak']}"
                  + (" -> CONVERGED" if converged else ""))
+    if advisory:
+        audit(state, "converged, but: " + "; ".join(advisory["notes"])
+                     + f" — consider `{advisory['generate']}`")
     out({"new_actionable": new_actionable, "patched": patched,
          "quota_met": quota_met, "quiet": quiet, "quiet_because": quiet_because,
-         "quiet_streak": state["quiet_streak"], "converged": converged})
+         "quiet_streak": state["quiet_streak"], "converged": converged,
+         **({"convergence_advisory": advisory} if advisory else {})})
 
 
 def cmd_defer(args):
