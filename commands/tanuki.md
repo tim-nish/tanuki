@@ -443,8 +443,11 @@ scenario whose status is not `ok`, and any `plugin_clone_dirty: true`
    - **Preflight-rule candidates**: mechanical items from the extraction
      pass's `preflight_rule_candidates` (step 2.2).
    - **Lesson candidates (for the den)**: transferable conclusions, proposed
-     for your knowledge hub — a human moves them; this command never writes
-     outside `~/.tanuki/`.
+     for your knowledge hub. They are FIRST-CLASS at the decision pass
+     (story 1.35 / spec-den-distill §4): walked in 4.1c with
+     accept-writes-the-staging-file semantics when `contribute_back` is
+     configured. Writes go only to the configured hub staging directory —
+     never anywhere else outside `~/.tanuki/`.
    - **consulted** (only when the brief carries any `policy: tension` line):
      one closing line naming which allowlisted policy files/lines were read
      and which applied — the audit trail for the advisory pass.
@@ -569,8 +572,35 @@ one; present the list once and act only on the ones the user picks. A
 watching item already inside a confirmed group was presented **with its
 group** in 4.1, not here.
 
+### 4.1c Lesson candidates (story 1.35 / spec-den-distill §4)
+
+After the Watching offer, walk the **lesson candidates** the same way —
+accept / dismiss / defer per item, never a pre-selected default. The pool:
+the brief's "Lesson candidates (for the den)" section when a brief exists,
+grounded against `tanuki-ledger --target <t> distill --list` (the
+deterministic bar-clearing, not-yet-contributed enumeration — an item
+outside that list is not emittable and says so).
+
+- **accept** → run `tanuki-ledger --target <t> distill --id <F>` right then
+  — exactly parallel to "accept → optionally file the issue right then".
+  The RECEIPT is the tool's own output line (`contributed F… -> <path>`) —
+  relay it verbatim, never a re-derived path.
+- **dismiss** → `set-status --id … --status dismissed` (deduped-against, and
+  `distill` will never emit it).
+- **defer** → stays as-is; `status` keeps it visible until decided.
+- `contribute_back` unset → the one-line not-configured notice (story 1.36)
+  renders instead of a walk; nothing is written.
+
+The unattended loop renders lesson candidates in its brief but NEVER walks
+this gate and never emits — attended-gate work, the same class as issue
+filing (spec-den-distill §1).
+
 Close with: the run delta (when a run happened), dispositions taken per
-finding (with the issue URL for each one filed), **groups reported as
+finding (with the issue URL for each one filed), **contributed lesson
+candidates with their written staging paths, counted alongside filed issues**
+(story 1.35 — the operator ends the sitting knowing exactly what left Tanuki
+and where it went; zero contributed renders as zero, never omitted when
+candidates were walked), **groups reported as
 groups** — merged ids together, conflict branches with the chosen one marked
 — what remains `proposed`/`open`, the brief path when one exists, the derived
 next step (`tanuki-ledger next`), and total duration/turns (never dollars).
