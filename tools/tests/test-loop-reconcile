@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# Fixture for `tanuki-loop reconcile` — the single terminal invocation
+# (story 1.40, #213; contract #210). Composes dispose (#211) and
+# reevaluate (#212); adds the fixpoint, verification as a gate condition,
+# ONE gate of genuine owner decisions, the persisted resumable transaction,
+# and terminal merge/push/state/cleanup.
+#
+# Acceptance anchors: a loop-20260719-173009-shaped session completes in ONE
+# invocation with ONE gate; re-running never re-ports, re-merges, re-pushes,
+# or re-asks an answered decision; terminal state is one of
+# complete | needs-owner | blocked, with evidence.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
+export TANUKI_ROOT="$root"
+jget() { python3 -c "import json,sys;print(json.load(sys.stdin)$1)"; }
+
+# ── target t1: clean deterministic session -> COMPLETE in one invocation ────
+L=("$here/tanuki-loop" --target t1)
+repo="$root/repo1"; git init -q "$repo"
+git -C "$repo" checkout -qb main
+git -C "$repo" config user.email a@b.c; git -C "$repo" config user.name t
+printf 'a1\na2\na3\n' > "$repo/app.py"
+git -C "$repo" add -A; git -C "$repo" commit -qm base
+"${L[@]}" init --loop-repo "$repo" --cap 2 --test-cmd true >/dev/null
+
+o="$("${L[@]}" reconcile --json)"
+[ "$(echo "$o" | jget '["transaction"]["state"]')" = "complete" ] \
+  || fail "nothing unresolved must be COMPLETE: $o"
+pass "t1: empty debt -> complete (enumerated, not silent)"
+
+git -C "$repo" branch tanuki-loop/t1/20260101-aaa main
+git -C "$repo" checkout -q tanuki-loop/t1/20260101-aaa
+printf 'a1\nNEW2\na3\n' > "$repo/app.py"
+git -C "$repo" commit -qam "fix: line 2 (F1)"
+git -C "$repo" checkout -q main
+
+o="$("${L[@]}" reconcile --json)"
+tx() { echo "$o" | jget "[\"transaction\"]$1"; }
+[ "$(tx '["state"]')" = "complete" ] || fail "clean debt must complete: $o"
+[ "$(tx '["fixpoint"]["applied"]')" = "1" ] || fail "one unit must apply"
+[ "$(tx '["verify"]["rc"]')" = "0" ] || fail "verification must run: $o"
+[ "$(tx '["terminal"]["pushed"]')" = "no-remote" ] \
+  || fail "push must record no-remote, not fail: $o"
+grep -q NEW2 "$repo/app.py" || fail "the merge must land on base"
+git -C "$repo" rev-parse --verify -q tanuki-loop/t1/20260101-aaa >/dev/null \
+  && fail "a fully-disposed branch must be cleaned up"
+git -C "$repo" rev-parse --verify -q tanuki-loop/t1/reconcile >/dev/null \
+  && fail "the merged staging branch must be cleaned up"
+pass "t1: ONE invocation — apply, verify, empty gate, merge, cleanup"
+
+# idempotent re-run: nothing repeats
+o="$("${L[@]}" reconcile --json)"
+[ "$(tx '["state"]')" = "complete" ] || fail "re-run must stay complete"
+[ "$(tx '["fixpoint"]["applied"]')" = "0" ] || fail "re-run must re-port nothing"
+n="$(git -C "$repo" rev-list --count main)"
+o="$("${L[@]}" reconcile --json)"
+[ "$(git -C "$repo" rev-list --count main)" = "$n" ] \
+  || fail "re-run must not re-merge"
+pass "t1: re-running is idempotent — no re-port, no re-merge"
+
+# ── target t2: mixed debt -> ONE gate with only genuine decisions ───────────
+L=("$here/tanuki-loop" --target t2)
+repo="$root/repo2"; git init -q "$repo"
+git -C "$repo" checkout -qb main
+git -C "$repo" config user.email a@b.c; git -C "$repo" config user.name t
+printf 'b1\nb2\nb3\nb4\nb5\nb6\nb7\nb8\nb9\n' > "$repo/lib.py"
+printf 'def cmd_journal():\n    pass\n' > "$repo/journal.py"
+git -C "$repo" add -A; git -C "$repo" commit -qm base
+"${L[@]}" init --loop-repo "$repo" --cap 2 --test-cmd true >/dev/null
+
+git -C "$repo" branch tanuki-loop/t2/20260101-bbb main
+git -C "$repo" checkout -q tanuki-loop/t2/20260101-bbb
+printf 'b1\nGOOD\nb3\nb4\nb5\nb6\nb7\nb8\nb9\n' > "$repo/lib.py"
+git -C "$repo" commit -qam "fix: applicable (F5)"
+printf 'b1\nGOOD\nb3\nb4\nb5\nb6\nb7\nb8\nCONFLICT9\n' > "$repo/lib.py"
+git -C "$repo" commit -qam "fix: will conflict (F77)"
+git -C "$repo" checkout -q main
+printf 'b1\nb2\nb3\nb4\nb5\nb6\nb7\nb8\nMAIN9\n' > "$repo/lib.py"
+git -C "$repo" commit -qam "main diverges on line 9"
+"${L[@]}" site-record --finding F77 --site cmd_journal \
+  --file journal.py --contains guard_interview_seam >/dev/null
+
+o="$("${L[@]}" reconcile --json)"
+[ "$(tx '["state"]')" = "needs-owner" ] \
+  || fail "genuine decisions must park at the gate: $o"
+k="$(echo "$o" | python3 -c "
+import json,sys
+t=json.load(sys.stdin)['transaction']
+print(sorted((i['kind'],i['key']) for i in t['gate']['open_items']))")"
+echo "$k" | grep -q "'finding', 'F77'" || fail "F77 must be a gate item: $k"
+echo "$k" | grep -q "'unit'" || fail "the conflict unit must be a gate item: $k"
+[ "$(echo "$o" | python3 -c "
+import json,sys
+print(len(json.load(sys.stdin)['transaction']['gate']['open_items']))")" = "2" ] \
+  || fail "the gate must hold ONLY genuine decisions"
+grep -q GOOD "$repo/lib.py" && fail "unapproved gate must not merge"
+pass "t2: mixed debt -> parked needs-owner; gate holds only genuine decisions"
+
+# approve: deterministic work proceeds; parked items survive, never re-asked
+o="$("${L[@]}" reconcile --approve --json)"
+[ "$(tx '["state"]')" = "needs-owner" ] || fail "items remain parked: $o"
+grep -q GOOD "$repo/lib.py" || fail "approval must merge the deterministic work"
+grep -q CONFLICT9 "$repo/lib.py" && fail "the conflicting unit must NOT merge"
+git -C "$repo" rev-parse --verify -q tanuki-loop/t2/20260101-bbb >/dev/null \
+  || fail "a branch with an escalated unit must survive cleanup"
+pass "t2: --approve merges deterministic work; escalated branch survives"
+
+o="$("${L[@]}" reconcile --json)"
+ok="$(echo "$o" | python3 -c "
+import json,sys
+t=json.load(sys.stdin)['transaction']
+print(sorted(t['gate']['approved_keys']))")"
+echo "$ok" | grep -q "finding:F77" \
+  || fail "the gate decision must persist across runs: $ok"
+n="$(git -C "$repo" rev-list --count main)"
+o="$("${L[@]}" reconcile --json)"
+[ "$(git -C "$repo" rev-list --count main)" = "$n" ] \
+  || fail "an answered gate re-run must not re-merge"
+pass "t2: approval persisted — a restart never re-asks or repeats"
+
+# ── target t3: verification failure -> BLOCKED, nothing merged ──────────────
+L=("$here/tanuki-loop" --target t3)
+repo="$root/repo3"; git init -q "$repo"
+git -C "$repo" checkout -qb main
+git -C "$repo" config user.email a@b.c; git -C "$repo" config user.name t
+echo c1 > "$repo/c.py"; git -C "$repo" add -A; git -C "$repo" commit -qm base
+"${L[@]}" init --loop-repo "$repo" --cap 2 --test-cmd false >/dev/null
+git -C "$repo" branch tanuki-loop/t3/20260101-ccc main
+git -C "$repo" checkout -q tanuki-loop/t3/20260101-ccc
+echo c2 >> "$repo/c.py"; git -C "$repo" commit -qam "fix (F1)"
+git -C "$repo" checkout -q main
+
+o="$("${L[@]}" reconcile --json)"
+[ "$(tx '["state"]')" = "blocked" ] || fail "failed verification must block: $o"
+grep -q c2 "$repo/c.py" && fail "a blocked run must merge nothing"
+pass "t3: verification failure -> blocked with the reason, nothing merged"
+
+echo "ALL PASS"
