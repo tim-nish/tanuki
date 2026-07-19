@@ -145,7 +145,13 @@ rolled_back) before the next iter-start, and record-cycle refuses an open
 iteration — a skipped check is itself a breaker, never a silent pass.
 
 Breakers — what actually trips each one, and where (every breaker prints
-{"breaker": …, "hint": …} + exit 3; the hint names the remedy):
+{"breaker": …, "hint": …} + exit 3; the hint names the remedy).
+iter-start evaluates its breakers in a fixed PRECEDENCE — sequencing, then
+cap, then wall-time, then external modification — and the FIRST match wins:
+a tripped cap masks an external modification that would also have fired
+(deliberate — a capped run has no next iteration to protect — but it means
+a capped run's worktree is no longer guarded; re-init for a fresh guarded
+run, F93):
   iteration cap reached      iter-start, when len(iterations) >= cap. NOTE:
                              rolled-back iterations count toward the cap — a
                              rollback does not give the attempt back.
@@ -197,10 +203,13 @@ TANUKI_ROOT = os.environ.get("TANUKI_ROOT", os.path.expanduser("~/.tanuki"))
 
 
 def git(repo, *args):
-    """Run git in <repo>; return (returncode, stdout-stripped)."""
+    """Run git in <repo>; return (returncode, stdout minus trailing newlines).
+    ONLY trailing newlines are stripped (F186): a full strip() ate the first
+    `status --porcelain` line's leading status column (" M app.py" ->
+    "M app.py"), so every ln[3:] parser truncated the first filename."""
     r = subprocess.run(["git", "-C", repo, *args],
                        capture_output=True, text=True)
-    return r.returncode, (r.stdout or "").strip()
+    return r.returncode, (r.stdout or "").rstrip("\n")
 
 
 def loop_dir(target, run):
@@ -270,6 +279,11 @@ def breaker_hint(reason):
     its remedy instead of forcing the operator to read the source (F4, F53).
     Matched on the reason text; None when no specific remedy applies."""
     r = reason.lower()
+    # Cap/wall-time first: the cap reason names the checks it shadowed
+    # ("external modification" among them, F93), and matching that phrase
+    # first would hand a capped run the recover hint.
+    if "iteration cap reached" in r or "wall-time" in r:
+        return "the run hit its ceiling — proceed to the morning gate; no more iterations run"
     if "external modification" in r:
         return ("run `tanuki-loop --target <t> recover` and choose --restore "
                 "(discard the external change, reset to the last verified HEAD) "
@@ -293,8 +307,6 @@ def breaker_hint(reason):
             return ("close the open iteration with `iter-verify` (or "
                     "`rollback`) before recording the cycle")
         return "close the open iteration with `iter-verify` or `rollback` first"
-    if "iteration cap reached" in r or "wall-time" in r:
-        return "the run hit its ceiling — proceed to the morning gate; no more iterations run"
     if "test failure" in r:
         return "a test_cmd failed in the loop worktree — inspect it, then fix or `rollback`"
     if "worktree not clean after commit" in r:
@@ -698,7 +710,8 @@ def drift_note(target, repo):
                  if worst else "none has fallen behind the base yet")
     return (f"note: {n} unresolved loop branch(es) — integration branches "
             f"holding work that never merged; {staleness}. "
-            f"`tanuki-loop --target {target} reconcile` reports what to do "
+            f"Run the `/tanuki-loop {target} reconcile` slash command "
+            f"(attended; not a subcommand of this tool) to report what to do "
             f"with them.")
 
 
@@ -767,7 +780,8 @@ def cmd_unresolved(args):
     print("\n  These are SIGNALS, not verdicts: whether a change is already "
           "landed,\n  superseded, conflicting or still applicable is judgment "
           "— and a subject\n  line is a claim, not evidence. "
-          f"`tanuki-loop --target {args.target} reconcile` classifies them.")
+          f"The `/tanuki-loop {args.target} reconcile` slash command "
+          "(attended;\n  not a subcommand of this tool) classifies them.")
 
 
 def write_unresolved_brief(target, payload):
@@ -783,7 +797,8 @@ def write_unresolved_brief(target, payload):
         lines += [payload["empty_state"]["reason"], ""]
     else:
         lines += [f"**{len(payload['branches'])} branch(es) hold work that "
-                  f"never merged.** `tanuki-loop --target {target} reconcile` "
+                  f"never merged.** The `/tanuki-loop {target} reconcile` "
+                  f"slash command (attended; not a subcommand of this tool) "
                   f"reports what to do with each.", ""]
         for r in payload["branches"]:
             lines.append(f"## {r['branch']}")
@@ -1632,8 +1647,16 @@ def cmd_doctor(args):
                 checks.append({
                     "check": "baseline-test", "ok": r.returncode == 0,
                     "exit": r.returncode,
+                    # F125: a cold operator reads this line, not the JSON
+                    # warning key — a vacuous pass must say so where the pass
+                    # is reported.
                     "detail": (f"test_cmd passes on the base tip "
-                               f"({base_sha[:12]})" if r.returncode == 0 else
+                               f"({base_sha[:12]})"
+                               + (" — but test_cmd looks like a no-op "
+                                  "placeholder, so this pass is vacuous: it "
+                                  "cannot catch regressions"
+                                  if noop_warning else "")
+                               if r.returncode == 0 else
                                f"test_cmd FAILS on the base tip (exit "
                                f"{r.returncode}) — every iteration would trip "
                                "the test breaker on inherited state, not a "
@@ -1971,7 +1994,9 @@ def cmd_iter_start(args):
                      if i.get("phase") == "rolled_back")
         breaker(state, f"iteration cap reached: {n}/{state['cap']} consumed "
                        f"({verified} verified, {rolled} rolled back) — "
-                       f"rolled-back iterations count toward the cap")
+                       f"rolled-back iterations count toward the cap; later "
+                       f"checks (wall-time, external modification) were not "
+                       f"evaluated (F93)")
     if state["wall_limit_s"] and \
             time.time() - state["wall_start"] >= state["wall_limit_s"]:
         breaker(state, "wall-time limit exceeded")
@@ -2379,6 +2404,38 @@ def cmd_log(args):
     out({"ok": True})
 
 
+def _gate_progress(state, reachable):
+    """Where the morning gate stands, derived READ-ONLY from existing state
+    fields and the reachability fact gate-check just computed (F97) — no new
+    state, no new subcommand. Steps use the morning-gate vocabulary
+    (final-tests, merge, gate-check, gate-push, issues, cleanup); a step with
+    no derivable evidence is OMITTED from the completed set, never guessed —
+    so `next_step` is only the first step this state cannot prove done."""
+    evidence = {
+        "final-tests": bool((state.get("last_test") or {}).get("ok")),
+        # A reachable integration tip proves the merge landed, and proves
+        # this very gate-check passed — the same fact answers both steps.
+        "merge": reachable,
+        "gate-check": reachable,
+        "gate-push": bool(state.get("pushed")),
+        "issues": bool(state.get("materialized")),
+        "cleanup": bool(state.get("finished")),
+    }
+    order = ("final-tests", "merge", "gate-check", "gate-push",
+             "issues", "cleanup")
+    done = [s for s in order if evidence[s]]
+    progress = {
+        "last_completed_step": done[-1] if done else None,
+        "next_step": next((s for s in order if not evidence[s]), None),
+    }
+    if not reachable:
+        progress["blocker"] = ("integration tip not reachable from the base "
+                               "— the merge has not landed (see hint)")
+    else:
+        progress["blocker"] = None
+    return progress
+
+
 def cmd_gate_check(args):
     state = load_state(args.target, args.run)
     repo, base = state["loop_repo"], state["base"]
@@ -2417,9 +2474,11 @@ def cmd_gate_check(args):
                     % (base, state["integration_branch"], base))
         out({"reachable": False, "checked_ref": ref or None,
              "branch_deleted": branch_gone, "run_finished": bool(finished),
+             "gate_progress": _gate_progress(state, False),
              "hint": hint})
         sys.exit(3)
-    res = {"reachable": True, "integration_head": integ_head}
+    res = {"reachable": True, "integration_head": integ_head,
+           "gate_progress": _gate_progress(state, True)}
     if branch_gone and finished:
         res["branch_deleted"] = True
         res["note"] = ("integration branch already deleted by `finish` "
@@ -2760,6 +2819,15 @@ def cmd_finish(args):
         warning = ("branch cleanup incomplete — skipped: "
                    + ", ".join(f"{b} ({r})" for b, r in
                                cleaned["skipped_reasons"].items()))
+    # F108: a repeated finish used to emit only a quiet previously_finished
+    # block — surface it in the tool's standard warning field so the no-op is
+    # unmissable, consistent with the skipped-branch warning above.
+    if prev_finished:
+        rewarn = (f"run was already finished with reason "
+                  f"'{prev_finished['reason']}' at {prev_finished['at']} — "
+                  "this call changed nothing (the stop reason keeps the "
+                  "first close)")
+        warning = f"{rewarn}; {warning}" if warning else rewarn
     # F170: after a second finish, `reason` is just THIS call's argument while
     # `previously_finished.reason` is the earlier call's — neither is labeled
     # authoritative. The run's computational stop reason is state["stop"]
@@ -3038,13 +3106,13 @@ EMPTY_STATES = {
                "a fresh target. Recording it (`tanuki-scheduler sync`, which "
                "reads the scenarios file and registers which scenarios exist) "
                "is part of `/tanuki <target> init`; you do not run it by hand",
-        next="tanuki <target> init"),
+        next="/tanuki {t} init (attended slash command)"),
     "scheduler:never-synced-after-runs": dict(
         expected=False,
         reason="{n} iteration(s) ran with no scenario matrix recorded, so "
                "the scheduler cannot have chosen anything — these runs "
                "drove an unmanaged set",
-        next="tanuki <target> init"),
+        next="/tanuki {t} init (attended slash command)"),
 }
 
 
@@ -3228,8 +3296,13 @@ def cmd_dashboard(args):
                                   state["target"])
             drive_lines.append(f"  latest drive: {body}. {_DRIVE_IS}")
 
+        health = _health(state, driving, unmatched)
+        # F188: 'convergence' can appear on this first line, a whole screen
+        # before the convergence section defines it — define it at first use.
+        if "converg" in health:
+            health += " (convergence = 2 consecutive quiet cycles)"
         lines = [f"tanuki-loop — {state['target']} / {state['run']}",
-                 f"  health: {_health(state, driving, unmatched)}",
+                 f"  health: {health}",
                  f"  integration: {state['integration_branch']}  "
                  f"(base {state['base']})",
                  # F29: the counter is *consumed* iterations (rolled-back ones
@@ -3240,7 +3313,9 @@ def cmd_dashboard(args):
                  # show. Zero is stated too, so "none" is a fact, not a guess.
                  f"  iterations: {n_done}/{state['cap']} consumed "
                  f"({n_rolled_back} rolled back) · execution {elapsed // 60}m"
-                 + ("" if lifecycle["active"] else " (frozen at close)")]
+                 # F188: "frozen" alone collided with the frozen-findings
+                 # count below — name what is frozen (the execution clock).
+                 + ("" if lifecycle["active"] else " (clock frozen at close)")]
         # F129: the same build-artifact warning `status` and `iter-verify`
         # surface, on the live screen — a cold operator monitoring only the
         # dashboard would otherwise miss regenerable output the loop's own
@@ -3269,13 +3344,16 @@ def cmd_dashboard(args):
                 part("status→accepted", deltas["accepted"]),
                 part("recurred", deltas["recurred"]),
                 f"deferred {len(state.get('deferred', []))}",
-                f"frozen {len(state.get('frozen', []))}")))
+                # F188: "frozen findings", not bare "frozen" — the run-state
+                # label above uses the same word for the execution clock.
+                f"frozen findings {len(state.get('frozen', []))}")))
             # F6: define the counters inline. Every label is a ledger fact,
             # never a commit count — 'fixed' was retired because 'fixed 0'
             # beside a produced patch read as a contradiction.
             lines.append("    (status→accepted = ledger status transitions "
-                         "this run, not patch commits; recurred = recurrence "
-                         "bumped)")
+                         "this run, not patch commits; recurred = a known "
+                         "finding observed again this run — its recurrence "
+                         "count bumped)")
             if deltas["legacy"]:
                 lines.append("    (run predates status snapshots — "
                              "status→accepted/recurred not computable)")
@@ -3357,6 +3435,12 @@ def cmd_dashboard(args):
                 lines.append(f"  scheduler decisions (iter {cur['n']} plan — "
                              "exploration quota "
                              f"{'met' if plan.get('quota_met') else 'NOT met'}):")
+                # F188: 'exploration quota' was never defined for a cold
+                # reader — one parenthetical at its first mention.
+                lines.append("    (exploration quota = the plan's required "
+                             "share of never-driven scenarios this iteration; "
+                             "an unmet quota keeps the cycle from counting as "
+                             "quiet)")
                 lines.append("    verifying fixes (replay): "
                              f"{_fmt_ids(plan.get('verify', []))}")
                 lines.append("    exploring (never driven): "
@@ -3379,11 +3463,19 @@ def cmd_dashboard(args):
                                  "selection reasons unavailable; states only)")
 
         # -- convergence: which conditions held last cycle, what's still needed
-        lines.append(f"  convergence: quiet streak {state['quiet_streak']}/2 — "
-                     "a cycle is quiet when it finds no new actionable "
-                     "finding, produces no patch commit, and met the "
-                     "exploration quota")
         lc = state.get("last_cycle")
+        if lc is None and state["quiet_streak"] == 0:
+            # F189: with record-cycle never run, a zero streak is silently
+            # meaningless — say so explicitly instead of rendering it.
+            lines.append("  convergence: no cycles recorded — convergence "
+                         "not evaluated (run record-cycle after each "
+                         "iteration)")
+        else:
+            lines.append(f"  convergence: quiet streak "
+                         f"{state['quiet_streak']}/2 — "
+                         "a cycle is quiet when it finds no new actionable "
+                         "finding, produces no patch commit, and met the "
+                         "exploration quota")
         if lc:
             held = [("no new findings" if lc["new_actionable"] == 0 else
                      f"{lc['new_actionable']} NEW actionable finding(s)"),
@@ -3485,8 +3577,9 @@ def cmd_dashboard(args):
                              + (f"; rule on {n_rule} deferred/frozen item(s)"
                                 if n_rule else ""))
             elif s.get("result") == "declined":
-                lines.append("  NEXT: the branch holds unlanded work — "
-                             "`reconcile` classifies it")
+                lines.append("  NEXT: the branch holds unlanded work — the "
+                             f"`/tanuki-loop {state['target']} reconcile` "
+                             "slash command (attended) classifies it")
             elif n_rule:
                 lines.append(f"  NEXT: rule on {n_rule} deferred/frozen "
                              "item(s) — reasons listed above")
@@ -3800,7 +3893,22 @@ def main():
             "canonical file is never auto-loaded (F38, F87). The canonical "
             "directory is machine-wide and shared across every target, so a "
             "slug that collides with another session's shares its config "
-            "(F94)."),
+            "(F94).\n\n"
+            "Flag <-> config-key mapping — one knob, two names (F86): "
+            "--cap sets loop.iterations; --wall-time sets loop.wall_time_s; "
+            "--test-cmd sets loop.test_cmd; --token-budget sets "
+            "loop.token_budget; --attempt-cap sets loop.attempt_cap."),
+        epilog=(
+            "sandbox recipe (F185) — a permissive toy/sandbox \"loop\" block, "
+            "copy-pasteable into the scenarios file for a throwaway run:\n"
+            "  {\"loop\": {\"test_cmd\": \"true\",\n"
+            "            \"iterations\": 2,\n"
+            "            \"wall_time_s\": 3600,\n"
+            "            \"token_budget\": 1000000,\n"
+            "            \"attempt_cap\": 2}}\n"
+            "(\"test_cmd\": \"true\" is a NO-OP placeholder — accepted by "
+            "design, but the run then has no regression gate; use the repo's "
+            "real suite for anything beyond a sandbox)"),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     sp.add_argument("--loop-repo", required=True)
     sp.add_argument("--scenarios", default=None,
@@ -3961,7 +4069,18 @@ def main():
     sp.add_argument("--key", required=True); sp.add_argument("--issue", required=True)
     sp = sub.add_parser("policy")
     sp.add_argument("--finding", required=True); sp.add_argument("--decision", required=True)
-    sp = sub.add_parser("finish")
+    sp = sub.add_parser(
+        "finish",
+        help="mark the run terminal and delete merged integration branches — "
+             "a branch still checked out in its worktree is SKIPPED, not "
+             "deleted, so run `git worktree remove <path>` first (or "
+             "re-finish after) to get it collected (F138)",
+        description=(
+            "Mark the run terminal and delete this target's merged "
+            "integration branches. NOTE (F138): a merged branch still "
+            "checked out in its worktree is SKIPPED, not deleted — remove "
+            "the worktree first (`git worktree remove <path>`), or re-run "
+            "finish afterward to collect it."))
     # Validate against the documented enum (F71) so a typo'd reason can't be
     # silently accepted; choices= also lists them in --help.
     sp.add_argument("--reason", required=True,
@@ -3992,8 +4111,10 @@ def main():
             "status. Writes nothing but ~/.tanuki/<target>/unresolved.md; "
             "never prompts. SIGNALS, NEVER VERDICTS: whether a change is "
             "already landed, superseded, conflicting or still applicable is "
-            "semantic judgment and belongs to `reconcile` "
-            "(commands/tanuki-loop.md). `cherry_picks_cleanly` is a fact "
+            "semantic judgment and belongs to the `/tanuki-loop <target> "
+            "reconcile` slash command (attended; commands/tanuki-loop.md — "
+            "reconcile is NOT a subcommand of this tool). "
+            "`cherry_picks_cleanly` is a fact "
             "about git and is NOT a synonym for applicable."))
     sp.add_argument("--json", action="store_true")
     sp.add_argument("--loop-repo", default=None,
