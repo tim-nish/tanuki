@@ -34,7 +34,9 @@ cat > "$canon" <<EOF
    "driver_model":{"type":"enum","values":["claude-sonnet-5","claude-haiku-4-5"],
                    "scope":"per-target","binds":"defaults.driver_model"},
    "notes_path":{"type":"path","scope":"per-run","binds":"notes"},
-   "label":{"type":"string","scope":"per-target","binds":"label"}
+   "label":{"type":"string","scope":"per-target","binds":"label"},
+   "fanout":{"type":"int","min":1,"max":8,"scope":"per-target",
+             "binds":"loop.drive_concurrency"}
  },
  "scenarios":[{"id":"s1","charter":"c","prompt":"p"}]}
 EOF
@@ -86,6 +88,35 @@ assert d["defaults"]["max_turns"] == 25, "sibling defaults must survive a set"
 ' || fail "set must write exactly the binds path, atomically"
 [ ! -e "$canon.tmp" ] || fail "atomic write must leave no temp file behind"
 pass "set: valid values land at the binds path; siblings survive; no temp litter"
+
+# --- int: parse-or-die, declared bounds, JSON number lands at binds ------------
+"${C[@]}" set --field fanout --value four 2>"$tmp/err" \
+  && fail "a non-integer must fail int validation" || true
+grep -q "not an integer" "$tmp/err" || fail "int defect must be named"
+"${C[@]}" set --field fanout --value 0 2>"$tmp/err" \
+  && fail "a value below min must be rejected" || true
+grep -q "below the declared minimum" "$tmp/err" \
+  || fail "min-bound defect must be named"
+"${C[@]}" set --field fanout --value 9 2>/dev/null \
+  && fail "a value above max must be rejected" || true
+"${C[@]}" set --field fanout --value 4 > /dev/null \
+  || fail "an in-bounds integer must pass"
+python3 -c '
+import json; d = json.load(open("'"$canon"'"))
+v = d["loop"]["drive_concurrency"]
+assert v == 4 and isinstance(v, int), "int must persist as a JSON number, got %r" % v
+' || fail "int set must write a JSON number at the binds path"
+python3 -c '
+import json; p = "'"$canon"'"; d = json.load(open(p))
+d["inputs"]["fanout"]["min"] = "one"; json.dump(d, open(p, "w"))
+'
+"${C[@]}" show 2>"$tmp/err" && fail "non-integer min bound must fail closed" || true
+grep -q "must be an integer" "$tmp/err" || fail "bound defect must be named"
+python3 -c '
+import json; p = "'"$canon"'"; d = json.load(open(p))
+d["inputs"]["fanout"]["min"] = 1; json.dump(d, open(p, "w"))
+'
+pass "int: parse-or-die, min/max bounds enforced, JSON number persisted"
 
 # --- set refuses undeclared fields ---------------------------------------------
 "${C[@]}" set --field max_turns --value 10 2>"$tmp/err" \
