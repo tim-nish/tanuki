@@ -51,7 +51,8 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
        (F132).
   iter-start                     cap / wall-time / external-modification breakers;
                                  records the iteration start SHA + ledger snapshot
-  iter-verify [--no-patch]       the four-part integration invariant; records end SHA
+  iter-verify [--no-patch] [--allow-artifact PATH]
+                                 the five-part integration invariant; records end SHA
   rollback                       reset --hard start + clean -fd + verify; records removed
   test                           run the configured test_cmd in the worktree;
                                  failure is a breaker (skipped if none configured)
@@ -156,7 +157,9 @@ Breakers — what actually trips each one, and where (every breaker prints
                              with an iteration still open.
   test failure               test, when the configured test_cmd exits non-zero.
   worktree not clean         after commit, when test_cmd left untracked artifacts.
-  integration invariant      iter-verify, when the four-part check fails.
+  integration invariant      iter-verify, when the five-part check fails —
+                             including check (e), a committed build artifact
+                             (issue #159; --allow-artifact declares one).
   rollback failed            rollback, when the worktree could not be reset.
 
 NOT a breaker — base-branch drift. The base is snapshotted at `init` and is
@@ -293,13 +296,21 @@ def breaker_hint(reason):
                 "the dirty paths are named in the breaker reason")
     if "HEAD == start SHA but a patch was expected" in r:
         # F131: the no-patch case has a concrete remedy — don't fall through to
-        # the generic "inspect the worktree" hint the other four-part failures
+        # the generic "inspect the worktree" hint the other invariant failures
         # get. The iteration simply committed nothing.
         return ("this iteration produced no commit — stage the work and "
                 "commit it; or re-run `iter-verify --no-patch` if no change was "
                 "expected this iteration; or `rollback` to undo the iteration")
+    if "build artifacts committed" in r:
+        # Check (e) has a concrete remedy — never the generic "inspect" hint
+        # (the F131 lesson, applied to the new check).
+        return ("the iteration's commits add regenerable build output — the "
+                "paths are named in the breaker reason. Drop them (`git rm -r "
+                "--cached <path>`, add them to .gitignore, commit) or "
+                "`rollback` the iteration; a legitimate binary is declared "
+                "deliberately with `iter-verify --allow-artifact <path>`")
     if "integration invariant" in r:
-        return ("the four-part integration check failed — the iteration is in an "
+        return ("the five-part integration check failed — the iteration is in an "
                 "inconsistent state; reset it with `tanuki-loop --target <t> "
                 "rollback` (resets to the start SHA and cleans the worktree), or "
                 "inspect the worktree against the audit trail first")
@@ -1953,15 +1964,17 @@ def cmd_iter_verify(args):
         breaker(state, "integration invariant: start SHA is not an ancestor of HEAD")
     if not args.no_patch and head == start:
         breaker(state, "integration invariant: HEAD == start SHA but a patch was expected")
-    # Artifact guard (F64/F102, issues #71 + the 2026-07-17 arbitration):
-    # REPORTED, never a breaker. Making it fatal would add a fifth halt to the
-    # documented four-part integration invariant (specs/spec-tanuki-loop
-    # SPEC.md, commands/tanuki-loop.md, this tool's docstring) and would stop
-    # an unattended overnight run over a merely-incomplete .gitignore — a
-    # contract change that is the operator's call, not a headless run's. The
-    # decision is deferred to the attended gate WITH the evidence attached,
-    # and gate-push refuses to put artifacts on the remote (cmd_gate_push), so
-    # deferring costs no safety.
+    # Artifact guard — check (e) of the five-part integration invariant
+    # (spec-tanuki-loop "One iteration" step 6, AMENDED 2026-07-19, triage of
+    # issue #159; supersedes the 2026-07-17 report-only arbitration): commits
+    # that introduce build-artifact paths are an immediate-stop breaker at the
+    # commit that introduced them, not a deferred warning — doctor's
+    # test-cmd-artifacts check runs only at doctor time, which Phase 1 may
+    # skip, so without (e) nothing between the commit and the remote objects.
+    # A legitimate binary is declared deliberately per path with
+    # --allow-artifact (audited); the guard never stands down silently. The
+    # pattern source is is_build_artifact() — the same list doctor and
+    # gate-push read.
     arts = committed_artifacts(wt, start, head)
     it["build_artifacts_committed"] = arts or None
     if not _clean(state):
@@ -1969,6 +1982,20 @@ def cmd_iter_verify(args):
         shown = ", ".join(real[:8]) + (" …" if len(real) > 8 else "")
         breaker(state, "integration invariant: worktree not clean after commit"
                        + (f" (dirty: {shown})" if real else ""))
+    allowed = list(args.allow_artifact or [])
+    def _declared(p):
+        return any(p == a or p.startswith(a.rstrip("/") + "/") for a in allowed)
+    undeclared = [p for p in arts if not _declared(p)]
+    if undeclared:
+        shown = ", ".join(undeclared[:8]) + (" …" if len(undeclared) > 8 else "")
+        breaker(state, "integration invariant: build artifacts committed to "
+                       f"the integration branch ({shown})")
+    overridden = [p for p in arts if _declared(p)]
+    if overridden:
+        it["artifact_override"] = {"allowed": allowed, "paths": overridden}
+        audit(state, f"iter {it['n']}: check (e) override — declared build "
+                     f"artifact(s) allowed: {', '.join(overridden)} "
+                     f"(--allow-artifact {' '.join(allowed)})")
     it["end"] = head
     it["phase"] = "verified"
     # Story 1.10: record each landed commit's subject + changed-file count so
@@ -2003,14 +2030,15 @@ def cmd_iter_verify(args):
                "build_artifacts_committed": arts or None,
                "warning": None}
     if arts:
+        # Only declared (--allow-artifact) paths reach this point — an
+        # undeclared artifact already stopped the iteration at check (e).
         shown = ", ".join(arts[:8]) + (" …" if len(arts) > 8 else "")
         payload["warning"] = (
             f"build artifacts committed to the integration branch ({shown}) "
-            "— regenerable output, not work product. Not fatal: drop them "
-            "(`git rm -r --cached <path>`) and add them to .gitignore. "
-            "gate-push will refuse to push them to the remote.")
-        audit(state, f"iter {it['n']}: WARNING build artifacts committed: "
-                     f"{', '.join(arts)}")
+            "under an explicit --allow-artifact override. gate-push will "
+            "still refuse to push them without --allow-artifacts.")
+        audit(state, f"iter {it['n']}: WARNING build artifacts committed "
+                     f"(declared): {', '.join(arts)}")
     out(payload)
 
 
@@ -3733,10 +3761,19 @@ def main():
             ".pytest_cache/, .mypy_cache/, .ruff_cache/, *.pyc, *.pyo, "
             "*.egg-info) never counts as a dirty worktree — it is not work "
             "product — and is a BREAKER if committed to the integration "
-            "branch, naming the offending paths and the cause at the commit "
-            "that introduced them rather than as an unexplained not-clean "
-            "breaker several iterations later."))
+            "branch (check (e) of the five-part integration invariant, "
+            "spec-tanuki-loop AMENDED 2026-07-19 / issue #159), naming the "
+            "offending paths and the cause at the commit that introduced "
+            "them rather than as an unexplained not-clean breaker several "
+            "iterations later. A legitimate binary is declared deliberately "
+            "with --allow-artifact (per path, repeatable, audited) — the "
+            "guard never stands down silently."))
     sp.add_argument("--no-patch", action="store_true")
+    sp.add_argument("--allow-artifact", action="append", metavar="PATH",
+                    help="declare a committed path (or directory prefix) as a "
+                         "legitimate binary: check (e) passes for declared "
+                         "paths only, and the override is recorded in the "
+                         "audit trail; repeatable")
     sub.add_parser(
         "rollback",
         help="reset the loop worktree --hard to the iteration start SHA + git "

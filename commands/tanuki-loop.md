@@ -183,22 +183,23 @@ breakers, records the start SHA, and snapshots the ledger (exit 3 +
    integration branch (no push, no PR). **Never `git add -A` blindly**: stage
    the work product, not whatever the runtime regenerated. Then
    `tanuki-loop iter-verify` (`--no-patch` when no change was expected) — the
-   four-part integration invariant; it records the end SHA and breaks on any
+   five-part integration invariant; it records the end SHA and breaks on any
    violation.
-   **Build-artifact guard** (issue #71, F64/F102; arbitration 2026-07-17):
-   regenerable output (`__pycache__/`, `.pytest_cache/`, `.mypy_cache/`,
-   `.ruff_cache/`, `*.pyc`, `*.pyo`, `*.egg-info`) never counts as a dirty
-   worktree — it is not work product, so it adds no friction to a clean
-   bracket. When it is **committed**, `iter-verify` **reports** it: the paths
-   and the cause appear in its output (`build_artifacts_committed`,
-   `warning`), in the audit trail, and in `status` — which is what you read
-   before approving the merge. It is **not a breaker**: halting here would add
-   a fifth halt to the four-part integration invariant above and would stop an
-   unattended run over a merely-incomplete `.gitignore` — a contract change
-   that is the operator's call, not a headless run's. Enforcement lives at the
-   gate instead: **`gate-push` refuses** to push a merge that adds artifact
-   paths (`--allow-artifacts` overrides deliberately), so nothing regenerable
-   reaches the remote while nothing overnight halts over it.
+   **Build-artifact guard** (issue #71, F64/F102; check (e) of the invariant,
+   spec AMENDED 2026-07-19 — triage of issue #159, superseding the 2026-07-17
+   report-only arbitration): regenerable output (`__pycache__/`,
+   `.pytest_cache/`, `.mypy_cache/`, `.ruff_cache/`, `*.pyc`, `*.pyo`,
+   `*.egg-info`) never counts as a dirty worktree — it is not work product,
+   so it adds no friction to a clean bracket. When it is **committed**,
+   `iter-verify` **breaks** at the commit that introduced it, naming the
+   offending paths (`build_artifacts_committed` is also recorded in state for
+   `status` and the dashboard). A run that must commit a legitimate binary
+   declares it deliberately — `iter-verify --allow-artifact <path>` (per
+   path, repeatable); the override is recorded in the audit trail, and the
+   guard never stands down silently. The gate stays belt-and-suspenders:
+   **`gate-push` still refuses** to push a merge that adds artifact paths
+   (`--allow-artifacts` overrides deliberately), so nothing regenerable
+   reaches the remote even past an overridden check (e).
 7. Append the iteration to the audit artifact (start/end SHA, findings
    bumped/new, items implemented, items deferred). Loop back to step 1.
 
@@ -228,7 +229,8 @@ one.
 **Breakers.**
 - *Immediate stop* (freeze integration branch, write audit, report): test
   failure · implementation-command failure · commit failure · integration
-  invariant violation (the four-part check) · iteration cap reached ·
+  invariant violation (the five-part check, committed build artifacts
+  included) · iteration cap reached ·
   wall-time exceeded · token budget exceeded · external modification of the
   integration worktree.
 - *Defer / freeze, keep going*: a fix physically impossible,
