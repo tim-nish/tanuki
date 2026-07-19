@@ -445,6 +445,17 @@ def cmd_upsert(args, ledger):
               f"(for a manual ingest with no driven scenario, use the reserved "
               f"'ingest' scenario, e.g. '<run>/ingest#<seq>')", file=sys.stderr)
         sys.exit(2)
+    # F133 residual: shape validation alone still lets a typo'd or fabricated
+    # run id through — the pointer LOOKS right but points at nothing, and it
+    # persisted silently. Warn (never reject: the run's events may simply not
+    # be ingested yet) when a pointer's run is not among the ledger's known
+    # runs (events/<run>/ dirs unioned with recorded event runs).
+    known = set(known_runs(args.target, ledger))
+    for e in evidence:
+        run = run_of(e)
+        if run not in known:
+            print(f"warning: evidence pointer {e} references unknown run "
+                  f"{run} — recorded anyway", file=sys.stderr)
     scenarios = sorted({e.split("#")[0].split("/")[-1] for e in evidence})
     # Story 1.29 / DECISION-2026-07-19-host-identity: evidence from a run
     # driven under a one-shot override is OFF-HOST — recorded (host-tagged,
@@ -1173,7 +1184,9 @@ def cmd_compact(args, ledger):
                                f"— detail kept until it is truly quiet")
         head = (f"nothing to compact (threshold: unseen for >= {n} run(s)); an "
                 f"accepted finding tombstones once its scenario was driven-and-"
-                f"absent that many times, or — for ingest/no-scenario findings — "
+                f"absent that many times, or — for ingest/no-scenario findings "
+                f"(no real scenario: only the reserved 'ingest' pseudo-scenario "
+                f"that marks manual ingests, or none at all) — "
                 f"once that many later runs (driven or manual) have elapsed")
         if reasons:
             print(head + "\ncandidates below the threshold:")
@@ -1403,6 +1416,12 @@ def cmd_status(args, ledger):
         print(f"  tombstoned: {total_tomb} — compacted to one-line records "
               f"(terminal: verified-fixed or dismissed); they keep their "
               f"status for dedupe and are not awaiting anything")
+    # F214: distill's `contributed` marker ({at, file, slug} — a modifier
+    # like `tombstone`, never a fifth status) was invisible here. Count it
+    # once, and mark each contributed finding in the sections below.
+    contributed = sum(1 for f in ledger["findings"] if f.get("contributed"))
+    if contributed:
+        print(f"  contributed to hub: {contributed}")
 
     if by["proposed"]:
         print("\n  AWAITING YOUR DECISION (proposed — accept or dismiss):")
@@ -1421,7 +1440,8 @@ def cmd_status(args, ledger):
     if awaiting:
         print("\n  ACCEPTED — awaiting fix verification (should stop recurring):")
         for f in awaiting:
-            print(f"    {f['id']} rec:{f['recurrence']} — {f['title'][:90]}")
+            print(f"    {f['id']} rec:{f['recurrence']} — {f['title'][:90]}"
+                  + (" [contributed]" if f.get("contributed") else ""))
         hint = compaction_hint(awaiting)
         if hint not in nxt:
             print(f"    hint: {hint}")
@@ -1436,7 +1456,8 @@ def cmd_status(args, ledger):
             # scen: leaves the badge unexplained by the line that carries it.
             print(f"    {priority(f)} {f['id']} [{f['kind']}] "
                   f"rec:{f['recurrence']} scen:{len(f['scenarios'])} — "
-                  f"{f['title'][:90]}")
+                  f"{f['title'][:90]}"
+                  + (" [contributed]" if f.get("contributed") else ""))
     # Derived, never patched string logic (F24/F36/F76): the same closed-
     # enumeration derivation the `next` subcommand exposes alone.
     print(f"\n  next: {nxt}")
@@ -1556,7 +1577,13 @@ def cmd_distill(args, ledger):
         except ValueError as e:
             print(f"error: {e}", file=sys.stderr)
             sys.exit(2)
-        print(json.dumps({"ok": True, "path": p, "schema": t}, indent=2))
+        # F213: a passing doctor check is a dead end without the next step —
+        # name it on both surfaces (stderr for a human tail, stdout JSON for
+        # a piping caller).
+        nxt = "run distill --list to see candidates"
+        print(f"next: {nxt}", file=sys.stderr)
+        print(json.dumps({"ok": True, "path": p, "schema": t, "next": nxt},
+                         indent=2))
         return
     cands = distill_candidates(ledger, cfg)
     if args.list:
@@ -1576,15 +1603,20 @@ def cmd_distill(args, ledger):
               "call only and never change which findings distill considers",
               file=sys.stderr)
         # F196: the unconfigured listing must carry the configuration shape
-        # itself, not defer it to a separate --check run.
+        # itself, not defer it to a separate --check run. F212: the notice is
+        # mirrored into the stdout JSON — stderr alone never reaches a caller
+        # piping stdout, and configured:false without the how-to is a dead end.
+        notice = None
         if block is None:
-            print('note: contribute_back is not configured — candidates are '
-                  'listed but nothing can be emitted; to enable, set '
-                  'contribute_back {"path": <staging dir>, "schema": '
-                  '<template file>} in ~/.tanuki/config.json or the scenarios '
-                  'file\'s "defaults" block', file=sys.stderr)
+            notice = ('contribute_back is not configured — candidates are '
+                      'listed but nothing can be emitted; to enable, set '
+                      'contribute_back {"path": <staging dir>, "schema": '
+                      '<template file>} in ~/.tanuki/config.json or the '
+                      'scenarios file\'s "defaults" block')
+            print(f"note: {notice}", file=sys.stderr)
         print(json.dumps(
             {"configured": block is not None,
+             **({"notice": notice} if notice else {}),
              "min_recurrence": cfg["min_recurrence"],
              "min_scenarios": cfg["min_scenarios"],
              "candidates": [{"id": f["id"], "title": f["title"],
@@ -1887,7 +1919,10 @@ def main():
             "upsert-finding calls that touched the finding (i.e. how many times "
             "it was observed-and-recorded), NOT the number of --evidence "
             "pointers or underlying event occurrences — a creation with two "
-            "--evidence pointers is still recurrence:1 (F72)."))
+            "--evidence pointers is still recurrence:1 (F72). There is no "
+            "--status flag here: a finding is born `open` and its status "
+            "changes only via `set-status` (F63) — including the legitimate "
+            "watching-list accept, open -> accepted, which skips 'proposed'."))
     sp.add_argument("--title")
     # List the valid enum so it's discoverable from --help, not only from a
     # rejection error (F33). choices= also produces a clear argparse message.
