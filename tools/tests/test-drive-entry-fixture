@@ -47,10 +47,25 @@ cat > "$tmp/scenarios.json" <<'EOF'
 ]}
 EOF
 
+# --- estimate plan: staged-state entry is visible at the approval gate (#204)
+"$drive" --target t --plugin "$tmp/plugin" --host "$tmp/host" \
+  --scenarios "$tmp/scenarios.json" --run r0 --estimate \
+  | python3 -c '
+import json, sys
+plan = {s["id"]: s for s in json.load(sys.stdin)["scenarios"]}
+assert plan["s-staged"]["entry_fixture"] == "harvested", plan["s-staged"]
+assert "entry_fixture" not in plan["s-plain"], plan["s-plain"]
+' || fail "--estimate must name each scenario's entry fixture, absent when none"
+pass "--estimate plan carries entry_fixture per scenario"
+
 # --- hosted drive: fixture verified pre-turn, recorded in the manifest -------
 "$drive" --target t --plugin "$tmp/plugin" --host "$tmp/host" \
-  --scenarios "$tmp/scenarios.json" --run r1 --timeout 60 >/dev/null \
+  --scenarios "$tmp/scenarios.json" --run r1 --timeout 60 >"$tmp/r1.out" \
   || fail "drive exited non-zero"
+grep -q "driving s-staged (entry fixture: harvested)" "$tmp/r1.out" \
+  || fail "drive start line must name the fixture being entered"
+grep -q "driving s-plain …" "$tmp/r1.out" \
+  || fail "a fixture-less scenario keeps the plain start line"
 python3 - "$TANUKI_ROOT/t/events/r1/manifest.json" "$host_tip" <<'PY' || fail "manifest entry_fixture wrong"
 import json, sys
 m = json.load(open(sys.argv[1]))
