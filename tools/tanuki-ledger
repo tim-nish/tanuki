@@ -274,6 +274,7 @@ def cmd_ingest(args, ledger):
     new, dup = 0, 0
     collapsed = {}  # fingerprint -> event dict (identity listed once)
     runs_seen = set()  # story 1.9 / #106: give each ingested run a manifest
+    no_scenario = 0  # F20: hand-rolled events missing the "scenario" key
     for path in args.files:
         with open(path, encoding="utf-8") as f:
             for line in f:
@@ -281,6 +282,8 @@ def cmd_ingest(args, ledger):
                 if not line:
                     continue
                 e = json.loads(line)
+                if "scenario" not in e:
+                    no_scenario += 1
                 if e.get("run"):
                     runs_seen.add(e["run"])
                 if ingest_event(ledger, e) == "new":
@@ -305,6 +308,17 @@ def cmd_ingest(args, ledger):
                   f"will sort as the OLDEST run, so chronological ordering "
                   f"(status 'latest') and elapsed-runs compaction tracking "
                   f"will not work for it", file=sys.stderr)
+    # F20 residual: "scenario" is part of the dedupe identity AND the evidence
+    # pointer's middle segment, so a hand-rolled event without it silently
+    # collapses under a null scenario and any finding extracted from it ends up
+    # scenario-less downstream. Warn once with the count — never reject.
+    if no_scenario:
+        print(f'warning: {no_scenario} event(s) lack a "scenario" key — '
+              f"recorded anyway, but they collapse under a null scenario and "
+              f"a finding extracted from them carries no scenario scope "
+              f"(evidence pointers are '<run>/<scenario>#<seq>'; use the "
+              f"reserved 'ingest' scenario when no driven scenario applies)",
+              file=sys.stderr)
     # flush: piped stdout is block-buffered while stderr is not, so without it
     # the collapsed detail lines (stderr) overtake this summary in a merged
     # capture and the output reads backwards (F121).
@@ -562,25 +576,23 @@ def cmd_upsert(args, ledger):
         finding["verify_pin"] = True
     ledger["findings"].append(finding)
     save(args.target, ledger)
-    # F22: a multi-pointer creation still starts at recurrence:1 (recurrence
-    # counts upsert calls, not evidence pointers — F72). Say so at the exact
-    # moment the mismatch is visible, instead of leaving it to --help.
-    tail = ""
-    if len(evidence) > 1:
-        tail = (f" ({len(evidence)} evidence pointers, recurrence:1 — "
-                f"recurrence counts upsert calls, not pointers; "
-                f"bump with --match {fid})")
-    print(f"created {fid}: {args.title}{tail}")
-    # F92: a fresh finding (recurrence 1, 1 scenario) is silently below the
-    # promote bar — the documented lifecycle then reads as a broken tool.
-    # Say so at creation time, not only when `promote` later comes up empty.
+    # F208 (reshaping F22 + F92): the confirmation used to pack pointer count,
+    # recurrence semantics, and bar status into one dense line plus a long
+    # stderr note. At most two short lines now: the creation fact with its bar
+    # status (F92's below-bar heads-up, compressed), then — only when more
+    # than one pointer was supplied — the recurrence-counts-calls reminder
+    # (F22/F72), the sole case where the mismatch is visible.
     cfg = load_config()
-    if (finding["recurrence"] < cfg["min_recurrence"]
-            and len(finding["scenarios"]) < cfg["min_scenarios"]):
-        print(f"note: {fid} starts below the promotion bar (recurrence >= "
-              f"{cfg['min_recurrence']} OR scenarios >= "
-              f"{cfg['min_scenarios']}) — it will surface in WATCHING until "
-              f"it recurs or spreads to another scenario", file=sys.stderr)
+    below = (finding["recurrence"] < cfg["min_recurrence"]
+             and len(finding["scenarios"]) < cfg["min_scenarios"])
+    bar = (f"below the promotion bar (recurrence >= {cfg['min_recurrence']} "
+           f"OR scenarios >= {cfg['min_scenarios']}); watching until it "
+           f"recurs or spreads" if below else "clears the promotion bar")
+    print(f"created {fid}: {args.title} — {bar}")
+    if len(evidence) > 1:
+        print(f"note: {len(evidence)} evidence pointers but recurrence:1 — "
+              f"recurrence counts upsert-finding calls, not pointers; bump "
+              f"with --match {fid}", file=sys.stderr)
 
 
 def cmd_promote(args, ledger):
@@ -1112,7 +1124,14 @@ def cmd_compact(args, ledger):
     save(args.target, ledger)
     if compacted:
         for fid, res in compacted:
-            print(f"tombstoned {fid} ({res})")
+            # F209: say the dismissed rule where it fires — a dismissed
+            # finding tombstones once N later runs have elapsed (any run;
+            # deadness is not scenario-conditional), never immediately.
+            if res == "dismissed":
+                print(f"tombstoned {fid} (dismissed — quiet for >= {n} "
+                      f"elapsed run(s); dismissal alone never tombstones)")
+            else:
+                print(f"tombstoned {fid} ({res})")
         print(f"compacted {len(compacted)} finding(s) unseen for >= {n} run(s); "
               f"each collapsed to a one-line tombstone — evidence/scenarios "
               f"intentionally dropped (bounded growth), id/title/resolution "
@@ -1548,6 +1567,14 @@ def cmd_distill(args, ledger):
               f"{cfg['min_recurrence']} OR scenarios >= "
               f"{cfg['min_scenarios']}), alive, not yet contributed",
               file=sys.stderr)
+        # F206: promote takes per-call --min-recurrence/--min-scenarios
+        # overrides, so a finding promoted under a lowered bar can still be
+        # absent HERE — distill's bar is config-fixed by design. Say so in the
+        # header, or the mismatch reads as a broken candidate count.
+        print("note: this bar is fixed by config — promote's "
+              "--min-recurrence/--min-scenarios flags adjust that one promote "
+              "call only and never change which findings distill considers",
+              file=sys.stderr)
         # F196: the unconfigured listing must carry the configuration shape
         # itself, not defer it to a separate --check run.
         if block is None:
@@ -1591,6 +1618,14 @@ def cmd_distill(args, ledger):
               f"({finding['contributed']['file']}) — re-observation bumps "
               "recurrence but never re-emits (the dedupe contract)",
               file=sys.stderr)
+        sys.exit(2)
+    # F207: one generic refusal used to cover two distinct cases. A dismissed
+    # finding may well clear the bar — its exclusion is categorical (the human
+    # said no), so the threshold message would misdirect the caller into
+    # bumping recurrence. Name the real reason.
+    if finding.get("status") == "dismissed":
+        print(f"error: {args.id} is dismissed — dismissed findings are never "
+              f"emitted", file=sys.stderr)
         sys.exit(2)
     if finding not in cands:
         print(f"error: {args.id} has not cleared the promotion bar "
@@ -1802,7 +1837,15 @@ def main():
             "duplicates collapse to an occurrence count rather than creating "
             "separate records; the identity key is scenario+type+detail ONLY — "
             "run and seq are NOT part of it, so the same detail seen in two "
-            "different runs collapses into one record with count=2 (F70)."))
+            "different runs collapses into one record with count=2 (F70). "
+            "Minimal expected keys per event: run, scenario, seq, type "
+            "(detail strongly recommended) — 'scenario' is part of the dedupe "
+            "identity and of the evidence pointer, so a hand-rolled event "
+            "WITHOUT a \"scenario\" key is still recorded but collapses under "
+            "a null scenario and yields a scenario-less finding downstream; "
+            "ingest warns with a count when it sees one, never rejects (F20). "
+            "Use the reserved 'ingest' scenario when no driven scenario "
+            "applies."))
     sp.add_argument("files", nargs="+",
                     help="one or more event files to ingest — the driver names "
                          "them <scenario>.events.jsonl by convention, but the "
@@ -1984,7 +2027,13 @@ def main():
             "manual. A finding evidenced against a REAL scenario is different: "
             "only a run that actually RE-DRIVES that scenario counts, so "
             "hand-ingestion alone can never tombstone it — re-drive the scenario "
-            "with `tanuki-drive` (F140/F141; supersedes the stale F75 note)."))
+            "with `tanuki-drive` (F140/F141; supersedes the stale F75 note). "
+            "Per-status rule (F209): an ACCEPTED finding tombstones as 'fixed' "
+            "after >= N driven-and-absent replays (elapsed runs for "
+            "ingest/no-scenario findings); a DISMISSED finding is not "
+            "scenario-conditional — it tombstones once >= N later runs (driven "
+            "or manual) have elapsed since it was last seen, never "
+            "immediately. OPEN and PROPOSED findings are never compacted."))
     sp.add_argument("--unseen-runs", type=int, default=None,
                     help="re-driven runs the finding must be absent from before "
                          "tombstoning (default from config)")
