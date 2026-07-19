@@ -60,17 +60,38 @@ fully reversible runs unattended.
   `main`'s answer contradict each other. On 2026-07-17 two branches held 25
   unmerged commits and had resolved two findings **opposite** to the way the
   attended sitting had, discovered only after both had shipped. So the loop
-  owns a **reconcile** pass over its own unmerged branches
-  (`/tanuki-loop <target> reconcile`, `commands/tanuki-loop.md`): attended,
-  report-first, classifying **per semantic change unit** rather than per
-  commit — a commit routinely mixes already-landed, superseded, conflicting
-  and still-applicable hunks, and its subject line describes at most one of
-  them. It never merges without an explicit gate, never deletes a branch
-  (`/repo-cleanup` owns that), and never resolves a contract conflict — it
-  reports the decision the operator owes, with the governing text quoted.
-  Its **discovery and mechanical signals** come from `tanuki-loop unresolved`
-  (below), never re-derived in the sitting; its **verdicts** are judgment and
-  never come from a tool.
+  owns a **reconcile** pass over its own unmerged branches — and reconcile is
+  a **single terminal invocation** (#210, ratified 2026-07-19; this
+  supersedes the prior attended/report-first contract — see the transition
+  note in "Reconcile substrate" below). One invocation must:
+  classify **all** unresolved runs, classifying **per semantic change unit**
+  rather than per commit — a commit routinely mixes already-landed,
+  superseded, conflicting and still-applicable hunks, and its subject line
+  describes at most one of them; apply **every deterministic** port or
+  disposition ("deterministic" = requires no owner semantic decision, NOT
+  "algorithmically decidable" — agent-performed hunk isolation and adaptation
+  may occur inside the invocation, and **missing behavioral evidence fails
+  closed** to `needs-owner`, never guessed); **re-evaluate findings against
+  current base behavior, per manifestation site** (a finding is resolved or
+  superseded only when closed at **every** known site); iterate to a
+  **fixpoint**; run **verification**; then present **one** gate containing
+  **only genuine owner decisions** — contract conflicts, ambiguous
+  supersession, spec-lane routing, `needs-owner` items — nothing a tool
+  could have closed. After approval it performs the terminal actions with no
+  further commands: **merge → push → update state → clean up** (branch and
+  worktree cleanup that `/repo-cleanup` formerly owned moves here). On a
+  PR-protected target (`gate: "pr"`) the terminal "merge" is expressed as PR
+  mechanics, and the reconcile gate approval IS the explicit human decision —
+  the loop still never auto-merges (the 2026-07-17 ruling's substance is
+  preserved: no merge happens without the owner's explicit approval).
+  Reconcile never resolves a contract conflict silently — it presents the
+  decision the operator owes, with the governing text quoted.
+  **Identifiers are evidence, never required inputs**: the normal flow
+  defaults to all unresolved runs; commit hashes and branch names appear
+  only as evidence in reports. Its **discovery and mechanical signals** come
+  from `tanuki-loop unresolved` (below), never re-derived in the sitting;
+  its **verdicts** remain semantic judgment, now executed inside the
+  invocation and gated once.
 - **The scheduler plan is pre-approved — no plan gate in the loop.** The
   attended `/tanuki` "confirm execution before anything runs" plan gate
   (`docs/tanuki-spec.md`) **does not apply at any phase of the loop**. Once the
@@ -490,8 +511,25 @@ dedicated attended subcommand, `tanuki-loop recover`, with these guarantees:
 
 ## Reconcile substrate (`tanuki-loop unresolved`) + drift notification — ADDED 2026-07-17
 
-The reconcile pass (Non-negotiables, "A declined gate leaves a debt") is
-attended judgment by contract. Two things around it are **not** judgment, and
+> **Transition note — terminal contract (#210, ratified 2026-07-19).** The
+> reconcile pass was originally "attended judgment by contract":
+> report-first, never merging without a gate, never deleting a branch
+> (`/repo-cleanup` owned deletion). Dogfooding (writing-assistant run
+> `loop-20260719-173009`) showed that contract cost ~5 human turns per
+> sitting and shipped an incorrect per-finding verdict (F77 marked
+> superseded while live at a second site). The pass is now a **single
+> terminal invocation** (Non-negotiables, "A declined gate leaves a debt"):
+> deterministic dispositions are applied inside the invocation, findings are
+> re-evaluated **per manifestation site**, and post-approval
+> merge/push/state-update and branch/worktree cleanup are terminal steps of
+> reconcile itself — `/repo-cleanup` no longer owns reconcile-branch
+> deletion. **Ratified definitions:** "deterministic" = requires no owner
+> semantic decision (missing behavioral evidence fails closed to
+> `needs-owner`); identifiers are evidence, never required inputs (default
+> is all unresolved runs); one gate, genuine decisions only; per-site
+> finding closure with stored, re-derivable closure evidence.
+
+Judgment stays in the pass; two things around it are **not** judgment, and
 leaving them to the sitting is why reconciling felt improvised and needed a
 model for work a script should do:
 
@@ -800,15 +838,22 @@ and removing supervision is the only change between phases. The morning
   review material, not ratification; owner ruling 2026-07-17), it **never
   auto-merges**, and settlement (landed / pending / declined / unknown) is
   **derived** by read-only surfaces from the forge and the current base — no
-  human closing command restates the forge's decision.
+  human closing command restates the forge's decision. Reconcile's terminal
+  merge (#210) does not breach this: on a `gate: "pr"` target the terminal
+  action is expressed as PR mechanics, and the reconcile gate approval is
+  the owner's explicit decision — no merge ever happens without it.
 - Merged integration branches are cleaned up by `finish` (backstop: the next
-  `init`); an unmerged tip is never deleted. An unmerged tip is therefore a
-  **debt with an owner**: `unresolved` makes it visible and `reconcile` pays
-  it down. Never-deleted must not mean never-looked-at — that is precisely how
-  25 commits rotted into contradiction.
+  `init`); outside reconcile, an unmerged tip is never deleted. An unmerged
+  tip is therefore a **debt with an owner**: `unresolved` makes it visible
+  and `reconcile` pays it down — and once the reconcile gate is approved,
+  reconcile's own terminal step deletes the now-settled branch and worktree
+  (#210; this cleanup formerly belonged to `/repo-cleanup`). Never-deleted
+  must not mean never-looked-at — that is precisely how 25 commits rotted
+  into contradiction.
 - `unresolved` emits **signals, never verdicts**, and prompts never. Whether a
   change is already-landed, superseded, conflicting or still-applicable is
-  semantic judgment that belongs to the reconcile sitting; patch identity and
+  semantic judgment that belongs to the reconcile pass — executed inside its
+  single terminal invocation, gated once (#210); patch identity and
   subject lines are both known-wrong proxies for it.
 - Stop on convergence or cap, whichever first; stop immediately on any
   immediate-stop breaker.
