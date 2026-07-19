@@ -283,7 +283,14 @@ def breaker_hint(reason):
     # ("external modification" among them, F93), and matching that phrase
     # first would hand a capped run the recover hint.
     if "iteration cap reached" in r or "wall-time" in r:
-        return "the run hit its ceiling — proceed to the morning gate; no more iterations run"
+        # F93 (attempt 3): the skipped-checks note rides the HINT too — some
+        # surfaces show only the hint, and the fact that later precedence
+        # checks never ran must survive every rendering of the stop.
+        return ("the run hit its ceiling — proceed to the morning gate; no "
+                "more iterations run. Later iter-start checks (external "
+                "modification among them) were not evaluated — a capped "
+                "run's worktree is no longer guarded; re-init for a fresh "
+                "guarded run (F93)")
     if "external modification" in r:
         return ("run `tanuki-loop --target <t> recover` and choose --restore "
                 "(discard the external change, reset to the last verified HEAD) "
@@ -336,6 +343,20 @@ def breaker_hint(reason):
     if "rollback failed" in r:
         return "the worktree could not be reset cleanly — inspect it by hand at the start SHA"
     return None
+
+
+def with_skipped_checks_note(reason):
+    """F93 (attempt 3): EVERY emission of the iteration-cap breaker carries
+    the skipped-checks note. iter-start writes it at the source, but a
+    last_breaker persisted by a pre-note build resurfaces BARE through the
+    surfaces that re-emit the stored reason (status, dashboard, _health,
+    run_verdict) — that is exactly how a driven session met a bare
+    'cap reached' after the source-site fix. Append on render when absent;
+    a reason that already states it passes through untouched."""
+    if "iteration cap reached" in reason and "not evaluated" not in reason:
+        return (reason + " — later checks (wall-time, external modification) "
+                "were not evaluated (F93)")
+    return reason
 
 
 def breaker(state, reason):
@@ -1642,14 +1663,16 @@ def cmd_doctor(args):
         # independent fault (F112): with no test_cmd there is nothing to run,
         # so fixing loop-config fixes this too. The breaker summary reads this
         # field and names only root causes, so the operator sees one problem to
-        # fix rather than two unrelated ones.
+        # fix rather than two unrelated ones. The detail REFERENCES the root
+        # cause rather than restating it (F112 residual): the relationship is
+        # already carried structurally by derived_from / root_causes /
+        # derived_failures, and a third prose copy is what the operator had
+        # to read three times.
         checks.append({"check": "baseline-test", "ok": False,
                        "derived_from": "loop-config",
-                       "detail": "no test_cmd to check — configure one first "
-                                 "(the loop's test breaker is the headless "
-                                 "run's only regression gate). This check "
-                                 "fails only because loop-config is "
-                                 "incomplete — fixing that fixes this."})
+                       "detail": "no test_cmd to check — a consequence of "
+                                 "the loop-config failure (see root_causes); "
+                                 "fixing that fixes this too"})
         # Report the artifact check even when it cannot run. A check that shows
         # up only in the ready report looks like it appeared from nowhere
         # between two runs (F91) — the fixed skeleton the dashboard already
@@ -2929,15 +2952,31 @@ def cmd_finish(args):
                      f"{cleaned['kept'] or 'none'}; skipped: "
                      f"{cleaned['skipped_reasons'] or 'none'}")
     _ld = loop_dir(state["target"], state["run"])
-    # F138: a skipped branch (still checked out in its worktree) is a partial
-    # completion the operator must follow up on, but ok:true reads as "fully
-    # done" — surface it as a top-level warning, not only inside the
-    # branch_cleanup detail.
-    warning = None
+    # F138: a skipped branch is surfaced top-level, not only inside the
+    # branch_cleanup detail. F195: HOW it is surfaced follows whether the
+    # operator must act. A merged branch whose delete FAILED is a real
+    # follow-up -> `warning`. A branch skipped only because it is still
+    # checked out in its live worktree is ROUTINE beside a clean success —
+    # no action is required before the next init sweep: the next `init`
+    # collects it once the worktree is removed — so it rides the
+    # informational `note` field, never `warning`.
+    warning, note = None, None
     if cleaned.get("skipped"):
-        warning = ("branch cleanup incomplete — skipped: "
-                   + ", ".join(f"{b} ({r})" for b, r in
-                               cleaned["skipped_reasons"].items()))
+        routine = {b: r for b, r in cleaned["skipped_reasons"].items()
+                   if "checked out in a worktree" in r}
+        alarming = {b: r for b, r in cleaned["skipped_reasons"].items()
+                    if b not in routine}
+        if alarming:
+            warning = ("branch cleanup incomplete — skipped: "
+                       + ", ".join(f"{b} ({r})"
+                                   for b, r in alarming.items()))
+        if routine:
+            note = ("branch cleanup deferred, no action required: "
+                    + ", ".join(f"{b} is still checked out in its worktree"
+                                for b in routine)
+                    + " — the next `init` collects it after the worktree is "
+                      "removed (`git worktree remove <path>`); or re-run "
+                      "finish then")
     # F108: a repeated finish used to emit only a quiet previously_finished
     # block — surface it in the tool's standard warning field so the no-op is
     # unmissable, consistent with the skipped-branch warning above.
@@ -2959,6 +2998,9 @@ def cmd_finish(args):
                                     "'reason' is only this invocation's "
                                     "argument"),
                "warning": warning,
+               # F195: informational only — finish itself succeeded and the
+               # next init sweep needs nothing from the operator first.
+               "note": note,
                "branch_cleanup": cleaned,
                "host_drift": host_drift,
                # The morning gate is told to present these three; point at them
@@ -3129,8 +3171,11 @@ def _health(state, driving, unmatched):
                 }.get(fin["reason"],
                       f"ATTENTION — run ended: {fin['reason']}{gate_note}")
     if state.get("last_breaker"):
+        # F93: re-emitting a stored reason, so the cap breaker's
+        # skipped-checks note must survive here too.
         return ("ATTENTION — stopped by breaker: "
-                f"{state['last_breaker']['reason']}{gate_note}")
+                f"{with_skipped_checks_note(state['last_breaker']['reason'])}"
+                f"{gate_note}")
     if unmatched:
         return (f"ATTENTION — {unmatched} scenario anomal"
                 f"{'ies' if unmatched > 1 else 'y'} match no ledger finding "
@@ -3287,7 +3332,11 @@ def _delivery_phrase(state, lifecycle):
     fin = state.get("finished") or {}
     if fin.get("reason") == "gate-ratified":
         return "landed (ratified at the morning gate — local merge)"
-    return "none"
+    # F127: the empty state teaches the populated shape — the EMPTY_STATES
+    # convention (state the value a non-empty render would show), applied to
+    # a line that lives outside that enumeration.
+    return ("none (a delivered run shows: <settlement> via PR #N, or via "
+            "local merge (direct-merge gate))")
 
 
 def cmd_dashboard(args):
@@ -3431,8 +3480,12 @@ def cmd_dashboard(args):
         health = _health(state, driving, unmatched)
         # F188: 'convergence' can appear on this first line, a whole screen
         # before the convergence section defines it — define it at first use.
+        # And defining it in terms of 'quiet cycles' just moves the undefined
+        # term one word right (F188 residual): define THAT here too.
         if "converg" in health:
-            health += " (convergence = 2 consecutive quiet cycles)"
+            health += (" (convergence = 2 consecutive quiet cycles; a cycle "
+                       "is quiet when it finds no new actionable finding, "
+                       "produces no patch, and met the exploration quota)")
         lines = [f"tanuki-loop — {state['target']} / {state['run']}",
                  f"  health: {health}",
                  f"  integration: {state['integration_branch']}  "
@@ -3489,7 +3542,9 @@ def cmd_dashboard(args):
             lines.append("    (status→accepted = ledger status transitions "
                          "this run, not patch commits; recurred = a known "
                          "finding observed again this run — its recurrence "
-                         "count bumped)")
+                         "count bumped; deferred/frozen = morning-queue "
+                         "entries in queue.md awaiting your ruling, not "
+                         "ledger findings)")
             if deltas["legacy"]:
                 lines.append("    (run predates status snapshots — "
                              "status→accepted/recurred not computable)")
@@ -3524,21 +3579,26 @@ def cmd_dashboard(args):
                         f"      {c.get('sha', '')[:12]} "
                         f"{_short(c.get('subject', ''))} "
                         f"({fc} file{'' if fc == 1 else 's'})")
+        # F188/F44: whenever deferred/frozen queue entries render near this
+        # ledger line — populated OR empty — the queue-vs-ledger distinction
+        # is stated, so the pairing can never read as a contradiction.
+        qnote = (" (deferred/frozen items above are morning-queue entries, "
+                 "not ledger findings)"
+                 if state.get("deferred") or state.get("frozen") else "")
         if findings:
             by = {}
             for fd in findings:
                 by[fd["status"]] = by.get(fd["status"], 0) + 1
             lines.append(f"  findings: {len(findings)} lifetime — " +
                          " · ".join(f"{k} {v}" for k, v in sorted(by.items())) +
-                         f" (history: /tanuki {state['target']} --history)")
+                         f" (history: /tanuki {state['target']} --history)"
+                         + qnote)
         else:
             # Deferred/frozen items live in the morning queue, not the
             # long-term ledger, so "none yet" beside a "deferred N" count is not
-            # a contradiction — say so (F44).
-            note = (" (deferred/frozen items above are morning-queue entries, "
-                    "not ledger findings)"
-                    if state.get("deferred") or state.get("frozen") else "")
-            lines.append("  findings: none in the ledger yet" + note)
+            # a contradiction — say so (F44), via the shared qnote above so
+            # the pairing cannot render bare on either branch.
+            lines.append("  findings: none in the ledger yet" + qnote)
 
         # -- (section 4) scheduler decisions — ALWAYS present: its DECISIONS
         #    for this iteration when a persisted plan exists; per-state pools
@@ -3660,8 +3720,10 @@ def cmd_dashboard(args):
                     f"  delivery: {_delivery_phrase(state, lifecycle)}")
         elif state.get("last_breaker") and \
                 not state["last_breaker"].get("recovered"):
+            # F93: re-emitting the stored reason — the cap breaker's
+            # skipped-checks note must survive this rendering too.
             lines.append(f"  STOPPED: breaker — "
-                         f"{state['last_breaker']['reason']} "
+                         f"{with_skipped_checks_note(state['last_breaker']['reason'])} "
                          f"(at {state['last_breaker']['at']})")
             if "external modification" in state["last_breaker"]["reason"]:
                 lines.append("  NEXT: attended recovery — `tanuki-loop "
@@ -3680,8 +3742,10 @@ def cmd_dashboard(args):
                          "(mine -> classify -> implement -> test -> commit) — "
                          "no action needed from you")
         elif state["quiet_streak"] >= 2 or n_done >= state["cap"]:
+            # F93: this is a cap-stop emission too — carry the skipped-checks
+            # note so no surface ever shows a bare 'iteration cap reached'.
             reason = ("converged" if state["quiet_streak"] >= 2
-                      else "iteration cap reached")
+                      else with_skipped_checks_note("iteration cap reached"))
             lines.append(f"  STOPPED-PENDING: {reason} — run not closed yet")
             at_gate = True
         else:
@@ -3831,8 +3895,11 @@ def run_verdict(state):
     # verdict reads "stopped" while lifecycle.active is true — a direct
     # self-contradiction on one status screen.
     if lb and not lb.get("recovered"):
-        s = {"state": "stopped", "reason": lb.get("reason"), "at": lb.get("at"),
-             "summary": f"stopped: {lb.get('reason')}"}
+        # F93: re-emitting the stored reason — carry the cap breaker's
+        # skipped-checks note whichever build persisted it.
+        _r = with_skipped_checks_note(lb.get("reason") or "")
+        s = {"state": "stopped", "reason": _r, "at": lb.get("at"),
+             "summary": f"stopped: {_r}"}
         if lb.get("hint"):
             s["hint"] = lb["hint"]
         return s
@@ -3848,12 +3915,16 @@ def run_verdict(state):
     # closing it was a manual inference from comparing iterations_done to cap
     # on one screen — name the next action instead.
     if not openb and done >= cap:
+        # F93: a cap-stop emission — the summary carries the skipped-checks
+        # note so no surface ever shows a bare 'cap reached'.
         return {"state": "running", "reason": None,
                 "next_action": ("iteration cap consumed — close the run: "
                                 "finish --reason cap (or --reason converged "
                                 "if record-cycle reported converged)"),
                 "summary": (f"running: {done}/{cap} iterations consumed — "
-                            f"cap reached, close with finish")}
+                            + with_skipped_checks_note(
+                                "iteration cap reached")
+                            + ", close with finish")}
     where = (f"iteration {openb[-1]['n']} open" if openb
              else f"{done}/{cap} iterations done")
     return {"state": "running", "reason": None,
@@ -3899,8 +3970,14 @@ def cmd_status(args):
         "worktree": state["worktree"], "base": state["base"],
         # Operator-critical fields state.json holds but no CLI surfaced (F42):
         # base_sha is the gate diff's left side; last_breaker diagnoses a stop.
+        # F93: a cap breaker persisted by a pre-note build re-surfaces here —
+        # re-emit it WITH the skipped-checks note, never bare.
         "base_sha": state.get("base_sha"),
-        "last_breaker": state.get("last_breaker"),
+        "last_breaker": (
+            {**state["last_breaker"],
+             "reason": with_skipped_checks_note(
+                 state["last_breaker"].get("reason") or "")}
+            if state.get("last_breaker") else None),
         "finished": state.get("finished"),
         # Delivery + derived settlement (owner ruling 2026-07-17): the loop's
         # record ends at "delivered"; whether the PR landed is derived here,
@@ -4008,7 +4085,12 @@ def main():
 
     sp = sub.add_parser(
         "doctor",
-        help="read-only headless-readiness check (exit 0 = ready, 3 = not ready)",
+        # F116: the top-level listing is a cold reader's first contact — name
+        # what doctor validates here, not only in `doctor --help`.
+        help="read-only headless-readiness check: validates the loop ceilings "
+             "(test_cmd/iterations/wall-time/token-budget/attempt-cap), base "
+             "freshness, the baseline test on the base tip, policy coverage, "
+             "and host cloneability (exit 0 = ready, 3 = not ready)",
         description=(
             "Validate a target for a Phase 2/3 headless run without "
             "writing any state. Exit code 0 means ready; exit code 3 "
