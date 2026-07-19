@@ -142,6 +142,51 @@ def load_ledger(target):
                      {"events": {}, "findings": []})
 
 
+def effective_binding(target):
+    """(binding_id | None) — the currently effective host binding (story
+    1.30 / DECISION-2026-07-19-host-identity). A scenarios file MAY declare
+    `hosts: {<binding_id>: <repo path>, …}` plus `host_binding: <id>`
+    selecting the effective one. The binding id is LOGICALLY STABLE: it
+    names the binding, never a snapshot — re-pinning or advancing the host
+    repo never changes it; renaming is an explicit operator act (an edit of
+    the key). Fewer than two declared bindings ⇒ None: the legacy
+    single-binding world, byte-identical state layout, no migration."""
+    scen = read_json(os.path.join(TANUKI_ROOT, "scenarios",
+                                  f"{target}.scenarios.json"), None)
+    if not isinstance(scen, dict):
+        return None
+    hosts = scen.get("hosts")
+    if not isinstance(hosts, dict) or len(hosts) < 2:
+        return None
+    sel = scen.get("host_binding")
+    if sel not in hosts:
+        die(f"multi-binding target: `host_binding` must name one of "
+            f"{sorted(hosts)} (got {sel!r})")
+    return sel
+
+
+def sched_view_ro(sched, binding):
+    """Read-only sched_view: never creates the slice (history/status must
+    not write state — the #168 read-only guarantee)."""
+    if binding is None:
+        return sched
+    return (sched.get("bindings") or {}).get(
+        binding, {"scenarios": {}, "runs_recorded": []})
+
+
+def sched_view(sched, binding):
+    """The state slice all arithmetic operates on (story 1.30): the whole
+    top-level dict for a single-binding target (today's shape, byte
+    identical), or the per-binding slice under `bindings.<id>` — each
+    binding gets independent scenarios/streaks/plans/history/generations,
+    so a quiet run on host B can never demote a scenario productive on
+    host A."""
+    if binding is None:
+        return sched
+    return sched.setdefault("bindings", {}).setdefault(
+        binding, {"scenarios": {}, "runs_recorded": []})
+
+
 def matrix_data(scenarios_file, target=None):
     """{id: scenario dict} for the whole matrix — the substrate for covers
     tags and cost keys (story 1.19), sharing matrix_ids' adhoc guard."""
@@ -262,12 +307,17 @@ def cmd_sync(args):
         gen.pop("added", None)
         gen.pop("at", None)
         gen.pop("source", None)
-    first = not os.path.exists(sched_path(args.target))
+    binding = effective_binding(args.target)
     sched = read_json(sched_path(args.target), {"scenarios": {}, "runs_recorded": []})
+    view = sched_view(sched, binding)
+    # First sync of THIS state slice (story 1.30: a newly declared binding
+    # starts its own lifecycle) keeps the hand-written-matrix rule: active.
+    first = (not os.path.exists(sched_path(args.target))
+             or (binding is not None and not view["scenarios"]))
     added = []
     for sid, s in matrix_data(args.scenarios, args.target).items():
-        if sid not in sched["scenarios"]:
-            sched["scenarios"][sid] = {
+        if sid not in view["scenarios"]:
+            view["scenarios"][sid] = {
                 "state": "active" if first else "unexplored",
                 "low_streak": 0, "runs_driven": 0,
                 "last_planned": 0, "since_regression": 0,
@@ -276,16 +326,17 @@ def cmd_sync(args):
         # covers tags (story 1.19): target-local vocabulary, refreshed from
         # the matrix on every sync (the file is the source of truth), no
         # normalization — visible in status/history.
-        sched["scenarios"][sid]["covers"] = list(s.get("covers") or [])
+        view["scenarios"][sid]["covers"] = list(s.get("covers") or [])
     entry = None
     if gen is not None or added:
         entry = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "added": added,
                  "source": "generate" if gen is not None else "sync",
                  **(gen or {})}
-        sched.setdefault("generations", []).append(entry)
+        view.setdefault("generations", []).append(entry)
     write_json(sched_path(args.target), sched)
     out({"first_sync": first, "added": added,
-         "total": len(sched["scenarios"]),
+         "total": len(view["scenarios"]),
+         **({"binding": binding} if binding else {}),
          **({"generation_recorded": entry} if entry else {})})
 
 
@@ -295,10 +346,12 @@ def cmd_plan(args):
     sched = read_json(sched_path(args.target), None)
     if sched is None:
         die("no scheduler state; run `sync --scenarios <file>` first")
+    binding = effective_binding(args.target)
+    view = sched_view(sched, binding)
     matrix = matrix_data(args.scenarios, args.target)
     known = set(matrix)
-    scen = {k: v for k, v in sched["scenarios"].items() if k in known}
-    tick = len(sched["runs_recorded"]) + 1
+    scen = {k: v for k, v in view["scenarios"].items() if k in known}
+    tick = len(view["runs_recorded"]) + 1
 
     # 1. Verify set — CHEAPEST COVERING scenario per accepted finding
     #    (spec-tanuki-scenario-lifecycle "Cheapest covering verify"; story
@@ -365,7 +418,11 @@ def cmd_plan(args):
                 plan.append(s)
                 seen.add(s)
     quota_met = (not unexplored) or any(s in seen for s in unexplored)
-    record = {"run": args.run, "plan": plan, "quota_met": quota_met,
+    record = {"run": args.run,
+              # Story 1.30: the plan names the binding it was computed for —
+              # cross-binding plan history must never be ambiguous.
+              **({"binding": binding} if binding else {}),
+              "plan": plan, "quota_met": quota_met,
               "verify": sorted(verify & seen),
               # Which finding each verify entry verifies and why that
               # scenario was chosen (story 1.19) — selections whose scenario
@@ -387,7 +444,7 @@ def cmd_plan(args):
     for s in plan:
         scen[s]["last_planned"] = tick
     # Selection history with reasons — persisted, not just printed.
-    sched.setdefault("plans", []).append(record)
+    view.setdefault("plans", []).append(record)
     write_json(sched_path(args.target), sched)
     out(record)
 
@@ -397,9 +454,6 @@ def cmd_record_run(args):
     sched = read_json(sched_path(args.target), None)
     if sched is None:
         die("no scheduler state; run `sync` first")
-    if args.run in sched["runs_recorded"]:
-        out({"ok": True, "already_recorded": args.run})
-        return
     # Story 1.29 / DECISION-2026-07-19-host-identity: a run driven under a
     # one-shot per-run override is EXPLORATORY — it contributes no yield, no
     # streaks, no demotion/regression arithmetic, and never enters
@@ -412,6 +466,16 @@ def cmd_record_run(args):
              "excluded": "per-run override — exploratory run; canonical "
                          "scheduler state untouched (story 1.29)"})
         return
+    # Story 1.30: the run folds into the state slice of the binding it was
+    # DRIVEN under (its manifest stamp); an unstamped run on a multi-binding
+    # target folds into the currently effective binding.
+    binding = effective_binding(args.target)
+    view = sched_view(sched,
+                      (manifest.get("host_binding") or binding)
+                      if binding else None)
+    if args.run in view["runs_recorded"]:
+        out({"ok": True, "already_recorded": args.run})
+        return
     yields = run_yield(args.target, args.run)
     changes = {}
 
@@ -423,7 +487,7 @@ def cmd_record_run(args):
         changes[sid] = f"{st['state']} -> {to} ({reason})"
         st["state"] = to
 
-    for sid, st in sched["scenarios"].items():
+    for sid, st in view["scenarios"].items():
         if sid in yields:
             st["runs_driven"] += 1
             st["since_regression"] = 0
@@ -441,10 +505,10 @@ def cmd_record_run(args):
                                f"{cfg['demote_after']} consecutive low-yield runs")
         elif st["state"] == "regression":
             st["since_regression"] += 1
-    sched["runs_recorded"].append(args.run)
+    view["runs_recorded"].append(args.run)
     # Durable per-execution yield snapshot (evidence capping erodes late
     # recomputation — this is the exact record).
-    sched.setdefault("history", {})[args.run] = yields
+    view.setdefault("history", {})[args.run] = yields
     write_json(sched_path(args.target), sched)
     out({"ok": True, "run": args.run, "yield": yields, "transitions": changes})
 
@@ -767,8 +831,16 @@ def cmd_history(args):
     sched = read_json(sched_path(args.target),
                       {"scenarios": {}, "runs_recorded": [], "history": {},
                        "plans": []})
+    # Story 1.30: history is per binding — the effective binding's slice,
+    # read-only. Executions include that binding's stamped runs plus
+    # unstamped legacy runs (driven before bindings existed); another
+    # binding's runs never bleed in.
+    binding = effective_binding(args.target)
+    sched = sched_view_ro(sched, binding)
     ledger = load_ledger(args.target)
-    manifests = all_manifests(args.target)
+    manifests = [(run, m) for run, m in all_manifests(args.target)
+                 if binding is None
+                 or (m.get("host_binding") or binding) == binding]
     snap = sched.get("history", {})
 
     # Per (run, scenario): executions from manifests (the complete record).
@@ -887,6 +959,7 @@ def cmd_history(args):
     # onboarding, not an empty pool.
     pool_empty = bool(rows) and not cover["unexplored"]
     data = {"scenarios": rows, "coverage": cover,
+            **({"binding": binding} if binding else {}),
             "feature_drift": drift,
             "unexplored_pool_empty": pool_empty,
             # Membership history (#170): when and why charters entered the
@@ -897,8 +970,9 @@ def cmd_history(args):
     if args.json:
         out(data)
         return
-    print(f"tanuki history — {args.target} · {len(rows)} scenarios · "
-          f"{len(recorded)} runs recorded")
+    print(f"tanuki history — {args.target}"
+          + (f" · binding {binding}" if binding else "")
+          + f" · {len(rows)} scenarios · {len(recorded)} runs recorded")
     for r in rows:
         print(f"  {r['scenario']:<24} {r['state']:<11} driven {r['driven']:>2}"
               f"  last {r['last_run'] or '-':<28} streak {r['low_streak']}"
@@ -934,7 +1008,11 @@ def cmd_history(args):
 
 
 def cmd_status(args):
-    sched = read_json(sched_path(args.target), {"scenarios": {}, "runs_recorded": []})
+    full = read_json(sched_path(args.target), {"scenarios": {}, "runs_recorded": []})
+    # Story 1.30: status reports the effective binding's slice; other
+    # bindings appear as a one-line summary each — visible, never merged.
+    binding = effective_binding(args.target)
+    sched = sched_view_ro(full, binding)
     by_state = {}
     for sid, st in sched["scenarios"].items():
         by_state.setdefault(st["state"], []).append(sid)
@@ -950,7 +1028,13 @@ def cmd_status(args):
     # next drive is the failure mode this line exists to prevent.
     pending = read_json(os.path.join(TANUKI_ROOT, args.target,
                                      "override.json"), None)
+    others = {b: {"runs_recorded": len(v.get("runs_recorded", [])),
+                  "scenarios": len(v.get("scenarios", {}))}
+              for b, v in (full.get("bindings") or {}).items()
+              if b != binding} if binding else {}
     out({"runs_recorded": len(sched["runs_recorded"]),
+         **({"binding": binding} if binding else {}),
+         **({"other_bindings": others} if others else {}),
          "by_state": {k: sorted(v) for k, v in sorted(by_state.items())},
          "scenarios": sched["scenarios"],
          "advisories": {"feature_drift": drift["uncovered"],
