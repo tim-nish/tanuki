@@ -20,8 +20,9 @@ by field name; only declared fields are editable:
                      "description": "..."}
   }
 
-- `type`: repo-path | path | string | enum (enum requires non-empty
-  `values`). `scope`: per-target | per-run. `binds`: a dot-path into the
+- `type`: repo-path | path | string | enum | int (enum requires non-empty
+  `values`; int accepts optional integer `min`/`max` bounds and writes the
+  value as a JSON number). `scope`: per-target | per-run. `binds`: a dot-path into the
   scenarios file (e.g. `host`, `defaults.max_turns`) — where the per-target
   value lives. A malformed block fails closed naming the defect; partial
   application never happens.
@@ -77,7 +78,7 @@ BUILTIN_DEFAULTS = {"driver_model": "claude-sonnet-5", "model_ceiling": "sonnet"
                     "demote_after": 2, "regression_every": 3,
                     "exploration_quota": 1, "low_yield_threshold": 0,
                     "brief_max_proposals": 10, "issue_label_prefix": "tanuki"}
-TYPES = ("repo-path", "path", "string", "enum")
+TYPES = ("repo-path", "path", "string", "enum", "int")
 SCOPES = ("per-target", "per-run")
 
 
@@ -132,6 +133,11 @@ def load_inputs(data):
             vals = d.get("values")
             if not isinstance(vals, list) or not vals:
                 die(f"inputs.{name}: enum requires a non-empty `values` list")
+        if t == "int":
+            for bound in ("min", "max"):
+                b = d.get(bound)
+                if b is not None and not isinstance(b, int):
+                    die(f"inputs.{name}: `{bound}` must be an integer")
         scope = d.get("scope", "per-target")
         if scope not in SCOPES:
             die(f"inputs.{name}: unknown scope {scope!r} "
@@ -205,6 +211,17 @@ def validate(name, decl, value):
             die(f"{name}: {value!r} is not one of "
                 f"{', '.join(map(repr, decl['values']))} (enum membership)")
         return value
+    if t == "int":
+        try:
+            n = int(value, 10) if isinstance(value, str) else int(value)
+        except (ValueError, TypeError):
+            die(f"{name}: {value!r} is not an integer")
+        lo, hi = decl.get("min"), decl.get("max")
+        if lo is not None and n < lo:
+            die(f"{name}: {n} is below the declared minimum {lo}")
+        if hi is not None and n > hi:
+            die(f"{name}: {n} is above the declared maximum {hi}")
+        return n
     p = os.path.expanduser(value)
     if t == "path":
         if not os.path.exists(p):
