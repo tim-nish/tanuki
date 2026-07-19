@@ -395,8 +395,16 @@ per scenario, e.g. `claude-haiku-4-5-20251001` for a sensitivity experiment —
 never a frontier model, which would cope with the friction instead of
 surfacing it), captures the raw stream, normalizes
 it to Events, and records a post-run pollution check. While it runs, do
-nothing else with the ledger. Read `manifest.json` when done; report any
-scenario whose status is not `ok`, and any `plugin_clone_dirty: true`
+nothing else with the ledger. Read `manifest.json` when done; the run
+summary shows BOTH result axes per scenario, copied verbatim (story 1.26;
+spec-tanuki-view D3/D4): `status` and `probe` side by side, plus the
+matched/unmatched checkpoint split when declared — `probe: undeclared`
+renders as "coverage not assessable — no probe declared", never as an
+implicit healthy state, and the two axes are never merged into one verdict
+(a short-circuited scenario must never read healthier than one that
+completed its probe; `probe` never feeds yield/streak/demotion displays).
+Report any scenario whose status is not `ok`, any `probe:
+short_circuited`, and any `plugin_clone_dirty: true`
 (isolation violation — that is itself a finding).
 
 ## 2. Mine (Miner — cheap extraction subagent, then you for dedupe)

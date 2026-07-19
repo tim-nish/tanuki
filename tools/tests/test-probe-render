@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Probe-axis rendering (story 1.26 / issue #166; spec-tanuki-trajectory §2b
+# "Rendering"; spec-tanuki-view D3/D4): the drive completion report and the
+# loop dashboard's latest-drive section render `probe` next to `status` for
+# every scenario, values copied mechanically from what the drive recorded —
+# `undeclared` reads "coverage not assessable — no probe declared" (never an
+# implicit healthy state, never a silent nothing), the checkpoint split
+# renders when declared, and the axes are never merged into one verdict
+# (drive exit code stays status-only).
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+drive="$here/tanuki-drive"
+loop="$here/tanuki-loop"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+
+# --- drive completion report: both axes side by side -------------------------
+mkdir -p "$tmp/bin"
+cat > "$tmp/bin/claude" <<'EOF'
+#!/bin/sh
+cat <<'JSON'
+{"type":"assistant","message":{"content":[{"type":"text","text":"FRICTION LOG: went deep, REACHED-REVIEW"}]}}
+{"type":"result","subtype":"success","num_turns":5,"duration_ms":10,"total_cost_usd":0.001,"is_error":false,"result":"done"}
+JSON
+EOF
+chmod +x "$tmp/bin/claude"
+export PATH="$tmp/bin:$PATH"
+
+git init -q "$tmp/plugin" && git -C "$tmp/plugin" config user.email t@e \
+  && git -C "$tmp/plugin" config user.name t
+git -C "$tmp/plugin" checkout -qb main
+echo x > "$tmp/plugin/x" && git -C "$tmp/plugin" add -A \
+  && git -C "$tmp/plugin" commit -qm base
+
+cat > "$tmp/scenarios.json" <<'EOF'
+{"scenarios":[
+  {"id":"probed","charter":"c","prompt":"p","max_turns":5,
+   "probe":{"required":{"on":"events","match":"REACHED-REVIEW"},
+            "checkpoints":{"review":{"on":"events","match":"REACHED-REVIEW"},
+                           "publish":{"on":"events","match":"PUBLISHED"}}}},
+  {"id":"missed","charter":"c","prompt":"p","max_turns":5,
+   "probe":{"required":{"on":"events","match":"NEVER-EMITTED"}}},
+  {"id":"plain","charter":"c","prompt":"p","max_turns":5}
+]}
+EOF
+
+out="$("$drive" --target t --plugin "$tmp/plugin" \
+  --scenarios "$tmp/scenarios.json" --run r1 --timeout 60)" \
+  || fail "drive exited non-zero (axes must never merge into the verdict)"
+grep -q "ok  (.*)  probe: reached (checkpoints matched: review; unmatched: publish)" <<<"$out" \
+  || fail "completion report must show probe next to status + checkpoint split: $out"
+grep -q "ok  (.*)  probe: short_circuited" <<<"$out" \
+  || fail "short_circuited must render next to an ok status: $out"
+grep -q "ok  (.*)  probe: coverage not assessable — no probe declared" <<<"$out" \
+  || fail "undeclared must render the honest-absence phrase: $out"
+pass "completion report: both axes per scenario; undeclared honest; exit status-only"
+
+# --- loop dashboard latest-drive section: mechanical copy --------------------
+repo="$tmp/repo"
+git init -q "$repo" && git -C "$repo" config user.email t@e \
+  && git -C "$repo" config user.name t
+git -C "$repo" checkout -qb main
+echo v0 > "$repo/f" && git -C "$repo" add -A && git -C "$repo" commit -qm base
+
+"$loop" --target t init --loop-repo "$repo" --cap 2 --test-cmd true \
+  > "$tmp/init.json"
+run="$(python3 -c "import json;print(json.load(open('$tmp/init.json'))['run'])")"
+"$loop" --target t iter-start >/dev/null
+pdir="$TANUKI_ROOT/t/events/$run-iter1"
+mkdir -p "$pdir"
+# Results as tanuki-drive writes them (probe copied verbatim), plus one
+# legacy pre-axis entry with no probe field at all.
+cat > "$pdir/progress.json" <<'EOF'
+{"run": "x", "total": 3, "done": 3, "current": null, "stage": "complete",
+ "running": [],
+ "results": [
+   {"scenario": "probed", "status": "ok", "events": 4, "duration_s": 9,
+    "probe": "reached",
+    "checkpoints": {"matched": ["review"], "unmatched": ["publish"]}},
+   {"scenario": "missed", "status": "ok", "events": 2, "duration_s": 3,
+    "probe": "short_circuited"},
+   {"scenario": "legacy", "status": "ok", "events": 1, "duration_s": 1}
+ ], "updated": 1}
+EOF
+
+dash="$("$loop" --target t dashboard)"
+grep -qE "probed +ok +probe: reached \(checkpoints matched: review; unmatched: publish\)" <<<"$dash" \
+  || fail "dashboard must copy probe + split verbatim next to status: $dash"
+grep -qE "missed +ok +probe: short_circuited" <<<"$dash" \
+  || fail "dashboard must render short_circuited: $dash"
+grep -qE "legacy +ok +probe: coverage not assessable — no probe declared" <<<"$dash" \
+  || fail "a pre-axis result must render honest absence, never silence: $dash"
+# Never merged: the status column still reads plain ok on a short-circuit.
+grep -E "missed" <<<"$dash" | grep -vq "short_circuited.*ok" \
+  || fail "axes must stay side-by-side, never one merged verdict"
+pass "dashboard latest-drive: probe axis included, mechanical copy, D3 honest absence"
+
+echo "all checks passed"

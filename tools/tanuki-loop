@@ -2822,6 +2822,25 @@ def _queue_reasons(state):
     return reasons
 
 
+def _probe_text(r):
+    """Probe-axis rendering (story 1.26 / #166; spec-tanuki-trajectory §2b;
+    spec-tanuki-view D3/D4): a mechanical copy of the drive-recorded values
+    (tanuki-drive writes them into progress/manifest results identically) —
+    never merged with `status`, never fed into yield/streak/demotion
+    displays. `undeclared` (or a pre-axis result) reads as honest absence,
+    never as an implicit healthy state and never a silent nothing (D3)."""
+    p = r.get("probe") or "undeclared"
+    if p == "undeclared":
+        return "probe: coverage not assessable — no probe declared"
+    txt = f"probe: {p}"
+    cps = r.get("checkpoints")
+    if cps is not None:
+        m = ", ".join(cps.get("matched") or []) or "none"
+        u = ", ".join(cps.get("unmatched") or []) or "none"
+        txt += f" (checkpoints matched: {m}; unmatched: {u})"
+    return txt
+
+
 def _classify_anomaly(scenario, findings, state):
     """Classify an anomalous drive result against the ledger: is it a known
     finding (and what was decided about it this run), or unmatched — the
@@ -3179,8 +3198,11 @@ def cmd_dashboard(args):
                 f"  latest drive (iter {drive_it['n']} — a drive is one "
                 f"tanuki-drive pipeline run over the scenarios):")
             for r in p.get("results", []):
+                # Both result axes side by side (story 1.26): `status` then
+                # `probe`, each copied verbatim, never one merged verdict.
                 line = (f"    {r['scenario']:<22} {r['status'][:28]:<28}"
-                        f" {r['events']:>3} events "
+                        f" {_probe_text(r)}"
+                        f"  {r['events']:>3} events "
                         f"{int(r.get('duration_s') or 0):>4}s")
                 if not str(r.get("status", "")).startswith("ok"):
                     known, tag = _classify_anomaly(r["scenario"],

@@ -714,10 +714,18 @@ def prog_done(prog, run_dir, r):
         prog["running"] = [e for e in prog["running"]
                            if e["scenario"] != r["scenario"]]
         prog["done"] += 1
-        prog["results"].append({"scenario": r["scenario"],
-                                "status": r["status"],
-                                "events": r["events"],
-                                "duration_s": r.get("duration_s")})
+        entry = {"scenario": r["scenario"],
+                 "status": r["status"],
+                 "events": r["events"],
+                 "duration_s": r.get("duration_s")}
+        # Story 1.26: the probe axis rides along VERBATIM so the loop
+        # dashboard renders a mechanical copy (spec-tanuki-view D4) —
+        # identical values to what the manifest records.
+        if "probe" in r:
+            entry["probe"] = r["probe"]
+            if "checkpoints" in r:
+                entry["checkpoints"] = r["checkpoints"]
+        prog["results"].append(entry)
         if len(prog["running"]) == 1:
             e = prog["running"][0]
             prog.update({"current": e["scenario"],
@@ -774,6 +782,24 @@ def evaluate_probe(scenario, events, raw_path):
     hit = sorted(name for name in cps if matched(cps[name]))
     return probe, {"matched": hit,
                    "unmatched": sorted(set(cps) - set(hit))}
+
+
+def render_probe(r):
+    """Probe-axis rendering (story 1.26 / #166; spec-tanuki-trajectory §2b
+    "Rendering"; spec-tanuki-view D3/D4): values copied verbatim from the
+    result — never merged with `status` into one verdict. `undeclared` (or a
+    pre-axis result with no field) reads as honest absence, never as an
+    implicit healthy state and never a silent nothing (D3)."""
+    p = r.get("probe") or "undeclared"
+    if p == "undeclared":
+        return "probe: coverage not assessable — no probe declared"
+    txt = f"probe: {p}"
+    cps = r.get("checkpoints")
+    if cps is not None:
+        m = ", ".join(cps.get("matched") or []) or "none"
+        u = ", ".join(cps.get("unmatched") or []) or "none"
+        txt += f" (checkpoints matched: {m}; unmatched: {u})"
+    return txt
 
 
 def result_stats(events):
@@ -1272,11 +1298,17 @@ def main():
         try:
             r = drive_scenario(args, s, run_dir, cfg, prog)
         except (RuntimeError, OSError) as e:
+            probe, probe_cps = evaluate_probe(s, [], None)
             r = {"scenario": s["id"], "status": f"setup failed: {e}",
-                 "events": 0}
+                 "events": 0, "probe": probe,
+                 **({"checkpoints": probe_cps} if probe_cps is not None
+                    else {})}
+        # Completion report (story 1.26): both axes on one line, side by
+        # side, never merged — the exit code below stays status-only.
         print(f"  {r['status']}  ({r['events']} events, "
               f"{r.get('num_turns') or '?'} turns, "
-              f"{int(r.get('duration_s') or 0)}s)", flush=True)
+              f"{int(r.get('duration_s') or 0)}s)  {render_probe(r)}",
+              flush=True)
         prog_done(prog, run_dir, r)
         return r
 
