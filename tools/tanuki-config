@@ -9,8 +9,19 @@ interprets meaning — validation is BY TYPE ONLY (path exists, repo-path is a
 git toplevel, enum membership). Any target-semantic knowledge in here is a
 contract bug (the story-1.17 / writing-assistant#409 ownership rule).
 
+The editable surface is the union of the target-authored `inputs` block and
+the BUILT-IN INPUT CATALOG (issue #208 / story 1.37): declarations Tanuki
+ships for its own generic keys, so `configure` works on a fresh target with
+no hand-authored block. A target declaration of the same name SHADOWS the
+catalog entry wholesale; declaring the name as `null` SUPPRESSES it (renders
+read-only, refuses set/check). The catalog supplies only the declaration —
+values persist into the target's scenarios file at the `binds` path, exactly
+like declared fields. Admission rule: a field enters the catalog only if
+Tanuki owns its semantics and can validate values with zero target
+knowledge; growing it means amending the spec table first.
+
 The `inputs` block (in ~/.tanuki/scenarios/<target>.scenarios.json), keyed
-by field name; only declared fields are editable:
+by field name:
 
   "inputs": {
     "host":         {"type": "repo-path", "scope": "per-target",
@@ -34,8 +45,10 @@ by field name; only declared fields are editable:
   never persisted, so never rendered as a stored layer).
 
 Subcommands (JSON out with --json; human text default):
-  --target T show [--json]     effective configuration: every declared field
-                               with value + SOURCE LAYER + scope/type;
+  --target T show [--json]     effective configuration: every editable field
+                               (declared + built-in catalog) with value +
+                               SOURCE LAYER + scope/type + declaration
+                               origin; suppressed catalog fields and
                                undeclared config keys render read-only —
                                visible, never editable here
   --target T set --field F --value V [--dry-run] [--override-doctor]
@@ -80,6 +93,29 @@ BUILTIN_DEFAULTS = {"driver_model": "claude-sonnet-5", "model_ceiling": "sonnet"
                     "brief_max_proposals": 10, "issue_label_prefix": "tanuki"}
 TYPES = ("repo-path", "path", "string", "enum", "int")
 SCOPES = ("per-target", "per-run")
+# Built-in input catalog (issue #208 / story 1.37; spec table in
+# spec-tanuki-scenario-lifecycle "Host bindings & declared-input
+# configuration"). Tanuki-owned generic keys ONLY — the admission rule: a
+# field enters here only if Tanuki owns its semantics and can validate
+# values with zero target knowledge. `default` is the value rendered when
+# no stored layer binds one (source: "built-in input").
+CATALOG = {
+    "drive_model": {
+        "type": "enum",
+        "values": ["claude-haiku-4-5-20251001", "claude-sonnet-5"],
+        "scope": "per-target", "binds": "loop.drive_model",
+        "default": "claude-sonnet-5",
+        "description": "Driver model for scenario execution. Cheap tiers "
+                       "only — a weak driver is a more sensitive friction "
+                       "detector; frontier models are never valid here."},
+    "drive_concurrency": {
+        "type": "enum", "values": ["1", "2", "4", "8"],
+        "scope": "per-target", "binds": "loop.drive_concurrency",
+        "default": "1",
+        "description": "Parallel scenario fan-out per drive (story 1.21). "
+                       "1 = serial (the built-in default). tanuki-drive "
+                       "coerces via int()."},
+}
 
 
 def die(msg):
@@ -124,6 +160,13 @@ def load_inputs(data):
     if not isinstance(block, dict):
         die("inputs block must be an object keyed by field name")
     for name, d in block.items():
+        if d is None:
+            # Explicit suppression of a built-in catalog entry (#208).
+            if name not in CATALOG:
+                die(f"inputs.{name}: null suppresses a catalog entry, but "
+                    f"'{name}' is not in the built-in catalog "
+                    f"({', '.join(sorted(CATALOG))})")
+            continue
         if not isinstance(d, dict):
             die(f"inputs.{name} must be an object")
         t = d.get("type")
@@ -150,6 +193,27 @@ def load_inputs(data):
         if doctor is not None and (not isinstance(doctor, str) or not doctor):
             die(f"inputs.{name}: `doctor` must be a non-empty command string")
     return block
+
+
+def resolve_inputs(data):
+    """The editable surface (#208): built-in catalog entries plus the
+    target's declared fields. A target declaration of the same name shadows
+    the catalog entry wholesale; a null declaration suppresses it. Returns
+    (fields, suppressed): fields maps name -> decl with `declaration` set to
+    'built-in input' or 'declared'; suppressed is the sorted list of
+    suppressed catalog names."""
+    block = load_inputs(data)
+    fields, suppressed = {}, []
+    for name in CATALOG:
+        if name in block and block[name] is None:
+            suppressed.append(name)
+        elif name not in block:
+            fields[name] = dict(CATALOG[name], declaration="built-in input")
+    for name, d in block.items():
+        if d is None:
+            continue
+        fields[name] = dict(d, declaration="declared")
+    return fields, sorted(suppressed)
 
 
 def run_doctor(decl, target, value):
@@ -247,6 +311,10 @@ def effective(target, data, decl):
     layer wins here."""
     binds = decl["binds"]
     value, source = None, "unset"
+    if "default" in decl:
+        # Catalog entries (and any declaration carrying one) render their
+        # shipped default when no stored layer binds a value (#208).
+        value, source = decl["default"], "built-in input"
     key = binds.split(".")[-1]
     if binds.startswith("defaults.") and key in BUILTIN_DEFAULTS:
         value, source = BUILTIN_DEFAULTS[key], "built-in"
@@ -264,7 +332,7 @@ def effective(target, data, decl):
 
 def cmd_show(args):
     data = load_scenarios(args.target)
-    inputs = load_inputs(data)
+    inputs, suppressed = resolve_inputs(data)
     fields = []
     bound = set()
     for name in sorted(inputs):
@@ -275,6 +343,7 @@ def cmd_show(args):
                        "scope": decl.get("scope", "per-target"),
                        "binds": decl["binds"], "value": value,
                        "source": source,
+                       "declaration": decl["declaration"],
                        "description": decl.get("description", "")})
     # Undeclared but present/known keys: visible, read-only — the surface
     # edits only what the target declared.
@@ -296,17 +365,21 @@ def cmd_show(args):
             read_only.append({"key": top, "value": data[top],
                               "source": "scenarios file"})
     result = {"target": args.target, "declared": fields,
-              "read_only": read_only}
+              "suppressed": suppressed, "read_only": read_only}
     if args.json:
         out(result)
         return
     print(f"tanuki config — {args.target}")
-    if not fields:
+    if not any(f["declaration"] == "declared" for f in fields):
         print("  no inputs declared — the target's scenarios file has no "
-              "`inputs` block; only hand-editing is available")
+              "`inputs` block; the built-in catalog fields below stay "
+              "editable, and hand-editing remains legal")
     for f in fields:
         print(f"  {f['field']:<20} = {f['value']!r:<32} [{f['source']}] "
-              f"({f['type']}, {f['scope']})")
+              f"({f['type']}, {f['scope']}, {f['declaration']})")
+    for name in suppressed:
+        print(f"  {name:<20} (suppressed catalog field — read-only; "
+              "declared null in inputs)")
     for r in read_only:
         print(f"  {r['key']:<20} = {r['value']!r:<32} [{r['source']}] "
               "(read-only — not declared in inputs)")
@@ -314,12 +387,17 @@ def cmd_show(args):
 
 def cmd_set(args):
     data = load_scenarios(args.target)
-    inputs = load_inputs(data)
+    inputs, suppressed = resolve_inputs(data)
+    if args.field in suppressed:
+        die(f"'{args.field}' is a suppressed catalog field (declared null "
+            "in inputs) — read-only; remove the null declaration to "
+            "re-enable it")
     if args.field not in inputs:
-        declared = ", ".join(sorted(inputs)) or "(none)"
+        editable = ", ".join(sorted(inputs)) or "(none)"
         die(f"'{args.field}' is not a declared input — only declared fields "
-            f"are editable (declared: {declared}); undeclared values are "
-            "read-only here (hand-editing the JSON remains legal)")
+            f"and built-in catalog fields are editable (editable: "
+            f"{editable}); undeclared values are read-only here "
+            "(hand-editing the JSON remains legal)")
     decl = dict(inputs[args.field], name=args.field)
     value = validate(args.field, decl, args.value)
     # Story 1.29: a per-run-scoped field NEVER rewrites the canonical
@@ -381,7 +459,9 @@ def cmd_set(args):
 
 def cmd_check(args):
     data = load_scenarios(args.target)
-    inputs = load_inputs(data)
+    inputs, suppressed = resolve_inputs(data)
+    if args.field in suppressed:
+        die(f"'{args.field}' is a suppressed catalog field — read-only")
     if args.field not in inputs:
         die(f"'{args.field}' is not a declared input")
     value = validate(args.field, dict(inputs[args.field], name=args.field),
