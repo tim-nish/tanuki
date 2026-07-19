@@ -95,4 +95,68 @@ EOF
   || fail "a pre-trajectory run must yield no candidates, never a crash"
 pass "graceful: pre-trajectory run (no choices) -> no candidates"
 
+# --- (#171) ledger-seeded sections: uncovered friction + ad-hoc promotion ------
+# No ledger at all -> empty section, not a crash.
+[ "$("${S[@]}" candidates --json | jq_py "['uncovered_findings']")" = "[]" ] \
+  || fail "no ledger must yield an empty uncovered_findings section"
+pass "(#171) graceful: no ledger -> empty uncovered_findings"
+
+# Scheduler state knows exactly s1 (the matrix scenario).
+canon="$TANUKI_ROOT/scenarios/t.scenarios.json"
+mkdir -p "$(dirname "$canon")"
+echo '{"target":"t","scenarios":[{"id":"s1","charter":"c","prompt":"p"}]}' > "$canon"
+"${S[@]}" sync --scenarios "$canon" > /dev/null
+
+# Ledger: F1 covered by s1 (excluded); F2 no links; F3 adhoc-only (promotion,
+# host-tagged); F4 links an id the state has never seen; F5 dismissed and
+# F6 tombstoned (both dead, excluded).
+mkdir -p "$TANUKI_ROOT/t"
+cat > "$TANUKI_ROOT/t/ledger.json" <<'EOF'
+{"events": {}, "findings": [
+  {"id":"F1","kind":"gap","status":"open","recurrence":2,"scenarios":["s1"],"evidence":["r001/s1#1"]},
+  {"id":"F2","kind":"friction","status":"open","recurrence":3,"scenarios":[],"evidence":["r001/s1#4"]},
+  {"id":"F3","kind":"papercut","status":"proposed","recurrence":1,"scenarios":["adhoc-1"],"evidence":["r002/adhoc-1#2"],"host":"other-repo"},
+  {"id":"F4","kind":"gap","status":"open","recurrence":1,"scenarios":["never-synced"],"evidence":["r002/never-synced#1"]},
+  {"id":"F5","kind":"gap","status":"dismissed","recurrence":5,"scenarios":[],"evidence":[]},
+  {"id":"F6","kind":"gap","status":"accepted","tombstone":true,"recurrence":1,"scenarios":[],"evidence":[]}
+]}
+EOF
+
+j="$("${S[@]}" candidates --json)"
+echo "$j" | python3 -c '
+import json, sys
+u = {f["id"]: f for f in json.load(sys.stdin)["uncovered_findings"]}
+assert set(u) == {"F2", "F3", "F4"}, \
+    "covered/dismissed/tombstoned must be excluded: %r" % sorted(u)
+assert u["F2"]["adhoc_origin"] is False and u["F2"]["scenarios"] == [], u["F2"]
+assert u["F3"]["adhoc_origin"] is True, "adhoc-only link must flag promotion"
+assert u["F3"]["host"] == "other-repo", "host tag must pass through untouched"
+assert u["F4"]["unknown_scenarios"] == ["never-synced"], u["F4"]
+' || fail "uncovered_findings must contain exactly the unprobed live findings"
+pass "(#171) uncovered friction enumerated; covered/dead excluded; adhoc + host flagged"
+
+# Text render carries the sections and the promotion flag.
+t="$("${S[@]}" candidates)"
+echo "$t" | grep -q "uncovered friction" || fail "text must render the friction section"
+echo "$t" | grep -q "F3 .*ad-hoc origin — promotion candidate" \
+  || fail "text must flag the ad-hoc promotion candidate"
+echo "$t" | grep -q "F2 .*(no scenario link)" \
+  || fail "text must name the missing scenario link"
+echo "$t" | grep -q "host other-repo" || fail "text must carry the host tag"
+pass "(#171) text surface renders friction, promotion flag, host tag"
+
+# --scenario stays trajectory-only (the ledger sections are repo-wide).
+"${S[@]}" candidates --scenario s1 --json | python3 -c '
+import json, sys
+assert "uncovered_findings" not in json.load(sys.stdin)
+' || fail "--scenario must omit the repo-wide ledger sections"
+pass "(#171) --scenario keeps the trajectory-only contract"
+
+# Still read-only: enumeration writes nothing anywhere.
+before="$(ls -la "$TANUKI_ROOT/t")"
+"${S[@]}" candidates > /dev/null
+[ "$(ls -la "$TANUKI_ROOT/t")" = "$before" ] \
+  || fail "ledger-seeded enumeration must mutate nothing"
+pass "(#171) read-only: ledger sections mutate no artifact"
+
 echo "all checks passed"
