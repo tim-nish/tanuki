@@ -731,6 +731,51 @@ def prog_done(prog, run_dir, r):
         save_progress(run_dir, prog)
 
 
+def evaluate_probe(scenario, events, raw_path):
+    """Probe coverage (story 1.25 / #165; spec-tanuki-trajectory §2b): the
+    SECOND, independent per-scenario result axis — `status` stays driver
+    completion, untouched; `probe` says whether the run exercised what the
+    charter exists to test. Deterministic code over the recorded evidence
+    (the normalized events, or the raw stream for `on: raw`) — never driver
+    self-report (F113 precedent: the weak driver is the component under
+    measurement). Never enters scheduler yield/streak/demotion arithmetic.
+
+    Returns (probe, checkpoints): probe is `reached` iff the required
+    predicate matched, `short_circuited` iff declared and unmatched,
+    `undeclared` iff the charter has no probe block; checkpoints is the
+    unordered matched/unmatched name split (sorted for determinism only —
+    set membership, no furthest-stage arithmetic), None unless declared."""
+    block = scenario.get("probe")
+    if not isinstance(block, dict) or "required" not in block:
+        return "undeclared", None
+    raw_lines = None
+
+    def matched(pred):
+        nonlocal raw_lines
+        rx = re.compile(pred["match"])
+        if pred.get("on") == "raw":
+            if raw_lines is None:
+                try:
+                    with open(raw_path, encoding="utf-8",
+                              errors="replace") as f:
+                        raw_lines = f.readlines()
+                except (OSError, TypeError):
+                    raw_lines = []  # no raw stream recorded: nothing matches
+            return any(rx.search(line) for line in raw_lines)
+        want = pred.get("type")
+        return any(rx.search(str(e.get("detail", ""))) for e in events
+                   if not want or e.get("type") == want)
+
+    probe = "reached" if matched(block["required"]) else "short_circuited"
+    cps = {name: pred for name, pred in (block.get("checkpoints") or {}).items()
+           if isinstance(pred, dict)}
+    if not cps:
+        return probe, None
+    hit = sorted(name for name in cps if matched(cps[name]))
+    return probe, {"matched": hit,
+                   "unmatched": sorted(set(cps) - set(hit))}
+
+
 def result_stats(events):
     """(cost_usd, num_turns) from the run's result event. cost_usd is kept as
     manifest data for estimate history; user-facing output shows turns/time."""
@@ -772,8 +817,12 @@ def drive_scenario(args, scenario, run_dir, cfg, prog=None):
         with open(events_path, "w", encoding="utf-8") as f:
             for e in events:
                 f.write(json.dumps(e, ensure_ascii=False) + "\n")
+        probe, probe_checkpoints = evaluate_probe(scenario, events, None)
         return {"scenario": sid,
                 "status": "host-escape: host_setup touched the clone-source path",
+                "probe": probe,
+                **({"checkpoints": probe_checkpoints} if probe_checkpoints
+                   is not None else {}),
                 "events": len(events), "model": model, "cost_usd": None,
                 "num_turns": None, "duration_s": 0.0, "events_path": events_path,
                 "decision_points": scenario.get("decision_points") or [],
@@ -807,9 +856,13 @@ def drive_scenario(args, scenario, run_dir, cfg, prog=None):
             with open(events_path, "w", encoding="utf-8") as f:
                 for e in events:
                     f.write(json.dumps(e, ensure_ascii=False) + "\n")
+            probe, probe_checkpoints = evaluate_probe(scenario, events, None)
             return {"scenario": sid,
                     "status": (f"entry-fixture-missing: '{recipe['name']}' "
                                f"absent from the host clone: {missing}"),
+                    "probe": probe,
+                    **({"checkpoints": probe_checkpoints} if probe_checkpoints
+                       is not None else {}),
                     "events": len(events), "model": model, "cost_usd": None,
                     "num_turns": None, "duration_s": 0.0,
                     "events_path": events_path,
@@ -965,7 +1018,14 @@ def drive_scenario(args, scenario, run_dir, cfg, prog=None):
             f.write(json.dumps(e, ensure_ascii=False) + "\n")
 
     cost_usd, num_turns = result_stats(events)
+    # Second result axis (story 1.25): evaluated over what normalize just
+    # wrote. `status` above is byte-for-byte what it was — the axes are
+    # recorded independently, never merged into one verdict.
+    probe, probe_checkpoints = evaluate_probe(scenario, events, raw_path)
     return {"scenario": sid, "status": status, "events": len(events),
+            "probe": probe,
+            **({"checkpoints": probe_checkpoints} if probe_checkpoints
+               is not None else {}),
             "model": model, "cost_usd": cost_usd, "num_turns": num_turns,
             "duration_s": round(time.time() - t0, 1),
             "events_path": events_path,

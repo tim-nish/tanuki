@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Probe coverage axis (story 1.25 / issue #165; spec-tanuki-trajectory §2b):
+# tanuki-drive evaluates declared probe predicates over the scenario's
+# recorded evidence in the existing normalize/manifest step and writes a
+# second, independent per-scenario `probe` axis into manifest.json —
+# `reached` / `short_circuited` / `undeclared`, plus the unordered
+# matched/unmatched checkpoint split when declared. `status` stays
+# byte-for-byte driver-execution status; the axes are never merged. The
+# regression fixture replays the F178 evidence shape: a scenario that quit
+# early and one that ran to depth, both `status: ok`, now mechanically
+# distinguishable.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+drive="$here/tanuki-drive"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+
+# Stub claude CLI: branches on the prompt text so one drive exercises both
+# the short-circuit and the full-depth evidence shapes (F178 replay).
+mkdir -p "$tmp/bin"
+cat > "$tmp/bin/claude" <<'EOF'
+#!/bin/sh
+if echo "$@" | grep -q DEEPRUN; then
+cat <<'JSON'
+{"type":"assistant","message":{"content":[{"type":"text","text":"FRICTION LOG: surveyed sources. SURVEY-DONE"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"FRICTION LOG: draft complete, REACHED-REVIEW of the full draft"}]}}
+{"type":"result","subtype":"success","num_turns":62,"duration_ms":10,"total_cost_usd":0.001,"is_error":false,"result":"done"}
+JSON
+else
+cat <<'JSON'
+{"type":"assistant","message":{"content":[{"type":"text","text":"FRICTION LOG: invoked the skill and waited"}]}}
+{"type":"result","subtype":"success","num_turns":3,"duration_ms":10,"total_cost_usd":0.001,"is_error":false,"result":"done"}
+JSON
+fi
+EOF
+chmod +x "$tmp/bin/claude"
+export PATH="$tmp/bin:$PATH"
+
+git init -q "$tmp/plugin" && git -C "$tmp/plugin" config user.email t@e \
+  && git -C "$tmp/plugin" config user.name t
+git -C "$tmp/plugin" checkout -qb main
+echo x > "$tmp/plugin/x" && git -C "$tmp/plugin" add -A \
+  && git -C "$tmp/plugin" commit -qm base
+
+# Both probed scenarios share one probe block; only the driver's reach
+# differs. `raw-reader` proves `on: raw` reads the raw stream; `plain` has
+# no block.
+cat > "$tmp/scenarios.json" <<'EOF'
+{"scenarios":[
+  {"id":"draft-survey","charter":"c","prompt":"p quit early","max_turns":3,
+   "probe":{"required":{"on":"events","type":"note","match":"REACHED-REVIEW"},
+            "checkpoints":{"survey":{"on":"events","match":"SURVEY-DONE"},
+                           "review":{"on":"events","match":"REACHED-REVIEW"}}}},
+  {"id":"draft-deep","charter":"c","prompt":"p DEEPRUN to depth","max_turns":90,
+   "probe":{"required":{"on":"events","type":"note","match":"REACHED-REVIEW"},
+            "checkpoints":{"survey":{"on":"events","match":"SURVEY-DONE"},
+                           "review":{"on":"events","match":"REACHED-REVIEW"}}}},
+  {"id":"raw-reader","charter":"c","prompt":"p quit early","max_turns":3,
+   "probe":{"required":{"on":"raw","match":"\"subtype\":\"success\""}}},
+  {"id":"plain","charter":"c","prompt":"p","max_turns":3}
+]}
+EOF
+
+"$drive" --target t --plugin "$tmp/plugin" \
+  --scenarios "$tmp/scenarios.json" --run r1 --timeout 60 >/dev/null \
+  || fail "drive exited non-zero"
+
+python3 - "$TANUKI_ROOT/t/events/r1/manifest.json" <<'PY' || fail "probe axis contract"
+import json, sys
+m = json.load(open(sys.argv[1]))
+by = {r["scenario"]: r for r in m["results"]}
+
+# F178 regression: both status ok — indistinguishable before this axis.
+assert by["draft-survey"]["status"] == "ok", by["draft-survey"]["status"]
+assert by["draft-deep"]["status"] == "ok", by["draft-deep"]["status"]
+assert by["draft-survey"]["probe"] == "short_circuited", by["draft-survey"]
+assert by["draft-deep"]["probe"] == "reached", by["draft-deep"]
+
+# Checkpoints: unordered matched/unmatched split, set membership only.
+assert by["draft-survey"]["checkpoints"] == \
+    {"matched": [], "unmatched": ["review", "survey"]}, by["draft-survey"]
+assert by["draft-deep"]["checkpoints"] == \
+    {"matched": ["review", "survey"], "unmatched": []}, by["draft-deep"]
+
+# on: raw evaluates over the raw stream (events never carry this text).
+assert by["raw-reader"]["probe"] == "reached", by["raw-reader"]
+assert "checkpoints" not in by["raw-reader"], by["raw-reader"]
+
+# No probe block: honest absence, never healthy-by-default.
+assert by["plain"]["probe"] == "undeclared", by["plain"]
+assert "checkpoints" not in by["plain"], by["plain"]
+
+# Independence: num_turns/status recorded exactly as before (3 vs 62).
+assert by["draft-survey"]["num_turns"] == 3
+assert by["draft-deep"]["num_turns"] == 62
+PY
+pass "manifest: reached/short_circuited/undeclared + checkpoint split, status untouched"
+
+echo "all checks passed"
