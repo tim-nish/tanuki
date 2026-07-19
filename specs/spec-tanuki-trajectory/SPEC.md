@@ -3,7 +3,10 @@
 Status: **§2 (coverage diff) REMOVED 2026-07-18** with the whole coverage
 function (operator decision — see spec-tanuki-view D2 and the lifecycle
 spec's matching removal note); §1 (typed events) and §3 (trajectory view)
-stand unchanged and remain in force. RATIFIED 2026-07-16 (operator, after
+stand unchanged and remain in force. **AMENDED 2026-07-19 (findings
+F178/F179, operator selection of the evidence-predicate alternative): §2b
+probe coverage** — a per-scenario, opt-in second result axis, deliberately
+NOT a revival of §2 (see §2b's boundary note). RATIFIED 2026-07-16 (operator, after
 the 2026-07-16 consistency
 review amended build-order labels, the mixed pre/post-marker coverage note,
 and the recovery/evidence acceptance criteria). The *concept* was already
@@ -130,6 +133,70 @@ coverage diff (observed vs declared):
   only, with the lifecycle spec's existing "no axes declared" pointer; no
   typed events yet → one line: `no trajectory events recorded — coverage
   diff needs runs made after the marker grammar landed`.
+
+## 2b. Probe coverage — evidence predicates (ADDED 2026-07-19; findings F178/F179)
+
+Problem (F178): the manifest's per-scenario `status` is **driver-execution
+status only** — `ok` means the headless process completed. Nothing binds it
+to the charter's probe being exercised, so a scenario that short-circuits
+before the stage it exists to test reads *healthier* (fewer turns, clean
+exit) than one that spent its budget completing the actual probe, and the
+scheduler then counts its silence as fix-verification. Coverage must become
+a **second, independent result axis** — never a redefinition of `status`.
+
+**Contract — two axes, never conflated:**
+
+- `status` (existing): did the driver complete. Unchanged.
+- `probe` (new, per scenario result in `manifest.json`):
+  `reached | short_circuited | undeclared`, plus
+  `checkpoints: {matched: [names…], unmatched: [names…]}` when declared.
+- The axes are independent of each other AND of scheduler yield: a scenario
+  can short-circuit yet yield findings, or reach its probe and yield
+  nothing. `probe` never enters the scheduler's yield/streak/demotion
+  arithmetic (v1), and no view may merge the axes into one health verdict.
+
+**Declaration (charter schema — normative home:
+spec-tanuki-scenario-lifecycle "Charter probe block").** A charter MAY
+declare a `probe` block: one **required predicate** and zero or more named
+**checkpoint** predicates. Each predicate is deterministic and evaluated
+over the scenario's recorded evidence (its `*.events.jsonl`, optionally the
+raw stream): `{on: events|raw, type?: <event type>, match: <substring or
+regex over detail>}`. Checkpoints are an **unordered set** — no ordering,
+ranking, or comparability among them is ever assumed. Target-supplied stage
+labels are opaque strings; Tanuki remains target-agnostic (the rejected
+stage-graph alternative is recorded in the 2026-07-19 decision draft).
+
+**Evaluation (code, no model, inside tanuki-drive's existing
+normalize/manifest step):** after normalize writes the scenario's events,
+evaluate the predicates; `reached` iff the required predicate matched,
+`short_circuited` iff declared and unmatched, `undeclared` iff no probe
+block. The verdict derives from recorded evidence, never from driver
+self-report (a `TANUKI-PROBE`-style marker was rejected: the weak driver is
+the component under measurement — F113 precedent).
+
+**Rendering (spec-tanuki-view D4 applies):** the drive completion report and
+run summary render the `probe` axis prominently next to `status`; an
+`undeclared` scenario renders as "coverage not assessable — no probe
+declared", never as healthy (no silent nothing). Predicate authoring enters
+through the generation pass's existing plan gate (charters and their probes
+are reviewed together; no tool writes the matrix).
+
+**Bottleneck flag (F179, same amendment):** the manifest gains a
+deterministic per-scenario `turns_anomalous` signal computed by code against
+that scenario's own execution history, valid ONLY within the partition key
+(scenario id + charter revision, effective driver model, entry-fixture
+mode/fixture id, target/plugin pin) — cross-partition comparison is
+undefined. The comparison statistic (percentile or otherwise) is
+**deliberately undecided**: choosing it is a substrate change gated on this
+contract landing first; until then the field is absent, and absent renders
+as "not computed", never as "not anomalous".
+
+**Boundary note — why this is not §2 revived:** the removed coverage diff
+was a matrix-wide observed-vs-declared set arithmetic over decision-point
+vocabulary. §2b is per-scenario, opt-in, carries no declared/observed
+vocabulary diff, proposes no charter seeds, and touches no scheduler
+surface. It answers one question the retired section never asked: *did this
+scenario's run exercise the thing the charter exists to probe?*
 
 ## 3. Trajectory view — `tanuki-scheduler history --scenario <id> --trajectory`
 

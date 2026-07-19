@@ -106,6 +106,37 @@ presented at a plan gate; the user approves/edits/rejects before anything is
 written. Generation is the charter row of the model-tier table — frontier or
 human, never delegated below.
 
+### Charter probe block (ADDED 2026-07-19 — findings F178/F179; contract home)
+
+A charter MAY declare a `probe` block — the evidence-predicate contract
+spec-tanuki-trajectory §2b consumes:
+
+```json
+"probe": {
+  "required": {"on": "events", "type": "result", "match": "<regex>"},
+  "checkpoints": {"<name>": {"on": "events", "match": "<regex>"}, …}
+}
+```
+
+- `required` is the probe-completion predicate: the scenario's run
+  **reached** its probe iff this predicate matches the recorded evidence
+  (deterministic evaluation in tanuki-drive's normalize/manifest step —
+  code, never a model, never driver self-report).
+- `checkpoints` is an **unordered named set** of the same predicate shape;
+  the manifest reports the matched/unmatched split as "furthest actually
+  reached" without assuming any ordering — target-supplied stage labels are
+  opaque strings, and Tanuki stays target-agnostic (no stage graph, no
+  cross-checkpoint comparability).
+- Absence of the block is legitimate: the result axis reads `undeclared`
+  ("coverage not assessable"), never healthy-by-default.
+- Probe predicates enter and change ONLY through the same plan gate as the
+  charter they belong to — generation proposes them alongside new charters
+  (a probe the human never reviewed is a coverage verdict the human never
+  authorized), and no tool mutates the matrix.
+- Coverage is independent of yield (a short-circuited run may still yield
+  findings) and never enters the scheduler's yield/streak/demotion
+  arithmetic in v1.
+
 ### Per-scenario state machine (deterministic, tool-owned)
 State lives in `~/.tanuki/<target>/scheduler.json`, owned by the new
 zero-dependency tool `tools/tanuki-scheduler`; the model never edits it.

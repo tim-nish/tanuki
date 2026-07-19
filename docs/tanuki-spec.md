@@ -170,6 +170,16 @@ scenario, it:
 5. Verifies isolation: `git -C <clone> status --porcelain` on both clones is
    recorded into the run manifest; unexpected dirt in the plugin clone is
    itself an event (`type: note, detail: pollution`).
+6. Evaluates the charter's `probe` predicates, when declared, over the
+   normalized events (spec-tanuki-trajectory §2b; schema in
+   spec-tanuki-scenario-lifecycle "Charter probe block") and records a
+   second, independent result axis in the manifest: `status` says whether
+   the **driver completed**; `probe` (`reached | short_circuited |
+   undeclared`, plus the matched/unmatched checkpoint split) says whether
+   the **charter's intended probe was actually exercised**. The axes are
+   never merged into one verdict, and `probe` is independent of scheduler
+   yield; run summaries render both, with `undeclared` shown as "coverage
+   not assessable", never as healthy.
 
 One run produces **zero or more** events. Repetition of an unchanged scenario
 is only for chronic-vs-flaky; the matrix prefers breadth.
