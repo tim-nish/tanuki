@@ -326,7 +326,22 @@ def cmd_ingest_note(args, ledger):
     # run, so elapsed-runs compaction never advanced across them. Old
     # manual-<YYYYMMDD> run dirs stay valid on read (run_key sorts by the
     # embedded date either way); no migration.
-    run = "manual-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+    base = "manual-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+    # Same-second collision (F184 follow-up): two notes landing in the same
+    # second would still share one run id — exactly the collapse the time
+    # suffix was added to prevent. When the run id's events dir already exists
+    # or the id already appears in the ledger's recorded runs, disambiguate
+    # with a -2, -3, … suffix; the normal case keeps the documented
+    # manual-<YYYYMMDD>-<HHMMSS> shape (run_key sorts by the embedded date
+    # either way).
+    ledger_runs = {r for rec in ledger["events"].values()
+                   for r in rec.get("runs", []) if r}
+    run, n = base, 1
+    while (os.path.exists(os.path.join(TANUKI_ROOT, args.target, "events",
+                                       run))
+           or run in ledger_runs):
+        n += 1
+        run = f"{base}-{n}"
     run_dir = os.path.join(TANUKI_ROOT, args.target, "events", run)
     announce_new_target(args.target)
     os.makedirs(run_dir, exist_ok=True)
@@ -545,6 +560,16 @@ def cmd_upsert(args, ledger):
                 f"recurrence counts upsert calls, not pointers; "
                 f"bump with --match {fid})")
     print(f"created {fid}: {args.title}{tail}")
+    # F92: a fresh finding (recurrence 1, 1 scenario) is silently below the
+    # promote bar — the documented lifecycle then reads as a broken tool.
+    # Say so at creation time, not only when `promote` later comes up empty.
+    cfg = load_config()
+    if (finding["recurrence"] < cfg["min_recurrence"]
+            and len(finding["scenarios"]) < cfg["min_scenarios"]):
+        print(f"note: {fid} starts below the promotion bar (recurrence >= "
+              f"{cfg['min_recurrence']} OR scenarios >= "
+              f"{cfg['min_scenarios']}) — it will surface in WATCHING until "
+              f"it recurs or spreads to another scenario", file=sys.stderr)
 
 
 def cmd_promote(args, ledger):
@@ -1082,6 +1107,7 @@ def cmd_compact(args, ledger):
         # the reader into the source to tell which (F135): name the per-finding
         # cause so the caller sees exactly how far each candidate is from the bar.
         reasons = []
+        real_blocked = 0  # F141: accepted, real-scenario, waiting on re-drives
         for f in ledger["findings"]:
             if f.get("tombstone"):
                 continue
@@ -1092,6 +1118,7 @@ def cmd_compact(args, ledger):
                     continue  # (would have compacted; handled above)
                 scen = set(f.get("scenarios", [])) - {"ingest"}
                 if scen:
+                    real_blocked += 1
                     tail = (f"{k}/{n} driven-and-absent run(s) — {n - k} more "
                             f"re-drive(s) of its scenario to verify the fix "
                             f"(hand-ingest will not advance this)")
@@ -1113,6 +1140,12 @@ def cmd_compact(args, ledger):
             print(head + "\ncandidates below the threshold:")
             for line in reasons:
                 print(line)
+            # F141: name the structural cause, not just the per-finding gap —
+            # these findings cannot advance by hand-ingest at all.
+            if real_blocked:
+                print(f"cause: {real_blocked} finding(s) tied to real "
+                      f"scenarios advance only when those scenarios are "
+                      f"re-driven (tanuki-drive), not by hand-ingest")
         else:
             print(head + "\nno accepted or dismissed findings are awaiting "
                   "compaction (nothing has been resolved yet)")
@@ -1720,8 +1753,15 @@ def main():
             "Record events into the ledger from one or more JSONL files (one "
             "JSON object per line). Each event object: "
             "{run: <run-id>, scenario: <slug>, seq: <int>, type: "
-            "tool_error|note|result|..., detail: <str>}. The evidence pointer "
-            "for a finding is formed as '<run>/<scenario>#<seq>'. Exact "
+            "tool_error|note|result|..., detail: <str>} — e.g. "
+            "{\"run\": \"20260719-abc12\", \"scenario\": \"scen\", \"seq\": 3, "
+            "\"type\": \"tool_error\", \"detail\": \"…\"}. Run ids should "
+            "carry an 8-digit YYYYMMDD date (driven runs are "
+            "<YYYYMMDD>-<rand>): a dateless id sorts as the OLDEST run, so "
+            "chronological ordering and elapsed-runs compaction stop working "
+            "for it — ingest warns at runtime when it sees one (F172). The "
+            "evidence pointer for a finding is formed as "
+            "'<run>/<scenario>#<seq>', e.g. 20260719-abc12/scen#3. Exact "
             "duplicates collapse to an occurrence count rather than creating "
             "separate records; the identity key is scenario+type+detail ONLY — "
             "run and seq are NOT part of it, so the same detail seen in two "
@@ -1730,7 +1770,20 @@ def main():
                     help="one or more event files to ingest — the driver names "
                          "them <scenario>.events.jsonl by convention, but the "
                          "name is not enforced: any readable JSONL file works")
-    sp = sub.add_parser("ingest-note"); sp.add_argument("--text", required=True)
+    sp = sub.add_parser(
+        "ingest-note",
+        help="record human feedback verbatim as an unjudged note event "
+             "(run id manual-<YYYYMMDD>-<HHMMSS>)",
+        description=(
+            "Record human feedback verbatim as an unjudged note event "
+            "(type: note, source: human) under a per-note run id "
+            "manual-<YYYYMMDD>-<HHMMSS>. When two notes land in the same "
+            "second, the later one's run id gains a collision suffix "
+            "(manual-<YYYYMMDD>-<HHMMSS>-2, -3, …) so every note still gets "
+            "its own run and elapsed-runs compaction keeps advancing "
+            "(F184 follow-up: same-second notes must not collapse into one "
+            "manual run)."))
+    sp.add_argument("--text", required=True)
     sp = sub.add_parser(
         "findings",
         help="list findings as JSON, each with a computed priority",
@@ -1764,10 +1817,13 @@ def main():
     # from `upsert-finding --help` and not only from the top-level usage (F124).
     sp.add_argument("--evidence", required=True,
                     help="one or more run/scenario#seq pointers, comma-joined "
-                         "(e.g. runA/scen#1,runB/scen#2); for a manual ingest "
-                         "with no driven scenario use the reserved 'ingest' "
-                         "scenario, e.g. runA/ingest#1. A malformed pointer is "
-                         "rejected, never silently parsed (F133/F134)")
+                         "(e.g. 20260719-abc12/scen#3,20260719-def34/scen#1); "
+                         "for a manual ingest with no driven scenario use the "
+                         "reserved 'ingest' pseudo-scenario under the manual "
+                         "run id — manual-<date>[-<time>]/ingest#<seq>, e.g. "
+                         "manual-20260719-141530/ingest#1 (the exact pointer "
+                         "ingest-note emits; F134). A malformed pointer is "
+                         "rejected, never silently parsed (F133)")
     # --match takes an existing finding id to accumulate onto (bumps recurrence
     # and scenario spread) instead of creating a duplicate (F62); omit it to
     # create a new finding (then --title is required).
