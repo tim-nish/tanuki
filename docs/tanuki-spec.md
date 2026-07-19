@@ -106,7 +106,11 @@ without that approval step (§"The plan gate confirms execution", loop exempt).
   the target plugin is our own and read-mostly; not acceptable for third-party
   targets.
 - **Ledger lives in `~/.tanuki/<target>/`**, not the den. Consolidator output
-  *proposes* lesson candidates for the user's knowledge hub; a human moves them.
+  *proposes* lesson candidates for the user's knowledge hub. ~~a human moves
+  them~~ (SUPERSEDED 2026-07-19: `specs/spec-den-distill/SPEC.md` ratifies a
+  gated, proposal-only contribute-back into the hub's staging intake —
+  opt-in, attended-accept per item, staging-directory-only writes; unset
+  config keeps today's manual behavior).
 - **Scenario matrix is hand-written JSON** per target (no generation).
 - **Single target shape**: a Claude Code plugin exercised in a host repo via
   `claude --plugin-dir` headless runs.
@@ -322,7 +326,13 @@ never with a pre-selected default. Watching (below-bar) findings are offered
 at the same gate: the bar gates surfacing, not permission. Dispositions are
 written back via `set-status` — by the command, never typed by the user.
 `tanuki-ledger status` shows anything left undecided, so a deferred decision
-is never lost, only visible.
+is never lost, only visible. **Lesson candidates join the same pass**
+(AMENDED 2026-07-19, `specs/spec-den-distill/SPEC.md`): after the proposal
+walk, candidates get the identical accept / dismiss / defer walk; accept
+writes the staging-intake file right then when `contribute_back` is
+configured, and renders the one-line "not configured" notice when it isn't.
+The picker's "distill den" action runs the same walk over the existing
+ledger without driving.
 
 **The command layer completes every workflow (acceptance rule).** The
 `tools/tanuki-*` executables are the deterministic, fully-optioned machine
