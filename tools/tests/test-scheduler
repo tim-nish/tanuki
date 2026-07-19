@@ -175,7 +175,9 @@ assert r6["actionable"] == 1 and r6["findings"] == ["F2"], r6
 kinds = [(t["run"], t["to"]) for t in d["transitions"]]
 assert ("r002", "regression") in kinds and ("r006", "active") in kinds, kinds
 reasons = " ".join(t["reason"] for t in d["transitions"])
-assert "consecutive low-yield" in reasons and "actionable finding" in reasons
+# F203: the demotion reason counts driven executions, not scheduling rounds
+assert "consecutive driven low-yield executions" in reasons \
+    and "actionable finding" in reasons
 PY
 pass "history (--scenario): exact per-execution yield, transition log with reasons"
 
@@ -216,5 +218,44 @@ grep -q "canonical location: $TANUKI_ROOT/scenarios/demo.scenarios.json" /tmp/mi
 grep -q "templates/tanuki/ is NOT read" /tmp/miss.txt \
   || fail "missing-config error should warn the undocumented path is not read"
 pass "loader fails closed on a missing scenarios config, naming the canonical path"
+
+# --- F201/F202/F205: plan JSON clarity ----------------------------------------
+# tiebreak named on a cap cut among equal last_planned; verify reason names a
+# regression-pool pick; regression_pool lists proximity for every pool member.
+P=("$sched" --target p)
+cat > "$tmp/p.json" <<'EOF'
+{"scenarios":[{"id":"x","charter":"c","prompt":"p"},
+              {"id":"y","charter":"c","prompt":"p"},
+              {"id":"z","charter":"c","prompt":"p"}]}
+EOF
+"${P[@]}" sync --scenarios "$tmp/p.json" >/dev/null      # first sync: all active
+"${P[@]}" plan --scenarios "$tmp/p.json" --max 2 --dry-run | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+tb = {t["group"]: t["rule"] for t in r.get("tiebreak", [])}
+assert "active" in tb and "insertion order" in tb["active"], r.get("tiebreak")
+' || fail "a --max cut among equal last_planned must emit the tie-break rule"
+pass "F201: cap cut among equal last_planned names the applied tie-break"
+for q in q1 q2; do                                       # two quiet drives of x
+  mkdir -p "$TANUKI_ROOT/p/events/$q"
+  echo '{"results":[{"scenario":"x","events":2}]}' \
+    > "$TANUKI_ROOT/p/events/$q/manifest.json"
+  "${P[@]}" record-run --run "$q" >/dev/null
+done                                                     # -> x demoted
+"$ledger" --target p init >/dev/null
+"$ledger" --target p upsert-finding --title "x bug" --kind gap \
+  --evidence "q1/x#1" >/dev/null
+"$ledger" --target p set-status --id F1 --status accepted >/dev/null
+"${P[@]}" plan --scenarios "$tmp/p.json" --max 3 --dry-run | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+sel = {e["finding"]: e for e in r["verify_selection"]}
+assert sel["F1"]["scenario"] == "x", sel
+assert sel["F1"]["reason"].endswith("(from regression pool)"), sel
+pool = {e["scenario"]: e for e in r["regression_pool"]}
+assert pool["x"] == {"scenario": "x", "since_regression": 0,
+                     "runs_until_due": 3}, pool
+' || fail "pool-state verify reason / regression_pool proximity wrong"
+pass "F202/F205: verify reason names the pool pick; regression_pool shows proximity"
 
 echo "all checks passed"

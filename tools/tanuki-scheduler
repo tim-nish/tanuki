@@ -9,12 +9,15 @@ Zero dependencies. State:
   ~/.tanuki/<target>/scheduler.json      per-scenario state machine
 
 Per-scenario state machine:
-  unexplored --first drive--> active --demote_after consecutive
-                                ^        low-yield runs--> regression
+  unexplored --first drive--> active --demote_after consecutive driven
+                                ^     low-yield executions--> regression
                                 |                             |
                                 +--- actionable finding <-----+
                                      (re-promotion)     driven every
                                                         regression_every runs
+The demotion streak counts consecutive DRIVEN low-yield executions of that
+scenario — occurrences the scenario was actually driven — not consecutive
+scheduling rounds; rounds that skip the scenario neither extend nor reset it.
 Scenarios are NEVER deleted — regression pool, not removal.
 
 Subcommands (JSON out):
@@ -42,7 +45,9 @@ Subcommands (JSON out):
                                    history with reasons)
   record-run --run R               fold the run's yield into streaks and apply
                                    the state machine (demotion needs
-                                   demote_after consecutive low runs; any
+                                   demote_after consecutive driven low-yield
+                                   executions of the scenario, not
+                                   consecutive scheduling rounds; any
                                    actionable finding re-promotes); persists
                                    the per-scenario yield snapshot and every
                                    state transition {run, from, to, reason}
@@ -441,6 +446,10 @@ def cmd_plan(args):
                 reason = (f"cheapest covering scenario for surface '{tag}' "
                           f"(cost {scenario_cost(matrix[choice])} vs "
                           f"originating {scenario_cost(matrix[orig_best])})")
+        # F202: a pool member filling a verify slot must not read like an
+        # active pick — name the state it was pulled from.
+        if scen[choice]["state"] == "regression":
+            reason += " (from regression pool)"
         verify.add(choice)
         verify_selection.append({"finding": f["id"], "scenario": choice,
                                  "reason": reason})
@@ -472,6 +481,35 @@ def cmd_plan(args):
             if s not in seen and len(plan) < cap:
                 plan.append(s)
                 seen.add(s)
+    # F201: when the cap (--max / max_scenarios) cuts a group at a boundary
+    # where last_planned is EQUAL on both sides, the pick was tie-broken —
+    # name the rule the sort above actually applied, per group: verify sorts
+    # on (last_planned, scenario id), so ties fall to scenario id ascending;
+    # the active rotation sorts on last_planned alone, so Python's stable
+    # sort keeps scheduler-state insertion order (sync/matrix order).
+    tiebreak = []
+    if verify_sel and verify_deferred and (
+            scen[verify_sel[-1]]["last_planned"]
+            == scen[verify_deferred[0]]["last_planned"]):
+        tiebreak.append({"group": "verify",
+                         "rule": "equal last_planned — scenario id ascending"})
+    kept_active = [s for s in active if s in seen]
+    cut_active = [s for s in active if s not in seen]
+    if kept_active and cut_active and (
+            scen[kept_active[-1]]["last_planned"]
+            == scen[cut_active[0]]["last_planned"]):
+        tiebreak.append({"group": "active",
+                         "rule": "equal last_planned — scheduler-state "
+                                 "insertion order (sync/matrix order; "
+                                 "stable sort)"})
+    # F205: proximity for the whole regression pool, not just currently-due
+    # members — since_regression against the same regression_every the due
+    # computation reads, so "how far from replay?" needs no mental arithmetic.
+    regression_pool = [
+        {"scenario": s, "since_regression": st["since_regression"],
+         "runs_until_due": max(0, cfg["regression_every"]
+                               - st["since_regression"])}
+        for s, st in sorted(scen.items()) if st["state"] == "regression"]
     quota_met = (not unexplored) or any(s in seen for s in unexplored)
     # Story 1.33: a compat-skipped exploration slot never reads satisfied —
     # an incompatible host must not be able to manufacture convergence.
@@ -491,8 +529,14 @@ def cmd_plan(args):
               "verify_deferred": sorted(verify_deferred),
               **({"compat_skipped": compat_skipped} if compat_skipped
                  else {}),
+              # F201: the tie-break the cap cut applied, when one applied.
+              **({"tiebreak": tiebreak} if tiebreak else {}),
               "explore": [s for s in explore if s in seen],
               "due_regression": [s for s in due if s in seen],
+              # F205: every pool member with its distance to its next due
+              # replay — due members show runs_until_due 0.
+              **({"regression_pool": regression_pool} if regression_pool
+                 else {}),
               "unexplored_remaining": [s for s in unexplored if s not in seen]}
     # F162: a what-if plan must be possible without mutating rotation order or
     # the selection history — --dry-run computes the identical record and
@@ -562,8 +606,11 @@ def cmd_record_run(args):
                 st["low_streak"] += 1
                 if st["state"] == "active" and st["low_streak"] >= cfg["demote_after"]:
                     st["low_streak"] = 0
+                    # F203: the streak counts driven executions of THIS
+                    # scenario, not scheduling rounds — say so.
                     transition(sid, st, "regression",
-                               f"{cfg['demote_after']} consecutive low-yield runs")
+                               f"{cfg['demote_after']} consecutive driven "
+                               "low-yield executions")
         elif st["state"] == "regression":
             st["since_regression"] += 1
     view["runs_recorded"].append(args.run)
@@ -633,8 +680,12 @@ def trajectory_view(target, sid, run_filter, as_json):
         out({"scenario": sid, "runs": json_runs})
         return
     if not runs:
-        print(f"no runs recorded for scenario {sid}"
+        # F204: name the artifact this view needs — manifest.json alone is
+        # not enough, and plan/record-run never produce event files.
+        print(f"no trajectory events for scenario {sid}"
               + (f" (run {run_filter})" if run_filter else ""))
+        print(f"  (trajectory reads <run-dir>/{sid}.events.jsonl, produced "
+              "by tanuki-drive; plan/record-run alone don't produce it)")
         return
     for r in runs:
         print(f"{r['run']}  ({r['at']}, {r['events']} events)")
