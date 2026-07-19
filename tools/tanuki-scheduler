@@ -94,6 +94,7 @@ max_scenarios 6.
 import argparse
 import json
 import os
+import re
 import sys
 import time
 
@@ -691,12 +692,20 @@ def plugin_surface(plugin_path):
 
 def feature_drift(target):
     """Advisory, READ-ONLY feature-drift signal (spec-tanuki-scenario-lifecycle
-    §3, third generation trigger): name each plugin surface (skill/command)
-    that NO scenario charter or prompt covers, and point at the generate
-    invocation. Reads the canonical scenarios config and the target plugin
-    checkout; writes nothing, mutates nothing, triggers nothing. Coverage is a
-    coarse, documented heuristic — a surface is covered iff its name appears
-    (case-insensitive substring) in any charter or prompt. The signal is
+    §3, third generation trigger): name each plugin surface that NO scenario
+    covers, and point at the generate invocation. Reads the canonical
+    scenarios config and the target plugin checkout; writes nothing, mutates
+    nothing, triggers nothing.
+
+    Scope and matching per the #169 narrow-the-spec ruling (2026-07-19):
+    drift is computed over STATICALLY ENUMERABLE surface only — skills and
+    commands; observed decision-point gaps are `candidates`' business, never
+    drift's. A surface is covered iff its name equals a scenario's `covers`
+    tag (exact, case-insensitive) or appears as a whole token —
+    `[a-z0-9_-]`-bounded, case-insensitive — in a charter or prompt. Never a
+    bare substring: "do" does not cover "do-thing", "betamax" does not cover
+    "beta". Mention-as-coverage remains the documented heuristic limit (a
+    charter that merely names a command counts as covering it). The signal is
     advisory, so it errs toward silence: an empty `uncovered` (complete
     coverage, absent config, or hostless target with no surface dirs) emits no
     drift."""
@@ -710,10 +719,18 @@ def feature_drift(target):
     if not isinstance(data, dict):
         return {"uncovered": [], "generate": generate}
     surface = plugin_surface(data.get("plugin"))
+    scenarios = data.get("scenarios", [])
     corpus = " ".join(f"{s.get('charter', '')} {s.get('prompt', '')}"
-                      for s in data.get("scenarios", [])).lower()
+                      for s in scenarios).lower()
+    tags = {str(t).lower() for s in scenarios for t in (s.get("covers") or [])}
+
+    def covered(name):
+        n = name.lower()
+        return n in tags or re.search(
+            rf"(?<![a-z0-9_-]){re.escape(n)}(?![a-z0-9_-])", corpus)
+
     uncovered = [{"kind": kind, "name": name} for kind, name in surface
-                 if name.lower() not in corpus]
+                 if not covered(name)]
     return {"uncovered": uncovered, "generate": generate}
 
 

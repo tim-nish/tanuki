@@ -93,6 +93,34 @@ assert d["uncovered"] == [] and d["generate"] == "/tanuki ghost generate", d
 ' || fail "absent scenarios config must report no drift"
 pass "graceful degrade: absent scenarios config -> no drift"
 
+# --- (#169) matching is exact/structured, never substring ----------------------
+# "betamax" must not cover the beta skill; "do" must not cover do-thing.
+write_matrix "Exercise the betamax workflow and do a run of alpha."
+h="$("$sched" --target demo history --json)"
+echo "$h" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)["feature_drift"]
+names = {(u["kind"], u["name"]) for u in d["uncovered"]}
+assert ("skill", "beta") in names, "substring betamax must not cover beta: %r" % d
+assert ("command", "do-thing") in names, "token do must not cover do-thing: %r" % d
+assert ("skill", "alpha") not in names, "whole-token alpha must cover: %r" % d
+' || fail "coverage must be whole-token, never substring"
+pass "(#169) substring mentions no longer count as coverage"
+
+# An exact covers tag counts as structured coverage without any prose mention.
+cat > "$canon" <<EOF
+{"target":"demo","plugin":"$plugin",
+ "scenarios":[{"id":"s1","charter":"c","prompt":"p",
+               "covers":["alpha","beta","do-thing"]}]}
+EOF
+h="$("$sched" --target demo history --json)"
+echo "$h" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)["feature_drift"]
+assert d["uncovered"] == [], d
+' || fail "exact covers tags must count as coverage"
+pass "(#169) exact covers tags are structured coverage"
+
 # --- (#168) status carries the advisory trigger signals ------------------------
 # No scheduler state yet: drift renders, but zero scenarios is onboarding,
 # never an "empty pool".

@@ -4,8 +4,11 @@
 # the scheduler's advisory generation-trigger signals (feature-drift uncovered
 # surfaces, unexplored-pool-empty) so a false quiet is named, never silent.
 # The arithmetic is OWNED by tanuki-scheduler (`status` -> `advisories`);
-# tanuki-loop's generate_advisory() only reads and phrases it, and any failure
-# degrades to None — an advisory must never break record-cycle.
+# tanuki-loop's generate_advisory() only reads and phrases it. Non-blocking,
+# never silent: a failure returns an explicit {"unavailable": true, reason}
+# (a broken signal must not read as zero drift) and never raises — an
+# advisory must never break record-cycle. None means the scheduler answered
+# and there is genuinely nothing to say.
 set -euo pipefail
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
@@ -49,16 +52,21 @@ assert tl.generate_advisory("ghost") is None, \
 PY
 pass "advisory names drift + empty pool and points at generate; quiet target -> None"
 
-# --- advisory failure degrades to None, never an exception ---------------------
-python3 - "$here/tanuki-loop" <<'PY' || fail "advisory degrade"
+# --- advisory failure is explicit and non-blocking, never silence --------------
+python3 - "$here/tanuki-loop" <<'PY' || fail "advisory unavailable state"
 import importlib.machinery, importlib.util, os, sys
 loader = importlib.machinery.SourceFileLoader("tl", sys.argv[1])
 spec = importlib.util.spec_from_loader("tl", loader)
 tl = importlib.util.module_from_spec(spec); loader.exec_module(tl)
 # A path-like target is rejected by the scheduler's slug validation (exit 2);
-# the advisory must swallow that and degrade to None.
-assert tl.generate_advisory("../not-a-slug") is None
+# the advisory must not raise AND must not look like zero drift — it names
+# the failure as an explicit unavailable state.
+adv = tl.generate_advisory("../not-a-slug")
+assert adv is not None, "failure must never be silent (would read as zero drift)"
+assert adv.get("unavailable") is True, adv
+assert "exited 2" in adv["reason"], adv
+assert "notes" not in adv, "an unavailable advisory must carry no signal notes"
 PY
-pass "sibling failure degrades to None — an advisory can never break record-cycle"
+pass "sibling failure -> explicit unavailable state; non-blocking, never silence"
 
 echo "all checks passed"
