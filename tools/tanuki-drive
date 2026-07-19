@@ -473,6 +473,21 @@ def host_source_escape_check(raw_path, host_setup, host_source_abs):
 MARKER_CHOICE = "TANUKI-CHOICE"
 MARKER_OUTCOME = "TANUKI-OUTCOME"
 OUTCOME_DISPOSITIONS = ("success", "gave_up", "partial")
+# Markdown emphasis a driver sometimes wraps around a marker line (F177):
+# peeled — together with trailing punctuation — before matching, so a
+# **bold**-wrapped marker still lifts instead of silently missing.
+MARKER_DECORATION = "*_`"
+
+
+def undecorate_marker(line):
+    """Peel surrounding emphasis (**, *, _, backticks) and trailing
+    punctuation off a marker line until stable, so decorations like
+    '**TANUKI-CHOICE ...**.' expose the bare grammar (F177)."""
+    prev = None
+    while line != prev:
+        prev = line
+        line = line.strip().strip(MARKER_DECORATION).rstrip(".,;:!?")
+    return line
 
 
 def parse_marker_fields(text):
@@ -505,10 +520,12 @@ def normalize(raw_path, run, scenario):
     Never judges — extraction of UX findings is the Miner's job.
     Returns (events, markers_dropped): typed trajectory events
     (spec-tanuki-trajectory §1) are lifted from the marker grammar; malformed
-    markers are counted, never fatal. Typed events carry a raw-line evidence
-    pointer (raw.jsonl#L<n>); legacy events keep the event-seq pointer."""
+    markers are dropped — each drop recorded as {line, marker} (raw-stream
+    line number, marker text truncated to 120 chars) — never fatal, never a
+    silent miss. Typed events carry a raw-line evidence pointer
+    (raw.jsonl#L<n>); legacy events keep the event-seq pointer."""
     events, seq = [], 0
-    markers_dropped = 0
+    markers_dropped = []  # [{"line": raw line no, "marker": text[:120]}]
     outcome_seen = False
     pending_errors = []  # [(error seq, recovery key)] awaiting a continuation
 
@@ -530,15 +547,18 @@ def normalize(raw_path, run, scenario):
         emit("recovery", f"of #{err_seq} — {key} continued successfully",
              evidence=raw_pointer(lineno), of_seq=err_seq)
 
+    def drop_marker(lineno, mline):
+        markers_dropped.append({"line": lineno, "marker": mline.strip()[:120]})
+
     def lift_markers(txt, lineno):
-        nonlocal markers_dropped, outcome_seen
-        for mline in txt.splitlines():
-            mline = mline.strip()
+        nonlocal outcome_seen
+        for raw_mline in txt.splitlines():
+            mline = undecorate_marker(raw_mline)
             if mline.startswith(MARKER_CHOICE + " "):
                 fields, _ = parse_marker_fields(mline[len(MARKER_CHOICE) + 1:])
                 point, selected = fields.get("point"), fields.get("selected")
                 if not point or not selected:
-                    markers_dropped += 1
+                    drop_marker(lineno, raw_mline)
                     continue
                 extra = {"point": point, "selected": selected}
                 if fields.get("alternatives"):
@@ -554,11 +574,15 @@ def normalize(raw_path, run, scenario):
                     mline[len(MARKER_OUTCOME) + 1:])
                 disposition = fields.get("disposition")
                 if disposition not in OUTCOME_DISPOSITIONS:
-                    markers_dropped += 1
+                    drop_marker(lineno, raw_mline)
                     continue
                 emit("outcome", tail or mline, evidence=raw_pointer(lineno),
                      disposition=disposition)
                 outcome_seen = True
+            elif MARKER_CHOICE in raw_mline or MARKER_OUTCOME in raw_mline:
+                # Marker-like but not parseable in any tolerated shape:
+                # counted, never a silent miss (F177).
+                drop_marker(lineno, raw_mline)
 
     tool_names = {}  # tool_use id -> name
     tool_keys = {}   # tool_use id -> recovery key
@@ -1066,7 +1090,11 @@ def drive_scenario(args, scenario, run_dir, cfg, prog=None):
             # when the scenario declared none — findings attribute to the
             # entered stage onward.
             "entry_fixture": entered_fixture,
-            "trajectory_markers_dropped": markers_dropped,
+            # Integer kept as-is for compatibility; the detail list (F210)
+            # names each drop — raw-stream line + truncated marker text —
+            # so a nonzero count is diagnosable without rereading the stream.
+            "trajectory_markers_dropped": len(markers_dropped),
+            "trajectory_markers_dropped_detail": markers_dropped,
             "host_clone_changes": len(pollution_check(host_clone)),
             "plugin_clone_dirty": bool(plugin_dirt),
             "execution_escape": bool(escapes),
