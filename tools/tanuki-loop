@@ -1299,6 +1299,30 @@ def cmd_init(args):
         base_note = (f"{n_behind} commit(s) behind {upstream} — proceeding "
                      "under --allow-stale-base"
                      + (f"; {base_note}" if base_note else ""))
+    # F171: a transient/local-only branch (no upstream) or a non-default
+    # branch can be recorded as the loop base without a word — the operator
+    # only discovers it at gate time. Warn (never stop: the loop still
+    # dogfoods the ref the operator named) when the resolved base has no
+    # upstream or differs from the repo's default branch (origin/HEAD, when
+    # resolvable). The warning rides init's output AND state.json so a later
+    # reader of the run's init record sees it too.
+    warn_parts = []
+    if not upstream:
+        warn_parts.append(
+            f"base '{base}' has no upstream — it may be a transient/"
+            "local-only branch recorded as the loop base")
+    rc_d, dflt = git(repo, "symbolic-ref", "--short",
+                     "refs/remotes/origin/HEAD")
+    default_branch = dflt.split("/", 1)[-1] if rc_d == 0 and dflt else None
+    if default_branch and base != default_branch:
+        warn_parts.append(
+            f"base '{base}' is not the repo's default branch "
+            f"('{default_branch}' per origin/HEAD)")
+    base_warning = None
+    if warn_parts:
+        base_warning = ("; ".join(warn_parts)
+                        + " — the loop dogfoods the ref you named; this is "
+                          "a warning, not a stop (F171)")
     # Sweep merged integration branches from prior runs (issue #6) BEFORE
     # cutting this run's branch — the fresh branch starts at the base tip, so
     # doing this after would make it a deletion candidate. The next init for a
@@ -1379,6 +1403,10 @@ def cmd_init(args):
         # reader can see exactly what was dogfooded (issue #2).
         "base_tip": "local", "base_upstream": upstream,
         "base_behind": n_behind,
+        # F171: init's non-fatal base warning (no upstream / non-default
+        # branch), kept in the run's init record — None when the base looked
+        # ordinary.
+        "init_warning": base_warning,
         # Host fixture (spec-host-snapshot): the pinned clone every drive
         # sources from, and its HEAD. None for a hostless target. After init
         # the live host is out of scope — never read (except the finish drift
@@ -1399,6 +1427,8 @@ def cmd_init(args):
                  + (f", {n_behind} behind {upstream}" if n_behind else "")
                  + f") in worktree {worktree}; cap={cap} phase={args.phase}"
                  + (f" — {base_note}" if base_note else ""))
+    if base_warning:
+        audit(state, f"init WARNING: {base_warning}")
     if host:
         audit(state, f"host fixture pinned @ {host_base_sha[:12]} from {host} "
                      f"-> {host_fixture_path}"
@@ -1421,7 +1451,8 @@ def cmd_init(args):
     # base_upstream is the F100/F103 footgun.
     out({"run": run, "integration_branch": integration, "worktree": worktree,
          "base": base, "base_sha": base_sha, "base_upstream": upstream,
-         "base_behind": n_behind, "branch_cleanup": cleaned,
+         "base_behind": n_behind, "warning": base_warning,
+         "branch_cleanup": cleaned,
          "host_fixture_path": host_fixture_path, "host_base_sha": host_base_sha,
          "host_freshness": host_note,
          "entry_fixtures": pinned_fixtures or None,
@@ -2001,11 +2032,33 @@ def cmd_iter_start(args):
             time.time() - state["wall_start"] >= state["wall_limit_s"]:
         breaker(state, "wall-time limit exceeded")
     head = _worktree_head(state)
+    # F152: the breaker message states its own scope — it watches the LOOP
+    # WORKTREE's HEAD and dirty state only, never the base repo (base commits
+    # are out of scope after init — spec-host-snapshot).
     if head != state["head_expected"]:
         breaker(state, f"external modification of the integration worktree "
-                       f"(HEAD {head} != expected {state['head_expected']})")
+                       f"(HEAD {head} != expected {state['head_expected']}) — "
+                       f"this breaker watches the loop worktree's HEAD and "
+                       f"dirty state only, never the base repo")
     if not _clean(state):
-        breaker(state, "external modification: worktree not clean at iteration start")
+        breaker(state, "external modification: worktree not clean at "
+                       "iteration start — this breaker watches the loop "
+                       "worktree's HEAD and dirty state only, never the "
+                       "base repo")
+    # F191: the base ref is only ever needed again at the gate (gate-check/
+    # gate-pr/gate-push), so a base deleted or renamed mid-run used to stay
+    # silent until delivery. Warn here — never a breaker: the base is out of
+    # scope after init (spec-host-snapshot) and the run can proceed.
+    warning = None
+    rc_b, _ = git(state["loop_repo"], "rev-parse", "--verify",
+                  f"{state['base']}^{{commit}}")
+    if rc_b != 0:
+        warning = (f"recorded base ref '{state['base']}' no longer resolves "
+                   "in the loop repo — the run continues (the base is out of "
+                   "scope after init), but the gate (gate-check/gate-pr/"
+                   "gate-push) will need it; restore the branch before "
+                   "delivery (F191)")
+        audit(state, f"WARNING: {warning}")
     n = len(state["iterations"]) + 1
     state["iterations"].append({
         "n": n, "start": head, "end": None, "phase": "started", "removed": [],
@@ -2018,7 +2071,7 @@ def cmd_iter_start(args):
     })
     save_state(state)
     audit(state, f"iter {n}: start @ {head[:12]}")
-    out({"ok": True, "iteration": n, "start_sha": head})
+    out({"ok": True, "iteration": n, "start_sha": head, "warning": warning})
 
 
 def cmd_iter_verify(args):
@@ -2552,6 +2605,25 @@ def cmd_gate_push(args):
     out({"pushed": True, "remote": remote, "ref": upstream, "base_sha": head})
 
 
+def _gate_pr_recovery(integ, base):
+    """The documented recovery for ANY gate-pr failure (F192): the command is
+    idempotent, so the operator can finish the delivery by hand and re-run."""
+    return (f"hand-create the PR `{integ} -> {base}` on the forge, then "
+            "re-run gate-pr — it is idempotent and will adopt the existing "
+            "PR")
+
+
+def _classify_gate_pr_failure(err):
+    """Best-effort cause classification from gh/git stderr (F192): the raw
+    text stays in the payload; this only names the likely bucket."""
+    e = (err or "").lower()
+    if "base" in e and any(t in e for t in
+                           ("not found", "does not exist", "invalid",
+                            "no such", "unknown", "must be a branch")):
+        return "base ref not found on forge"
+    return "other"
+
+
 def cmd_gate_pr(args):
     """Deliver a finished run's review material as ONE Draft PR
     (spec-tanuki-loop "PR-protected targets"). For a base branch that refuses
@@ -2616,7 +2688,13 @@ def cmd_gate_pr(args):
     if rc_p != 0:
         audit(state, f"gate-pr: push of '{integ}' to '{remote}' failed "
                      f"(not forced): {err}")
+        # F192: a failure names what was attempted (base + integration
+        # branch), the likely cause, and the documented recovery — never just
+        # the raw stderr.
         out({"created": False, "pushed": False,
+             "base": base, "integration_branch": integ,
+             "cause": "push failure",
+             "recovery": _gate_pr_recovery(integ, base),
              "hint": f"push of '{integ}' to '{remote}' failed (not forced; "
                      "the local branch is intact): " + err})
         sys.exit(3)
@@ -2661,7 +2739,13 @@ def cmd_gate_pr(args):
                      "--head", integ, "--title", title, "--body", body)
         if rc_c != 0:
             audit(state, f"gate-pr: `gh pr create` failed: {o}")
+            # F192: name the attempted refs, classify the cause from the gh
+            # stderr (best-effort), and state the recovery — the generic gh
+            # text alone left the operator without a next action.
             out({"created": False, "pushed": True,
+                 "base": base, "integration_branch": integ,
+                 "cause": _classify_gate_pr_failure(o),
+                 "recovery": _gate_pr_recovery(integ, base),
                  "hint": "the branch is pushed but `gh pr create` failed — "
                          "local state is intact and gate-pr is idempotent; "
                          "fix the cause and re-run: " + o})
@@ -2670,14 +2754,49 @@ def cmd_gate_pr(args):
         tail = url.rstrip("/").rsplit("/", 1)[-1]
         pr = {"number": int(tail) if tail.isdigit() else None, "url": url}
         created = True
-    pr.update({"head_sha": head, "base": base, "draft": True,
+    # F193: a REUSED PR's base is the forge's fact, not local state's — the
+    # PR may have been re-targeted since delivery. Read baseRefName from the
+    # forge; fall back to state's base (with a note) only when the read fails.
+    pr_base, base_note, warning = base, None, None
+    if not created:
+        ref = str(pr.get("number") or pr.get("url") or "")
+        forge_base = None
+        rc_v, o = gh(repo, "pr", "view", ref, "--json",
+                     "baseRefName,headRefName")
+        if rc_v == 0 and o:
+            try:
+                forge_base = (json.loads(o) or {}).get("baseRefName")
+            except ValueError:
+                forge_base = None
+        if forge_base:
+            pr_base = forge_base
+            if forge_base != base:
+                warning = (f"the forge PR's base is '{forge_base}', not "
+                           f"state's recorded base '{base}' — recording the "
+                           "forge's value (the PR was re-targeted, or the "
+                           "base moved); review before merging (F193)")
+                audit(state, f"gate-pr WARNING: {warning}")
+        else:
+            base_note = (f"forge read of the PR's baseRefName failed — "
+                         f"falling back to state's recorded base '{base}' "
+                         "(F193)")
+    pr.update({"head_sha": head, "base": pr_base, "draft": True,
                "at": time.strftime("%Y-%m-%d %H:%M:%S")})
+    if base_note:
+        pr["base_note"] = base_note
     state["gate_pr"] = pr
     # The DELIVERY record — the loop's terminal fact (owner ruling 2026-07-17):
     # PR number, integration-tip SHA, and the base SHA at delivery. The loop
     # ends here; whether the PR merges is derived later (derive_settlement) by
     # whichever surface needs it, never restated by a human closing command.
-    rc_b, base_sha_now = git(repo, "rev-parse", base)
+    rc_b, base_sha_now = git(repo, "rev-parse", pr_base)
+    if rc_b != 0:
+        # F191: never write a null base_sha silently — name the missing ref.
+        w = (f"base ref '{pr_base}' does not resolve in the loop repo — "
+             "delivered.base_sha recorded as null; restore the branch so "
+             "settlement can be derived (F191)")
+        warning = f"{warning}; {w}" if warning else w
+        audit(state, f"gate-pr WARNING: {w}")
     state["delivered"] = {"pr": pr.get("number"), "url": pr.get("url"),
                           "head_sha": head,
                           "base_sha": base_sha_now if rc_b == 0 else None,
@@ -2690,7 +2809,7 @@ def cmd_gate_pr(args):
                  "(landed/pending/declined) is derived later from the forge "
                  "and the current base")
     out({"created": created, "reused": not created, "pushed": True,
-         "pr": pr, "delivered": state["delivered"],
+         "pr": pr, "delivered": state["delivered"], "warning": warning,
          "note": "delivered — the loop's boundary. The Human Gate is PR "
                  "approval + merge on the forge; the loop never merges, "
                  "polls, or waits. status/init/unresolved derive the "
@@ -2856,6 +2975,17 @@ def cmd_finish(args):
                      f"'{prev_finished['reason']}' at {prev_finished['at']} — "
                      f"re-finished as '{args.reason}'")
     out(payload)
+
+
+def _fmt_duration(seconds):
+    """Human duration with units for the dashboard (F190): `45s` under a
+    minute (never a bare `0m`), `4m32s` under an hour, `1h04m` beyond."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m{s % 60:02d}s"
+    return f"{s // 3600}h{(s % 3600) // 60:02d}m"
 
 
 def _fmt_ids(ids, cap=6):
@@ -3195,7 +3325,9 @@ def cmd_dashboard(args):
                 if lc["stop_reason"] == "unknown" else "")
             print(f"  latest run: {state['run']} · stop reason: {reason} · "
                   f"delivery: {_delivery_phrase(state, lc)} · "
-                  f"execution {int(lc['execution_s']) // 60}m")
+                  f"execution: {_fmt_duration(lc['execution_s'])} "
+                  "(frozen when the run closed; review/idle time not "
+                  "counted)")
             return
         if not _noted:
             emit_drift_note(state["target"], state.get("loop_repo"))
@@ -3311,11 +3443,15 @@ def cmd_dashboard(args):
                  # to mention rolled-back iterations without ever saying how
                  # many, so a reader could not tell where a nonzero count would
                  # show. Zero is stated too, so "none" is a fact, not a guess.
+                 # F190: real units, never a bare `0m`, and a frozen label
+                 # that explains itself (F188's "clock frozen at close" was
+                 # uninterpretable without the finish docstring).
                  f"  iterations: {n_done}/{state['cap']} consumed "
-                 f"({n_rolled_back} rolled back) · execution {elapsed // 60}m"
-                 # F188: "frozen" alone collided with the frozen-findings
-                 # count below — name what is frozen (the execution clock).
-                 + ("" if lifecycle["active"] else " (clock frozen at close)")]
+                 f"({n_rolled_back} rolled back) · execution: "
+                 f"{_fmt_duration(elapsed)}"
+                 + ("" if lifecycle["active"] else
+                    " (frozen when the run closed; review/idle time not "
+                    "counted)")]
         # F129: the same build-artifact warning `status` and `iter-verify`
         # surface, on the live screen — a cold operator monitoring only the
         # dashboard would otherwise miss regenerable output the loop's own
