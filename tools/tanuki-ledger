@@ -19,6 +19,10 @@ Usage:
       event line: {"run": <run-id>, "scenario": <slug>, "seq": <int>,
                    "type": "tool_error|note|result|…", "detail": <str>}
       (full field semantics: `ingest --help`)
+      Run ids must carry an 8-digit YYYYMMDD substring (e.g. 20260719-abc12):
+      chronological run ordering and compaction's elapsed-run tracking key on
+      that embedded date, and a dateless id sorts as the OLDEST run forever
+      (F172).
   tanuki-ledger --target <slug> ingest-note --text "<human feedback>"
   tanuki-ledger --target <slug> findings [--status open|proposed|accepted|dismissed]
   tanuki-ledger --target <slug> upsert-finding --title T --kind friction|papercut|gap \
@@ -194,7 +198,14 @@ def announce_new_target(target):
     callers must keep working)."""
     tdir = os.path.join(TANUKI_ROOT, target)
     if not os.path.isdir(tdir):
-        print(f"note: creating new target namespace {tdir}/", file=sys.stderr)
+        # F94: "creating" alone under-states the stakes — the namespace is
+        # MACHINE-WIDE, so a colliding slug from any other session shares
+        # (and can clobber) this state. Say so at creation time.
+        print(f"note: creating new target namespace {tdir}/ — this namespace "
+              f"is machine-wide, shared under $TANUKI_ROOT (default "
+              f"~/.tanuki/): any other session using --target {target} shares "
+              f"and can clobber it. Pick a distinctive slug for throwaway "
+              f"experiments.", file=sys.stderr)
 
 
 def save(target, ledger):
@@ -622,6 +633,15 @@ def cmd_promote(args, ledger):
         save(args.target, ledger)
         print(f"promoted -> proposed ({bar}): "
               f"{', '.join(f['id'] for f in out)}", file=sys.stderr)
+    # F199: under a lowered bar (e.g. --min-recurrence 1 --min-scenarios 1)
+    # a promoted finding still shows the priority its RAW counts earn — P3
+    # for a one-off. Say the two are independent, so the badge does not read
+    # as the tool ignoring the flags.
+    if out and (min_rec, min_scen) != (cfg["min_recurrence"],
+                                       cfg["min_scenarios"]):
+        print(f"note: priority (P1/P2/P3) is computed from raw recurrence/"
+              f"scenario counts and is unaffected by the adjusted bar — "
+              f"{PRIORITY_LEGEND}", file=sys.stderr)
     print(json.dumps(with_priority(out), indent=2, ensure_ascii=False))
 
 
@@ -1521,8 +1541,25 @@ def cmd_distill(args, ledger):
         return
     cands = distill_candidates(ledger, cfg)
     if args.list:
+        # F197: name the qualifying bar in the listing itself — a first-time
+        # caller must see WHY these items qualify without reading the source.
+        print(f"distill candidates: {len(cands)} finding(s) clearing the "
+              f"promotion bar in effect (recurrence >= "
+              f"{cfg['min_recurrence']} OR scenarios >= "
+              f"{cfg['min_scenarios']}), alive, not yet contributed",
+              file=sys.stderr)
+        # F196: the unconfigured listing must carry the configuration shape
+        # itself, not defer it to a separate --check run.
+        if block is None:
+            print('note: contribute_back is not configured — candidates are '
+                  'listed but nothing can be emitted; to enable, set '
+                  'contribute_back {"path": <staging dir>, "schema": '
+                  '<template file>} in ~/.tanuki/config.json or the scenarios '
+                  'file\'s "defaults" block', file=sys.stderr)
         print(json.dumps(
             {"configured": block is not None,
+             "min_recurrence": cfg["min_recurrence"],
+             "min_scenarios": cfg["min_scenarios"],
              "candidates": [{"id": f["id"], "title": f["title"],
                              "kind": f["kind"],
                              "recurrence": f.get("recurrence", 1),
