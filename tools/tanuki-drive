@@ -41,7 +41,9 @@ Per-scenario "model" must stay at or below model_ceiling (haiku < sonnet <
 opus; Fable/Mythos-class is above every ceiling; unknown names fail closed) —
 a frontier driver copes with the friction the run exists to surface.
 
---estimate prints the plan (scenarios, models, estimated cost from prior
+--estimate prints the plan (scenarios, models, per-scenario entry_fixture
+when one is declared — staged-state entry is approved at this gate, never
+discovered in the manifest (#204) — and estimated cost from prior
 manifests, falling back to est_cost_per_scenario_usd) as JSON and exits.
 Driving more than max_scenarios in one invocation requires --allow-extra.
 
@@ -1238,9 +1240,14 @@ def main():
     # Ceiling violations are usage errors: fail the whole invocation up front,
     # in --estimate and real runs alike, not scenario-by-scenario mid-run.
     try:
+        # entry_fixture rides on the plan (issue #204): a fixture-entered
+        # scenario starts from staged state, and the operator approving the
+        # fan-out must see that here, not discover it in the manifest.
         plan = [{"id": s["id"], "model": resolve_model(s, cfg, args.model),
                  "max_turns": s.get("max_turns", args.max_turns or cfg["max_turns"]),
-                 "decision_points": len(decision_pins(s))}
+                 "decision_points": len(decision_pins(s)),
+                 **({"entry_fixture": s["entry_fixture"]}
+                    if s.get("entry_fixture") else {})}
                 for s in scenarios]
     except RuntimeError as e:
         print(f"error: {e}", file=sys.stderr)
@@ -1294,7 +1301,9 @@ def main():
                      .get("drive_concurrency") or 1))
 
     def one(s):
-        print(f"driving {s['id']} …", flush=True)
+        fx = s.get("entry_fixture")
+        print(f"driving {s['id']}"
+              + (f" (entry fixture: {fx})" if fx else "") + " …", flush=True)
         try:
             r = drive_scenario(args, s, run_dir, cfg, prog)
         except (RuntimeError, OSError) as e:
