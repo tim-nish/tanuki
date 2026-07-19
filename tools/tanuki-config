@@ -71,6 +71,11 @@ Subcommands (JSON out with --json; human text default):
   --target T check --field F --value V
                                validate only — exit 0/2, writes nothing
 
+Environment: TANUKI_ROOT relocates the tanuki home (default ~/.tanuki) —
+every path this tool reads or writes resolves under it. This is the
+sandboxing/testing override: point it at a scratch directory and nothing
+touches the real home.
+
 Zero dependencies (stdlib + git for repo-path checks). Nothing is ever
 written into a target repository; the scenarios file is Tanuki-owned.
 """
@@ -364,19 +369,21 @@ def cmd_show(args):
         if top in data and top not in bound:
             read_only.append({"key": top, "value": data[top],
                               "source": "scenarios file"})
-    result = {"target": args.target, "declared": fields,
-              "suppressed": suppressed, "read_only": read_only}
+    result = {"target": args.target, "path": scen_path(args.target),
+              "declared": fields, "suppressed": suppressed,
+              "read_only": read_only}
     if args.json:
         out(result)
         return
     print(f"tanuki config — {args.target}")
+    print(f"  scenarios file: {scen_path(args.target)}")
     if not any(f["declaration"] == "declared" for f in fields):
         print("  no inputs declared — the target's scenarios file has no "
               "`inputs` block; the built-in catalog fields below stay "
               "editable, and hand-editing remains legal")
     for f in fields:
         print(f"  {f['field']:<20} = {f['value']!r:<32} [{f['source']}] "
-              f"({f['type']}, {f['scope']}, {f['declaration']})")
+              f"({f['type']}, {f['scope']})")
     for name in suppressed:
         print(f"  {name:<20} (suppressed catalog field — read-only; "
               "declared null in inputs)")
