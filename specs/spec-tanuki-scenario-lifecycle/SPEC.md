@@ -103,7 +103,23 @@ silent), in the status view, and — the moment that matters most — attached t
 the loop's convergence report (`record-cycle`), so a run cannot converge on a
 false quiet without the gap being named. The triggers themselves remain
 operator-invoked; surfacing changes where they are *seen*, never who fires
-them.
+them. Signal failure is explicit, never silent: when the advisory cannot be
+computed (broken sibling, pre-revision tool, bad JSON), the convergence
+report renders "scenario-generation advisory unavailable" naming the reason
+— non-blocking, but a broken signal must never read as zero drift.
+
+**Drift scope & matching (AMENDED 2026-07-19, #169 — operator ruled
+narrow-the-spec).** Feature-drift is computed over **statically enumerable
+surface only** — skills (`skills/*/SKILL.md`) and commands (`commands/*.md`).
+Decision points are struck from the drift definition: observed
+decision-point gaps are surfaced by `candidates` (trajectory-observed
+unexplored branches), never by drift — the two signals partition the space
+instead of overlapping it. Coverage matching is **exact or structured, never
+substring**: a surface is covered iff its name equals a scenario's `covers`
+tag (exact, case-insensitive) or appears as a whole `[a-z0-9_-]`-bounded
+token in a charter or prompt. Mention-as-coverage remains the stated
+heuristic limit: a charter that names a surface covers it, whether or not it
+exercises it.
 
 On any trigger the orchestrating
 session generates charter candidates from: the plugin's README, `skills/*/
