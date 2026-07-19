@@ -66,7 +66,10 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
                                  on convergence, attaches the scheduler's
                                  advisory generation-trigger signals (feature
                                  drift / empty unexplored pool) so a false
-                                 quiet is named, never silent (#168)
+                                 quiet is named, never silent; a signal that
+                                 cannot be computed renders an explicit
+                                 "advisory unavailable" state — non-blocking,
+                                 but failure never reads as zero drift (#168)
   defer --finding F --reason "…" append to the morning queue
   log --audit "…"                append to the audit artifact
   gate-check                     integration HEAD reachable from base after the merge
@@ -394,10 +397,12 @@ def generate_advisory(target):
     the moment they matter most — a loop declaring convergence (the false-quiet
     risk spec-tanuki-scenario-lifecycle §3 names). The arithmetic is owned by
     the sibling scheduler (`status` emits it as `advisories`); this only reads
-    and phrases it. Advisory means advisory: any failure — missing sibling,
-    old scheduler without advisories, bad JSON — degrades to None and can
-    never break record-cycle. Returns {"notes": [...], "generate": "..."} or
-    None when there is nothing to say."""
+    and phrases it. Non-blocking, never silent: a failure — missing sibling,
+    old scheduler without advisories, bad JSON — returns an explicit
+    {"unavailable": True, "reason": …} so a broken signal can never read as
+    zero drift, and it never raises, so it can never break record-cycle.
+    Returns {"notes": [...], "generate": "..."} when a signal fires, None
+    ONLY when the scheduler answered and there is genuinely nothing to say."""
     try:
         sched_tool = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "tanuki-scheduler")
@@ -405,8 +410,13 @@ def generate_advisory(target):
                             "status"], capture_output=True, text=True,
                            timeout=30)
         if r.returncode != 0:
-            return None
-        adv = json.loads(r.stdout).get("advisories") or {}
+            return {"unavailable": True,
+                    "reason": f"tanuki-scheduler status exited {r.returncode}"}
+        adv = json.loads(r.stdout).get("advisories")
+        if adv is None:
+            return {"unavailable": True,
+                    "reason": "scheduler status emits no advisories "
+                              "(pre-#168 tool)"}
         notes = []
         if adv.get("feature_drift"):
             names = ", ".join(f"{u['kind']} {u['name']}"
@@ -417,8 +427,9 @@ def generate_advisory(target):
         if not notes:
             return None
         return {"notes": notes, "generate": adv.get("generate")}
-    except Exception:
-        return None
+    except Exception as e:
+        return {"unavailable": True,
+                "reason": f"{type(e).__name__} reading scheduler status"}
 
 
 def cleanup_merged_integration_branches(repo, base, target):
@@ -2336,7 +2347,13 @@ def cmd_record_cycle(args):
                  f"patched={patched} quota_met={quota_met} "
                  f"quiet_streak={state['quiet_streak']}"
                  + (" -> CONVERGED" if converged else ""))
-    if advisory:
+    if advisory and advisory.get("unavailable"):
+        # Explicit, never silent (#168 revision): an unavailable signal must
+        # not read as zero drift — name the failure and the manual check.
+        audit(state, "converged; scenario-generation advisory unavailable "
+                     f"({advisory['reason']}) — this is NOT zero drift; "
+                     "check `tanuki-scheduler status` by hand")
+    elif advisory:
         audit(state, "converged, but: " + "; ".join(advisory["notes"])
                      + f" — consider `{advisory['generate']}`")
     out({"new_actionable": new_actionable, "patched": patched,
