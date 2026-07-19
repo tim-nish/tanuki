@@ -36,7 +36,7 @@ Argument handling ($ARGUMENTS):
 - `"<free text>"` (with or without a preceding `<target>`): an **ad-hoc
   scenario** — see "Ad-hoc scenarios" below. Disambiguation, in order: a
   **mode word** (`init`, `decide`, `status`, `history`, `view`, `mine`,
-  `ingest`, `generate`) always wins — the closed set above is reserved, so a target or
+  `ingest`, `generate`, `configure`) always wins — the closed set above is reserved, so a target or
   scenario sharing one of those names is addressed as `/tanuki <target>
   <mode>` (the mode word is only read in mode position, after the target);
   then an argument matching a configured target is a target; then one
@@ -103,6 +103,30 @@ Argument handling ($ARGUMENTS):
   Advisory and
   operator-invoked — never automatic, never during an unattended loop, and no
   tool mutates the matrix. No driving.
+
+- `<target> configure`: **declared-input configuration** (story 1.28 /
+  issue #172; contract: the "Host bindings & declared-input configuration"
+  spec section). A bare word — it does not drive. The flow, entirely over
+  `tanuki-config` (deterministic substrate; render, don't compute):
+  1. Render `tanuki-config --target <t> show` — effective configuration with
+     each value's source labeled; undeclared fields are read-only. With no
+     `inputs` block, show's one-line state is the whole answer plus a
+     pointer at declaring one — never a guess.
+  2. Pick the field to change via AskUserQuestion (declared fields only —
+     selection beats typing), then collect the new value.
+  3. `tanuki-config check --field F --value V` — typed validation; a
+     failure is relayed and the flow returns to step 2.
+  4. `tanuki-config set --field F --value V --dry-run` — show the resulting
+     change and the exact storage path; ask for approval. Decline at any
+     step ⇒ nothing was written.
+  5. On approval, `tanuki-config set --field F --value V` — if the field
+     declares a doctor, the exact command line is echoed before it runs
+     (the `test_cmd` posture) and its output is relayed verbatim; a failing
+     doctor blocks the persist by default. Overriding a failed doctor is
+     its own explicit question, never a silent retry
+     (`--override-doctor`).
+  Read-only until step 5; the backing JSON stays the source of truth and
+  hand-editing remains legal.
 
 ## Init (`/tanuki init` — the normal onboarding flow)
 

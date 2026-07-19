@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Fixture for the doctor hook + review-before-persist substrate (story 1.28 /
+# issue #172): a declared input may name an opaque, target-owned doctor
+# command. `set` echoes the exact command line, hands the candidate over via
+# generic env, relays output verbatim, and blocks persist on failure unless
+# --override-doctor. `set --dry-run` shows the change + storage path with
+# nothing written and no doctor run.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+cfg="$here/tanuki-config"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+C=("$cfg" --target t)
+
+# Target-owned doctor: approves values containing "good", rejects others,
+# and proves the env handoff by echoing what it received.
+doctor="$tmp/doctor.sh"
+cat > "$doctor" <<'EOF'
+#!/usr/bin/env bash
+echo "doctor-received field=$TANUKI_FIELD value=$TANUKI_VALUE target=$TANUKI_TARGET"
+[ -f "$TANUKI_SCENARIOS" ] || { echo "no scenarios path"; exit 3; }
+case "$TANUKI_VALUE" in *good*) exit 0;; *) echo "doctor-verdict: rejected"; exit 7;; esac
+EOF
+chmod +x "$doctor"
+
+canon="$TANUKI_ROOT/scenarios/t.scenarios.json"
+mkdir -p "$(dirname "$canon")"
+cat > "$canon" <<EOF
+{"target":"t",
+ "inputs":{"label":{"type":"string","scope":"per-target","binds":"label",
+                    "doctor":"$doctor"}},
+ "scenarios":[{"id":"s1","charter":"c","prompt":"p"}]}
+EOF
+
+# --- dry-run: change + storage path shown, nothing written, doctor NOT run ----
+d="$("${C[@]}" set --field label --value good-1 --dry-run 2>"$tmp/err")"
+echo "$d" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["dry_run"] is True and r["new"] == "good-1" and r["old"] is None, r
+assert r["path"].endswith("t.scenarios.json"), r
+assert r["doctor"], "dry-run must name the doctor that WOULD run"
+' || fail "dry-run must show old/new + exact storage path"
+grep -q "doctor-received" "$tmp/err" && fail "dry-run must not run the doctor" || true
+python3 -c '
+import json; d = json.load(open("'"$canon"'")); assert "label" not in d
+' || fail "dry-run must write nothing"
+pass "dry-run: review substrate — change + path shown, no write, no doctor"
+
+# --- passing doctor: command echoed, env handoff proven, value persisted -------
+"${C[@]}" set --field label --value good-2 2>"$tmp/err" > /dev/null \
+  || fail "a passing doctor must allow the persist"
+grep -q "doctor: $doctor" "$tmp/err" \
+  || fail "the exact doctor command line must be echoed before it runs"
+grep -q "doctor-received field=label value=good-2 target=t" "$tmp/err" \
+  || fail "doctor output must be relayed verbatim (and env handoff must work)"
+python3 -c '
+import json; d = json.load(open("'"$canon"'")); assert d["label"] == "good-2", d
+' || fail "the value must persist after a passing doctor"
+pass "passing doctor: command echoed, output relayed, value persisted"
+
+# --- failing doctor blocks persist by default ----------------------------------
+"${C[@]}" set --field label --value bad-1 2>"$tmp/err" \
+  && fail "a failing doctor must block the persist" || true
+grep -q "doctor-verdict: rejected" "$tmp/err" \
+  || fail "the doctor's own verdict must be relayed verbatim"
+grep -q "exit 7" "$tmp/err" || fail "the block must name the doctor exit code"
+grep -q -- "--override-doctor" "$tmp/err" \
+  || fail "the block must name the explicit override path"
+python3 -c '
+import json; d = json.load(open("'"$canon"'")); assert d["label"] == "good-2", d
+' || fail "a doctor-blocked set must leave the stored value untouched"
+pass "failing doctor: persist blocked, verdict + exit code + override named"
+
+# --- explicit override persists despite the failing doctor ---------------------
+"${C[@]}" set --field label --value bad-2 --override-doctor 2>"$tmp/err" > /dev/null \
+  || fail "--override-doctor must persist despite the failure"
+grep -q "persisting anyway" "$tmp/err" || fail "the override must be loud"
+python3 -c '
+import json; d = json.load(open("'"$canon"'")); assert d["label"] == "bad-2", d
+' || fail "override must persist the value"
+pass "override: explicit flag persists, loudly — never the default"
+
+# --- a field with no doctor persists with no doctor noise ----------------------
+python3 -c '
+import json; p = "'"$canon"'"; d = json.load(open(p))
+d["inputs"]["plain"] = {"type": "string", "binds": "plain"}
+json.dump(d, open(p, "w"))
+'
+"${C[@]}" set --field plain --value v 2>"$tmp/err" > /dev/null
+grep -q "doctor" "$tmp/err" && fail "no doctor declared -> no doctor output" || true
+pass "no doctor declared: set is quiet about doctors"
+
+# --- malformed doctor declaration fails closed ---------------------------------
+python3 -c '
+import json; p = "'"$canon"'"; d = json.load(open(p))
+d["inputs"]["label"]["doctor"] = 42; json.dump(d, open(p, "w"))
+'
+"${C[@]}" show 2>"$tmp/err" && fail "non-string doctor must fail closed" || true
+grep -q "doctor" "$tmp/err" || fail "the defect must name the doctor key"
+pass "malformed doctor declaration -> fail closed, defect named"
+
+echo "all checks passed"
