@@ -1153,6 +1153,217 @@ def cmd_dispose(args):
               "decisions only; evidence is in reconcile.json.")
 
 
+# ── Finding-level, per-site behavior re-evaluation ───────────────────────────
+# spec-tanuki-loop (#210): "a finding is not marked resolved or superseded
+# until its behavior is closed at EVERY known site." Story 1.39 (#212) — the
+# F77 half-fix guard: hunk-level comparison against *presence of a fix* is
+# not *behavior closed at every site*. Sites are recorded once (that
+# enumeration is judgment, done in the reconcile sitting via `site-record`);
+# evaluation of the recorded probes is mechanical, auditable, and
+# re-derivable forever after. Fail closed: a finding with no recorded sites,
+# or a site whose probe cannot execute, is `needs-owner` — never assumed
+# closed.
+
+def _reconcile_state_path(target):
+    return os.path.join(TANUKI_ROOT, target, "reconcile.json")
+
+
+def _load_reconcile_state(target):
+    p = _reconcile_state_path(target)
+    if os.path.exists(p):
+        try:
+            with open(p, encoding="utf-8") as f:
+                return json.load(f)
+        except (ValueError, OSError):
+            pass
+    return {}
+
+
+def _save_reconcile_state(target, state):
+    p = _reconcile_state_path(target)
+    if not os.path.isdir(os.path.dirname(p)):
+        return None
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+    os.replace(tmp, p)
+    return p
+
+
+def _probe_site(wt, site):
+    """Evaluate one site's closure probe against the tree at `wt`.
+
+    Returns (closed: bool|None, evidence: str). None = the probe could not
+    be executed at all — that is MISSING evidence and fails closed upstream,
+    distinct from a probe that ran and found the behavior live."""
+    probe = site.get("probe") or {}
+    kind = probe.get("type")
+    if kind == "content":
+        f = probe.get("file")
+        want, absent = probe.get("contains"), probe.get("absent")
+        if not f or (want is None and absent is None):
+            return None, "malformed content probe (needs file + contains/absent)"
+        path = os.path.join(wt, f)
+        try:
+            text = open(path, encoding="utf-8").read() \
+                if os.path.exists(path) else ""
+        except (OSError, UnicodeDecodeError) as e:
+            return None, f"unreadable file {f}: {e}"
+        if want is not None:
+            ok = want in text
+            return ok, (f"'{want}' {'present' if ok else 'ABSENT'} in {f}")
+        ok = absent not in text
+        return ok, (f"'{absent}' {'absent' if ok else 'STILL PRESENT'} "
+                    f"in {f}")
+    if kind == "cmd":
+        cmd = probe.get("run")
+        if not cmd:
+            return None, "malformed cmd probe (no run)"
+        try:
+            r = subprocess.run(cmd, shell=True, cwd=wt,
+                               capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return None, f"probe could not execute: {e}"
+        if r.returncode in (126, 127):
+            return None, (f"probe could not execute (rc {r.returncode}): "
+                          f"{(r.stderr or '').strip()[:120]}")
+        ok = r.returncode == 0
+        return ok, (f"`{cmd}` rc {r.returncode} "
+                    f"({'closed' if ok else 'behavior still reproduces'})")
+    return None, f"unknown probe type {kind!r}"
+
+
+def cmd_site_record(args):
+    """Record one manifestation site of a finding, with the probe that
+    establishes closure. The enumeration is the sitting's judgment; storing
+    it makes every later verdict mechanical and re-derivable."""
+    st = _load_reconcile_state(args.target)
+    findings = st.setdefault("findings", {})
+    rec = findings.setdefault(args.finding, {"sites": []})
+    if args.contains or args.absent:
+        if not args.file:
+            die("site-record: a content probe needs --file")
+        probe = {"type": "content", "file": args.file}
+        if args.contains:
+            probe["contains"] = args.contains
+        else:
+            probe["absent"] = args.absent
+    elif args.run:
+        probe = {"type": "cmd", "run": args.run}
+    else:
+        die("site-record: give a probe — --contains/--absent (with --file) "
+            "or --run")
+    sites = [s for s in rec["sites"] if s["site"] != args.site]
+    sites.append({"site": args.site, "probe": probe})
+    rec["sites"] = sorted(sites, key=lambda s: s["site"])
+    # A re-recorded site invalidates any earlier verdict — it must be
+    # re-derived, never carried over a changed probe set.
+    rec.pop("verdict", None)
+    if not _save_reconcile_state(args.target, st):
+        die("site-record: no state directory for this target (run init)")
+    out({"finding": args.finding, "sites": rec["sites"]})
+
+
+def _cited_finding_ids(rows):
+    ids = set()
+    for r in rows:
+        for c in r["commits"]:
+            for x in c["cites_findings"]:
+                ids.add(x["id"])
+    return ids
+
+
+def cmd_reevaluate(args):
+    """Re-evaluate findings against CURRENT base behavior, per site.
+
+    Verdicts: resolved / superseded (closed at EVERY known site — superseded
+    when the ledger already carries it accepted-and-tombstoned),
+    still-applicable-at-remaining-sites (with the live sites named), or
+    needs-owner (no sites recorded, or a probe that could not run — fail
+    closed, never assumed closed)."""
+    import tempfile as _tf
+    repo = _loop_repo_for(args.target, getattr(args, "loop_repo", None))
+    if not repo or not os.path.isdir(repo):
+        die("reevaluate: no loop repo (run init)")
+    base, base_sha = resolve_base(repo, getattr(args, "base", None))
+    st = _load_reconcile_state(args.target)
+    findings = st.setdefault("findings", {})
+    ids = set(findings)
+    if not args.finding:
+        rows = unresolved_branches(repo, args.target, base)
+        ids |= _cited_finding_ids(rows)
+    else:
+        ids = {args.finding}
+    statuses = {c["id"]: c for c in
+                _cited_findings(args.target, " ".join(sorted(ids)))}
+    wt, results = None, {}
+    try:
+        wt = _tf.mkdtemp(prefix="tanuki-reeval-")
+        rc, msg = git(repo, "worktree", "add", "--detach", wt, base)
+        if rc != 0:
+            die(f"reevaluate: could not create a work tree at {base}: {msg}")
+        for fid in sorted(ids):
+            rec = findings.setdefault(fid, {"sites": []})
+            sites = rec.get("sites") or []
+            if not sites:
+                verdict = {"verdict": "needs-owner",
+                           "reason": "no known sites recorded — closure "
+                                     "cannot be assumed (fail closed); "
+                                     "record them with site-record"}
+            else:
+                evaluated, live, unknown = [], [], []
+                for s in sites:
+                    closed, ev = _probe_site(wt, s)
+                    evaluated.append({"site": s["site"], "probe": s["probe"],
+                                      "closed": closed, "evidence": ev})
+                    if closed is None:
+                        unknown.append(s["site"])
+                    elif not closed:
+                        live.append(s["site"])
+                if unknown:
+                    verdict = {"verdict": "needs-owner",
+                               "reason": "probe(s) could not execute at: "
+                                         + ", ".join(unknown)}
+                elif live:
+                    verdict = {"verdict":
+                               "still-applicable-at-remaining-sites",
+                               "remaining_sites": live}
+                else:
+                    led = statuses.get(fid) or {}
+                    verdict = {"verdict": ("superseded"
+                                           if (led.get("status") == "accepted"
+                                               and led.get("tombstoned"))
+                                           else "resolved")}
+                verdict["sites"] = evaluated
+            verdict.update(evaluated_against=f"{base}@{base_sha[:12]}",
+                           ledger_status=statuses.get(fid))
+            rec["verdict"] = verdict
+            results[fid] = {"sites": rec.get("sites", []), **verdict}
+    finally:
+        if wt:
+            git(repo, "worktree", "remove", "--force", wt)
+            git(repo, "worktree", "prune")
+    _save_reconcile_state(args.target, st)
+    payload = {"target": args.target, "base": base, "findings": results}
+    if args.json:
+        out(payload)
+        return
+    print(f"reevaluate — {args.target} (against {base})")
+    if not results:
+        print("  no findings to re-evaluate — none cited, none with "
+              "recorded sites")
+    for fid, r in results.items():
+        print(f"  {fid}  {r['verdict']}"
+              + (" — live at: " + ", ".join(r["remaining_sites"])
+                 if r.get("remaining_sites") else "")
+              + (f" — {r['reason']}" if r.get("reason") else ""))
+        for s in (r.get("sites") or []):
+            if isinstance(s, dict) and "closed" in s:
+                mark = {True: "closed", False: "LIVE",
+                        None: "unevidenced"}[s["closed"]]
+                print(f"      {s['site']:<24} {mark:<12} {s['evidence']}")
+
+
 def resolve_loop_config(args):
     """Per-target loop settings from the scenarios file's "loop" block, with
     CLI flags as per-run overrides — the single resolution path shared by
@@ -4368,6 +4579,52 @@ def main():
     sp.add_argument("--base", default=None)
     sp.add_argument("--json", action="store_true")
     sp.add_argument("--loop-repo", default=None)
+    sp = sub.add_parser(
+        "site-record",
+        help="record one manifestation site of a finding with the probe "
+             "that establishes closure (the reconcile sitting's judgment, "
+             "stored so every later verdict is mechanical)",
+        description=(
+            "Per-site finding closure (spec-tanuki-loop #210, story 1.39/"
+            "#212): a finding is resolved or superseded only when its "
+            "behavior is closed at EVERY known site. Enumerating the sites "
+            "is judgment — this stores that judgment once, with a "
+            "deterministic closure probe per site (content: --file with "
+            "--contains/--absent; behavior: --run, rc 0 = closed), so "
+            "`reevaluate` can re-derive the verdict forever after. "
+            "Re-recording a site invalidates any earlier verdict."))
+    sp.add_argument("--finding", required=True)
+    sp.add_argument("--site", required=True,
+                    help="site name (e.g. the seam: cmd_journal)")
+    sp.add_argument("--file", default=None)
+    sp.add_argument("--contains", default=None,
+                    help="closed when FILE contains this string")
+    sp.add_argument("--absent", default=None,
+                    help="closed when FILE does NOT contain this string")
+    sp.add_argument("--run", default=None,
+                    help="closed when this command exits 0 in the base tree")
+    sp = sub.add_parser(
+        "reevaluate",
+        help="re-evaluate findings against current base behavior, per "
+             "recorded site; fail closed when sites are unknown",
+        description=(
+            "The finding-level counterpart to `dispose` (story 1.39/#212; "
+            "guards the F77 half-fix). Evaluates every recorded site's "
+            "probe against the current base: resolved/superseded ONLY when "
+            "closed at every known site (superseded when the ledger holds "
+            "the finding accepted-and-tombstoned), otherwise "
+            "still-applicable-at-remaining-sites with the live sites "
+            "named. A finding with no recorded sites, or a probe that "
+            "cannot execute, is needs-owner — never assumed closed. "
+            "Closure evidence persists per site in reconcile.json, "
+            "auditable and re-derivable."))
+    sp.add_argument("--finding", default=None,
+                    help="restrict to one finding (default: all findings "
+                         "with recorded sites plus all findings cited by "
+                         "unresolved branches)")
+    sp.add_argument("--base", default=None)
+    sp.add_argument("--json", action="store_true")
+    sp.add_argument("--loop-repo", default=None)
 
     args = p.parse_args()
     {"init": cmd_init, "doctor": cmd_doctor,
@@ -4379,7 +4636,9 @@ def main():
      "gate-pr": cmd_gate_pr, "issue-get": cmd_issue_get,
      "issue-put": cmd_issue_put, "policy": cmd_policy, "finish": cmd_finish,
      "dashboard": cmd_dashboard, "status": cmd_status,
-     "unresolved": cmd_unresolved, "dispose": cmd_dispose}[args.cmd](args)
+     "unresolved": cmd_unresolved, "dispose": cmd_dispose,
+     "site-record": cmd_site_record,
+     "reevaluate": cmd_reevaluate}[args.cmd](args)
 
 
 if __name__ == "__main__":
