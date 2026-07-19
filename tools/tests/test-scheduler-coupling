@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Fixture for host-coupling detection (story 1.32 / issue #173): the
+# deterministic, read-only detector walks scenario prompts + host_setup +
+# fixture declarations and classifies each scenario portable / bound /
+# host-coupled, naming every coupled assumption (literal paths resolving in
+# the current host, SHA pins, single-host entry fixtures). Rendered through
+# the existing history/status surfaces (#168 rule) — never a new door, never
+# a write, never an enforcement (that's 1.33).
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+S=("$here/tanuki-scheduler" --target t)
+
+host="$tmp/host-a"; mkdir -p "$host/specs"; echo x > "$host/specs/qa.md"
+
+canon="$TANUKI_ROOT/scenarios/t.scenarios.json"
+mkdir -p "$(dirname "$canon")"
+cat > "$canon" <<EOF
+{"target":"t",
+ "hosts":{"a":"$host","b":"$tmp/host-b"},
+ "host_binding":"a",
+ "bindings":{"subject":{"a":"specs/qa.md","b":"docs/spec.md"},
+             "half":{"a":"only-a.md"}},
+ "entry_fixtures":{"fx-single":{"paths":["work/"]},
+                   "fx-perhost":{"hosts":{"a":{"paths":["wa/"]},
+                                          "b":{"paths":["wb/"]}}}},
+ "scenarios":[
+   {"id":"portable","charter":"c","prompt":"Review {subject} carefully."},
+   {"id":"bound","charter":"c","prompt":"Use {half} for this."},
+   {"id":"coupled-path","charter":"c","prompt":"Open specs/qa.md and edit."},
+   {"id":"coupled-sha","charter":"c","prompt":"Pin at 0e12174 exactly.",
+    "host_setup":["echo hi"]},
+   {"id":"coupled-fixture","charter":"c","prompt":"Go {subject}.",
+    "entry_fixture":"fx-single"},
+   {"id":"perhost-fixture","charter":"c","prompt":"Go {subject}.",
+    "entry_fixture":"fx-perhost"}]}
+EOF
+
+h="$("${S[@]}" history --json)"
+echo "$h" | python3 -c '
+import json, sys
+by = {c["scenario"]: c for c in json.load(sys.stdin)["host_coupling"]}
+assert by["portable"]["class"] == "portable", by["portable"]
+assert by["portable"]["bindings_referenced"] == ["subject"], by["portable"]
+assert by["bound"]["class"] == "bound" \
+    and by["bound"]["underdeclared_bindings"] == ["half"], by["bound"]
+assert by["coupled-path"]["class"] == "host-coupled" \
+    and any("specs/qa.md" in a for a in by["coupled-path"]["assumptions"]), \
+    by["coupled-path"]
+assert by["coupled-sha"]["class"] == "host-coupled" \
+    and any("0e12174" in a for a in by["coupled-sha"]["assumptions"]), \
+    by["coupled-sha"]
+assert by["coupled-fixture"]["class"] == "host-coupled" \
+    and any("fx-single" in a for a in by["coupled-fixture"]["assumptions"]), \
+    by["coupled-fixture"]
+assert by["perhost-fixture"]["class"] == "portable", \
+    "a per-host fixture set is not single-host state: %r" % by["perhost-fixture"]
+' || fail "classification must be portable/bound/host-coupled with named assumptions"
+pass "classification: three values, every coupled assumption named"
+
+# --- rendered through existing surfaces, honestly ------------------------------
+t_out="$("${S[@]}" history)"
+echo "$t_out" | grep -q "coupling coupled-path.*host-coupled" \
+  || fail "history text must render the coupled scenario"
+echo "$t_out" | grep -q "will not survive a host change" \
+  || fail "host-coupled must carry the survival warning"
+echo "$t_out" | grep -q "coupling portable" \
+  && fail "portable scenarios must not be noise in the text render" || true
+"${S[@]}" status | python3 -c '
+import json, sys
+c = json.load(sys.stdin)["host_coupling"]
+assert c == {"portable": 2, "bound": 1, "host-coupled": 3}, c
+' || fail "status must summarize the classification"
+pass "rendered via history/status — no new door"
+
+# --- read-only ------------------------------------------------------------------
+[ ! -e "$TANUKI_ROOT/t/scheduler.json" ] \
+  || fail "the detector must never write scheduler state"
+pass "read-only: reports, never writes or blocks"
+
+# --- hostless target degrades to silence ---------------------------------------
+cat > "$TANUKI_ROOT/scenarios/h.scenarios.json" <<'EOF'
+{"target":"h","scenarios":[{"id":"s1","charter":"c","prompt":"do a thing"}]}
+EOF
+"$here/tanuki-scheduler" --target h history --json | python3 -c '
+import json, sys
+assert json.load(sys.stdin)["host_coupling"] == []
+' || fail "a hostless target has nothing to couple to"
+pass "hostless: degrade to silence, never a crash"
+
+echo "all checks passed"

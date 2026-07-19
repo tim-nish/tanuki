@@ -810,6 +810,100 @@ def feature_drift(target):
     return {"uncovered": uncovered, "generate": generate}
 
 
+SHA_PIN = re.compile(r"\b[0-9a-f]{7,40}\b")
+BINDING_TOKEN = re.compile(r"\{([a-z][a-z0-9_]*)\}")
+
+
+def host_coupling(target):
+    """Deterministic host-coupling detection (story 1.32 / #173), READ-ONLY:
+    walk each scenario's prompt + host_setup + fixture declarations for
+    host-coupled assumptions and classify it:
+
+      portable      — only declared bindings (or nothing host-shaped at all)
+      bound         — references a per-host binding that lacks values for at
+                      least one declared host (portable once declared)
+      host-coupled  — literal paths that resolve in the current host,
+                      SHA-pinned pointers, or an entry fixture whose
+                      committed artifacts are single-host
+
+    This walks the same charter/prompt/host_setup corpus as feature_drift
+    (#169's whole-token posture — detection is token-shaped, never loose
+    substrings). Advisory and read-only: it reports, it never blocks or
+    filters (plan-time enforcement is the 1.33 compat check). A hostless
+    target (no `host`, no `hosts`) has nothing to couple to — degrade to
+    []. Rendered through the existing history/status surfaces, never a new
+    door (the #168 Surfacing rule)."""
+    scen_path = os.path.join(TANUKI_ROOT, "scenarios",
+                             f"{target}.scenarios.json")
+    try:
+        data = read_json(scen_path, None)
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    hosts = data.get("hosts") if isinstance(data.get("hosts"), dict) else {}
+    host_path = None
+    sel = data.get("host_binding")
+    if len(hosts) >= 2 and sel in hosts:
+        host_path = hosts[sel]
+    elif data.get("host"):
+        host_path = data["host"]
+    if not host_path and not hosts:
+        return []   # hostless: nothing to couple to
+    host_abs = os.path.expanduser(host_path) if host_path else None
+    bindings = (data.get("bindings")
+                if isinstance(data.get("bindings"), dict) else {})
+    declared_hosts = set(hosts) if len(hosts) >= 2 else set()
+    registry = (data.get("entry_fixtures")
+                if isinstance(data.get("entry_fixtures"), dict) else {})
+
+    report = []
+    for s in data.get("scenarios", []):
+        texts = [s.get("prompt") or ""] + [c for c in (s.get("host_setup")
+                                                       or [])
+                                           if isinstance(c, str)]
+        assumptions, referenced = [], set()
+        for text in texts:
+            for name in BINDING_TOKEN.findall(text):
+                if name in bindings:
+                    referenced.add(name)
+            for pin in sorted(set(SHA_PIN.findall(text))):
+                assumptions.append(f"SHA-pinned pointer '{pin}'")
+            if host_abs:
+                for tok in text.split():
+                    frag = tok.strip("\"'`,;:()[]{}").rstrip(".")
+                    if "/" not in frag or frag.startswith(("http:", "https:")):
+                        continue
+                    if os.path.exists(os.path.join(host_abs, frag)):
+                        assumptions.append(
+                            f"literal path '{frag}' resolves in the "
+                            "current host")
+        fx = s.get("entry_fixture")
+        if fx:
+            recipe = registry.get(fx) or {}
+            if isinstance(recipe.get("hosts"), dict):
+                pass   # per-host fixture sets (1.33) — not single-host
+            else:
+                assumptions.append(
+                    f"entry fixture '{fx}' is committed single-host state")
+        underdeclared = sorted(
+            n for n in referenced
+            if isinstance(bindings.get(n), dict)
+            and declared_hosts and not declared_hosts <= set(bindings[n]))
+        if assumptions:
+            cls = "host-coupled"
+        elif underdeclared:
+            cls = "bound"
+        else:
+            cls = "portable"
+        report.append({"scenario": s.get("id"), "class": cls,
+                       "assumptions": sorted(set(assumptions)),
+                       "bindings_referenced": sorted(referenced),
+                       **({"underdeclared_bindings": underdeclared}
+                          if underdeclared else {})})
+    return report
+
+
 def cmd_history(args):
     """Cross-run scenario monitoring from persisted artifacts only.
     Default: the repo-wide scenario-state summary + selection history.
@@ -958,10 +1052,14 @@ def cmd_history(args):
     # condition, don't leave emptiness silent (issue #168). Zero scenarios is
     # onboarding, not an empty pool.
     pool_empty = bool(rows) and not cover["unexplored"]
+    coupling = host_coupling(args.target)
     data = {"scenarios": rows, "coverage": cover,
             **({"binding": binding} if binding else {}),
             "feature_drift": drift,
             "unexplored_pool_empty": pool_empty,
+            # Story 1.32: portable / bound / host-coupled per scenario, from
+            # the deterministic detector — advisory, read-only.
+            "host_coupling": coupling,
             # Membership history (#170): when and why charters entered the
             # matrix. Legacy state without the list renders nothing — same
             # lossiness boundary as the yield-snapshot revision.
@@ -992,6 +1090,17 @@ def cmd_history(args):
                           for u in drift["uncovered"])
         print(f"  feature-drift: uncovered {names} — "
               f"run `{drift['generate']}` to charter it")
+    for c in coupling:
+        if c["class"] == "portable":
+            continue
+        why = "; ".join(c["assumptions"]
+                        or [f"binding '{b}' lacks values for some declared "
+                            "hosts" for b in
+                            c.get("underdeclared_bindings", [])])
+        print(f"  coupling {c['scenario']:<22} {c['class']}"
+              + (f" — {why}" if why else "")
+              + ("" if c["class"] != "host-coupled"
+                 else "  (will not survive a host change)"))
     for g in data["generations"]:
         if g.get("source") == "generate":
             counts = ", ".join(f"{k} {g[k]}" for k in ("proposed", "rejected")
@@ -1032,9 +1141,14 @@ def cmd_status(args):
                   "scenarios": len(v.get("scenarios", {}))}
               for b, v in (full.get("bindings") or {}).items()
               if b != binding} if binding else {}
+    coupling = host_coupling(args.target)
+    csum = {}
+    for c in coupling:
+        csum[c["class"]] = csum.get(c["class"], 0) + 1
     out({"runs_recorded": len(sched["runs_recorded"]),
          **({"binding": binding} if binding else {}),
          **({"other_bindings": others} if others else {}),
+         **({"host_coupling": csum} if coupling else {}),
          "by_state": {k: sorted(v) for k, v in sorted(by_state.items())},
          "scenarios": sched["scenarios"],
          "advisories": {"feature_drift": drift["uncovered"],
