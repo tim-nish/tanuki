@@ -252,7 +252,10 @@ The judgment half runs in two passes at different tiers:
 source, with one hard UX rule: **the human never classifies**. Feedback is
 handed to Tanuki as free-form natural language (in-session, or
 `/tanuki <target> --ingest "<feedback>"`); Tanuki records it *verbatim* as an
-event (`type: note, source: human`, run id `manual-<date>`) — mechanical,
+event (`type: note, source: human`, run id `manual-<YYYYMMDD>-<HHMMSS>` —
+per-note, so same-day notes stay distinct runs and elapsed-runs compaction
+advances across them; pre-existing `manual-<YYYYMMDD>` run dirs stay valid on
+read, no migration) — mechanical,
 unjudged — and the normal extraction + frontier-dedupe passes decide
 everything downstream: whether it yields a finding, its kind, and whether it
 bumps an existing finding's recurrence (a manual re-hit of a known friction

@@ -667,7 +667,9 @@ does exactly this:
 1. **Record verbatim (the tool, unjudged).**
    `tanuki-ledger --target <target> ingest-note --text "<feedback>"` writes
    the feedback as one Event (`type: note, source: human`, run id
-   `manual-<YYYYMMDD>`) into `events/manual-<date>/ingest.events.jsonl` and
+   `manual-<YYYYMMDD>-<HHMMSS>`, per-note so same-day notes stay distinct
+   runs; pre-existing `manual-<YYYYMMDD>` run dirs stay valid on read) into
+   `events/manual-<date>-<time>/ingest.events.jsonl` and
    the ledger, and prints the run id + events-file path. Nothing is
    classified here — the note is stored exactly as the user phrased it.
 2. **Mine it — extraction + dedupe (step 2, inline).** A single note is a
@@ -688,7 +690,7 @@ The one-way flow is preserved end to end: a manual note is an event, and it
 reaches a proposal only through the normal extraction → dedupe → promotion →
 human-gate path. Promoted items surface in the next brief / `decide` exactly
 like driven findings. Evidence pointers still bind every finding
-(`manual-<date>/ingest#<seq>`).
+(`manual-<date>-<time>/ingest#<seq>`).
 
 Hard rules, restated because they are the product:
 clones only; proposals only; one-way flow events → findings → proposals; the
