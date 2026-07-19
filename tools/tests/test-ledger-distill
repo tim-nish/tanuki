@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# Fixture for den-distill contribute-back (story 1.34 / issue #178,
+# spec-den-distill §1–§3): the deterministic emit tool. Asserts the doctor
+# check names defects; candidates are exactly the bar-clearing live findings
+# not yet contributed; emission renders the configured template mechanically
+# with pinned provenance and lands ONLY inside the staging directory; the
+# `contributed` marker dedupes forever (re-observation bumps recurrence,
+# never re-emits); unset config keeps the ledger byte-identical.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+L=("$here/tanuki-ledger" --target t)
+
+mkdir -p "$TANUKI_ROOT/scenarios" "$TANUKI_ROOT/t/events/r1" \
+         "$TANUKI_ROOT/t/events/r2" "$tmp/staging"
+cat > "$TANUKI_ROOT/t/events/r1/manifest.json" <<'EOF'
+{"run":"r1","target":"t","results":[{"scenario":"s1","status":"ok"}]}
+EOF
+cp "$TANUKI_ROOT/t/events/r1/manifest.json" "$TANUKI_ROOT/t/events/r2/manifest.json"
+
+template="$tmp/intake.md"
+cat > "$template" <<'EOF'
+---
+slug: {slug}
+created: {created}
+source_repo: {source_repo}
+perishable: {perishable}
+tags: [{tags}]
+---
+
+{body}
+
+Provenance: {provenance}
+EOF
+
+# Findings: F1 chronic (bar), F2 fresh (below bar), F3 broad (bar via
+# breadth), F4 dismissed (dead).
+"${L[@]}" init > /dev/null 2>&1 || true
+"${L[@]}" upsert-finding --title "Chronic lesson about retries" --kind friction \
+  --evidence "r1/s1#1" --note "Retries mask the real failure" > /dev/null
+"${L[@]}" upsert-finding --match F1 --evidence "r1/s1#2" > /dev/null
+"${L[@]}" upsert-finding --match F1 --evidence "r2/s1#3" > /dev/null
+"${L[@]}" upsert-finding --title "Fresh one-off" --kind papercut \
+  --evidence "r1/s1#4" > /dev/null
+"${L[@]}" upsert-finding --title "Broad pattern" --kind gap \
+  --evidence "r1/s1#5,r1/s2#1" > /dev/null
+"${L[@]}" upsert-finding --title "Dead end" --kind gap \
+  --evidence "r1/s1#6,r1/s2#2" > /dev/null
+"${L[@]}" set-status --id F4 --status dismissed > /dev/null 2>&1
+
+# --- unconfigured: check fails loudly; list still counts candidates ------------
+"${L[@]}" distill --check 2>"$tmp/err" && fail "unset config must fail --check" || true
+grep -q "not configured" "$tmp/err" || fail "--check must name the gap"
+"${L[@]}" distill --list | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["configured"] is False, r
+assert {c["id"] for c in r["candidates"]} == {"F1", "F3"}, r["candidates"]
+' || fail "candidates = bar-clearing live findings, enumerable unconfigured"
+"${L[@]}" distill --id F1 2>/dev/null && fail "emit must refuse when unconfigured" || true
+pass "unconfigured: check/emit refuse loudly; --list still enumerates (F1, F3)"
+
+# --- doctor check names each defect --------------------------------------------
+add_cb() { python3 -c '
+import json, os
+p = os.environ["TANUKI_ROOT"] + "/scenarios/t.scenarios.json"
+d = {"target": "t", "scenarios": [],
+     "defaults": {"contribute_back": {"path": "'"$1"'", "schema": "'"$2"'"}}}
+json.dump(d, open(p, "w"))
+'; }
+add_cb "$tmp/nope" "$template"
+"${L[@]}" distill --check 2>"$tmp/err" && fail "bad path must fail" || true
+grep -q "not an existing directory" "$tmp/err" || fail "path defect must be named"
+add_cb "$tmp/staging" "$tmp/no-template.md"
+"${L[@]}" distill --check 2>"$tmp/err" && fail "bad schema must fail" || true
+grep -q "does not resolve" "$tmp/err" || fail "schema defect must be named"
+add_cb "$tmp/staging" "$template"
+"${L[@]}" distill --check | python3 -c '
+import json, sys; assert json.load(sys.stdin)["ok"] is True
+' || fail "a valid block must pass the doctor"
+pass "doctor: each defect named; valid block passes"
+
+# --- emit: schema-conforming file, pinned provenance, staging-dir only ---------
+"${L[@]}" distill --id F1 > /dev/null || fail "emitting a bar-clearing candidate must work"
+f="$tmp/staging/tanuki-t-f1.md"
+[ -f "$f" ] || fail "exactly one staging file must land: $(ls "$tmp/staging")"
+grep -q "^slug: tanuki-t-f1$" "$f" || fail "slug token must render"
+grep -q "^source_repo: t$" "$f" || fail "source_repo must be the tanuki target"
+grep -q "tags: \[tanuki, friction\]" "$f" || fail "tags must render"
+grep -q "Chronic lesson about retries. Retries mask the real failure." "$f" \
+  || fail "body must be the candidate in full sentences"
+grep -q "Provenance: finding F1 (kind friction); recurrence 3; scenarios s1; evidence r1/s1#1" "$f" \
+  || fail "provenance must pin ids, counts, and pointers"
+[ "$(ls "$tmp/staging" | wc -l)" = 1 ] || fail "exactly ONE file per accept"
+find "$tmp" -name "*.md" -newer "$template" | grep -v "^$tmp/staging/" \
+  | grep -q . && fail "no write may land outside the staging directory" || true
+pass "emit: schema-conforming, provenance-pinned, staging-directory-only"
+
+# --- dedupe: contributed marker; recurrence bumps but never re-emits -----------
+python3 -c '
+import json, os
+led = json.load(open(os.environ["TANUKI_ROOT"] + "/t/ledger.json"))
+f = led["findings"][0]
+assert f["contributed"]["slug"] == "tanuki-t-f1", f.get("contributed")
+' || fail "the contributed marker must persist"
+"${L[@]}" distill --id F1 2>"$tmp/err" && fail "re-emit must be refused" || true
+grep -q "already contributed" "$tmp/err" || fail "the refusal must say why"
+"${L[@]}" upsert-finding --match F1 --evidence "r2/s1#9" > /dev/null
+python3 -c '
+import json, os
+f = json.load(open(os.environ["TANUKI_ROOT"] + "/t/ledger.json"))["findings"][0]
+assert f["recurrence"] == 4, "re-observation must still bump recurrence"
+' || fail "recurrence keeps counting after contribution"
+"${L[@]}" distill --list | python3 -c '
+import json, sys
+assert {c["id"] for c in json.load(sys.stdin)["candidates"]} == {"F3"}
+' || fail "a contributed finding must stay deduped-against"
+[ "$(ls "$tmp/staging" | wc -l)" = 1 ] || fail "still exactly one staging file"
+pass "dedupe: recurrence bumps, emission never repeats, F1 gone from candidates"
+
+# --- guardrails: below-bar refused; slug sanitized; no clobber -----------------
+"${L[@]}" distill --id F2 2>"$tmp/err" && fail "below-bar emit must be refused" || true
+grep -q "promotion bar" "$tmp/err" || fail "the bar must be named"
+"${L[@]}" distill --id F3 --slug '../escape' > /dev/null \
+  || fail "a hostile slug must sanitize, not fail the whole emit"
+[ -f "$tmp/staging/escape.md" ] || fail "sanitized slug must land in staging"
+[ ! -e "$tmp/escape.md" ] || fail "the allowlist must hold against ../"
+touch "$tmp/staging/dupe.md"
+python3 -c '
+import json, os
+p = os.environ["TANUKI_ROOT"] + "/t/ledger.json"
+led = json.load(open(p))
+led["findings"].append({"id": "F9", "title": "another", "kind": "gap",
+    "first_seen": "2026-07-19", "last_seen": "2026-07-19", "recurrence": 5,
+    "evidence": ["r1/s1#7"], "scenarios": ["s1"], "status": "open",
+    "last_seen_run": "r1"})
+json.dump(led, open(p, "w"))
+'
+"${L[@]}" distill --id F9 --slug dupe 2>"$tmp/err" && fail "clobber must be refused" || true
+grep -q "already exists" "$tmp/err" || fail "the no-clobber rule must be named"
+pass "guardrails: bar enforced, slug allowlist holds, hub files never clobbered"
+
+echo "all checks passed"
