@@ -365,10 +365,18 @@ prior successful iterations are untouched.
    verifies manually — unattended runs must configure one.
 6. **Commit.** Intent-scoped commits (forked commit-grouping rules) onto the
    integration branch, then `tanuki-loop iter-verify` — the **integration
-   invariant**, all four or an immediate-stop breaker: (a) HEAD attached to the
+   invariant**, all five or an immediate-stop breaker (AMENDED 2026-07-19 —
+   triage of issue #159): (a) HEAD attached to the
    expected integration branch; (b) the iteration start SHA is an ancestor of
    the new HEAD; (c) HEAD differs from the start SHA when a patch was expected;
-   (d) the worktree is clean. It records the end SHA.
+   (d) the worktree is clean; (e) the iteration's commits introduce no
+   build-artifact paths (pattern source shared with doctor's
+   `test-cmd-artifacts` check — one list, two surfaces; a run needing to
+   commit a legitimate binary declares it via an explicit per-run override,
+   never by the guard silently standing down). It records the end SHA.
+   Check (e) closes the write path a hand-run `git add -A` opens: doctor's
+   artifact check runs only at doctor time, which Phase 1 may skip, so
+   without (e) nothing between the commit and the remote objects.
 7. **Ready for the next drive.** Loop back to step 1 until convergence or the
    cap or a breaker.
 
