@@ -113,7 +113,13 @@ would never suggest — the blind-spot mitigation), and the **trajectory-observe
 unexplored branches** — decision-point alternatives that recorded runs took a
 *different* branch of (from `tanuki-scheduler history --scenario <id>
 --trajectory`), which are exploration candidates the docs alone would never
-surface. Generated charters are
+surface. **Enumeration (AMENDED 2026-07-19, #171):** the deterministic
+sources are enumerable through one machine surface — `tanuki-scheduler
+candidates` emits the trajectory branches AND `uncovered_findings` (live
+ledger findings no matrix scenario probes: empty, all-`adhoc-*`, or unknown
+scenario links; ad-hoc promotion candidates flagged, host tags passed
+through) — so trawling the ledger is never left to model diligence; only the
+docs reading and the charter framing remain judgment. Generated charters are
 presented at a plan gate; the user approves/edits/rejects before anything is
 written. Generation is the charter row of the model-tier table — frontier or
 human, never delegated below.

@@ -64,15 +64,22 @@ Subcommands (JSON out):
                                    operator decision; spec-tanuki-view D2
                                    amendment)
   candidates [--scenario ID] [--json]
-                                   trajectory-observed unexplored decision-
-                                   point branches as regeneration candidates:
+                                   the generate command's deterministic
+                                   candidate pool. (1) trajectory-observed
+                                   unexplored decision-point branches:
                                    per recorded run, a `user_choice` event
                                    names the point, the selected alternative,
                                    and the alternatives; an alternative NO run
                                    ever selected is surfaced (scenario, point,
                                    untaken alternative). A fully-explored point
-                                   yields none. Read-only — event files only,
-                                   no ledger, no state or matrix mutation.
+                                   yields none. (2) repo-wide only (#171):
+                                   `uncovered_findings` — live ledger findings
+                                   no matrix scenario probes (empty / all-
+                                   adhoc / unknown scenario links), ad-hoc
+                                   promotion candidates flagged, host tags
+                                   passed through. Read-only — event files,
+                                   ledger, and scheduler state are read; no
+                                   state or matrix mutation, ever.
   status                           machine-readable scheduler state, plus
                                    `advisories` — the read-only generation-
                                    trigger signals (feature-drift uncovered
@@ -581,21 +588,83 @@ def unexplored_branches(target, scenario_filter=None):
     return candidates
 
 
+def uncovered_findings(target):
+    """Ledger-seeded generation candidates, READ-ONLY (issue #171 — the
+    spec's second candidate source, previously a prose obligation on the
+    orchestrating session): live findings that NO matrix scenario probes —
+    scenario links empty, all `adhoc-*` (the §2 promotion path, flagged
+    `adhoc_origin`), or referencing ids absent from scheduler state
+    (`unknown_scenarios`). Tombstoned and dismissed findings are dead, not
+    candidates. With no scheduler state, membership is unknowable — durable
+    links are then assumed covered (errs toward silence, like feature_drift).
+    A finding-level `host` tag passes through untouched (#172 interim rule:
+    where the friction was observed is the plan gate's to weigh, never
+    arithmetic here). Enumeration only — framing charters from these stays
+    frontier judgment behind the plan gate."""
+    sched = read_json(sched_path(target), None)
+    known = set(sched["scenarios"]) if sched else None
+    found = []
+    for f in load_ledger(target)["findings"]:
+        if f.get("tombstone") or f.get("status") == "dismissed":
+            continue
+        scens = f.get("scenarios", [])
+        durable = [s for s in scens if not s.startswith("adhoc-")]
+        unknown = [s for s in durable if known is not None and s not in known]
+        if [s for s in durable if known is None or s in known]:
+            continue  # a matrix scenario probes it — not a gap
+        entry = {"id": f["id"], "kind": f.get("kind"),
+                 "status": f.get("status"),
+                 "recurrence": f.get("recurrence", 1),
+                 "scenarios": scens,
+                 "adhoc_origin": any(s.startswith("adhoc-") for s in scens),
+                 "evidence": f.get("evidence", [])[:3]}
+        if unknown:
+            entry["unknown_scenarios"] = sorted(unknown)
+        if f.get("host"):
+            entry["host"] = f["host"]
+        found.append(entry)
+    return found
+
+
 def cmd_candidates(args):
-    """List trajectory-observed unexplored decision-point branches as
-    regeneration candidates (read-only; the operator still approves at the
-    plan gate). Machine surface for the `generate` command's candidate pool."""
+    """The `generate` command's machine surface for its deterministic
+    candidate pool (read-only; the operator still approves at the plan gate):
+    trajectory-observed unexplored branches, plus — repo-wide only — the
+    ledger-seeded sections (uncovered friction / ad-hoc promotion, #171).
+    Reads event files, the ledger, and scheduler state; mutates nothing."""
     cands = unexplored_branches(args.target, args.scenario)
+    data = {"candidates": cands}
+    if not args.scenario:
+        data["uncovered_findings"] = uncovered_findings(args.target)
     if args.json:
-        out({"candidates": cands})
+        out(data)
         return
     if not cands:
         print("no unexplored trajectory branches")
-        return
     for c in cands:
         print(f"{c['scenario']}  {c['point']}: untaken "
               f"{', '.join(c['untaken'])} "
               f"(taken {', '.join(c['taken']) or '-'})")
+    if args.scenario:
+        return
+    if not data["uncovered_findings"]:
+        print("no uncovered friction findings")
+        return
+    print("uncovered friction (no matrix scenario probes these):")
+    for f in data["uncovered_findings"]:
+        tags = []
+        if f["adhoc_origin"]:
+            tags.append("ad-hoc origin — promotion candidate")
+        if f.get("unknown_scenarios"):
+            tags.append("links unknown scenario(s) "
+                        + ", ".join(f["unknown_scenarios"]))
+        if f.get("host"):
+            tags.append(f"host {f['host']}")
+        print(f"  {f['id']} [{f.get('kind') or '?'}] {f['status']} "
+              f"rec:{f['recurrence']}"
+              + (f"  via {', '.join(f['scenarios'])}" if f["scenarios"]
+                 else "  (no scenario link)")
+              + (("  (" + "; ".join(tags) + ")") if tags else ""))
 
 
 def plugin_surface(plugin_path):

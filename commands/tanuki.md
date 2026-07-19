@@ -87,9 +87,13 @@ Argument handling ($ARGUMENTS):
   `${CLAUDE_PLUGIN_ROOT}/specs/spec-tanuki-scenario-lifecycle/SPEC.md`),
   reachable on any of its three triggers — **feature-drift** (the target
   gained a skill/command/decision-point no charter covers), an **empty
-  unexplored pool**, or on demand. Candidate pool: the plugin's docs, the
-  ledger's friction history, and **trajectory-observed unexplored branches**
-  (decision-point alternatives recorded runs never took). Proposes charters at
+  unexplored pool**, or on demand. Candidate pool: the plugin's docs (judgment
+  — read them yourself), and the deterministic remainder enumerated by ONE
+  machine surface, `tanuki-scheduler --target <t> candidates --json` (#171):
+  trajectory-observed unexplored branches (decision-point alternatives
+  recorded runs never took) plus `uncovered_findings` — the ledger's friction
+  history no matrix scenario probes, with ad-hoc promotion candidates
+  flagged (`adhoc_origin`) and host tags passed through. Proposes charters at
   the plan gate; the user approves/edits/rejects; only then are they written
   and `tanuki-scheduler sync`'d (new ids enter as unexplored) — the sync call
   carries the pass's finalized record,
