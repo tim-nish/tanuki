@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# Fixture for the charter probe block (story 1.24 / issue #164; normative
+# schema: spec-tanuki-scenario-lifecycle "Charter probe block"): a charter
+# MAY declare a `probe` block — one required evidence predicate plus an
+# unordered named set of checkpoint predicates. A well-formed block parses
+# and rides on the scenario dict unchanged; a malformed one (unknown `on`,
+# missing `match`, invalid regex, ...) fails the load closed with the defect
+# named; absence is legitimate and changes nothing; checkpoint names are
+# opaque strings.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+
+python3 - "$here/tanuki-drive" <<'PY' || fail "probe_block_errors contract"
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("td", sys.argv[1])
+spec = importlib.util.spec_from_loader("td", loader)
+td = importlib.util.module_from_spec(spec); loader.exec_module(td)
+
+def errs(probe):
+    return td.probe_block_errors({"id": "s1", "probe": probe})
+
+# Absence is legitimate: no block, no defects, scenario untouched.
+assert td.probe_block_errors({"id": "s1"}) == []
+
+# Well-formed: required + named checkpoints, both `on` values, optional type.
+good = {
+    "required": {"on": "events", "type": "result", "match": "published"},
+    "checkpoints": {
+        "drafted": {"on": "events", "match": "draft saved"},
+        "raw-marker": {"on": "raw", "match": "REVIEW-DONE"},
+    },
+}
+assert errs(good) == [], errs(good)
+# ... and the block is available unchanged (validation never mutates).
+s = {"id": "s1", "probe": good}
+td.probe_block_errors(s)
+assert s["probe"] is good and good["checkpoints"]["drafted"]["match"] == "draft saved"
+
+# Checkpoint names are opaque strings — anything goes, no ordering implied.
+weird = {"required": {"on": "events", "match": "x"},
+         "checkpoints": {"9: after/前 (final?)": {"on": "events", "match": "y"}}}
+assert errs(weird) == [], errs(weird)
+
+# Malformed blocks: each defect NAMED, never silently ignored.
+e = errs({"required": {"on": "transcript", "match": "x"}})
+assert any("`on` must be 'events' or 'raw'" in m for m in e), e
+
+e = errs({"required": {"on": "events"}})
+assert any("missing `match`" in m for m in e), e
+
+e = errs({"required": {"on": "events", "match": "(unclosed"}})
+assert any("invalid regex" in m for m in e), e
+
+e = errs({"checkpoints": {"a": {"on": "events", "match": "x"}}})
+assert any("missing `required`" in m for m in e), e
+
+e = errs({"required": {"on": "raw", "type": "result", "match": "x"}})
+assert any("only valid with `on: events`" in m for m in e), e
+
+e = errs({"required": {"on": "events", "match": "x"}, "stages": ["a", "b"]})
+assert any("unknown key(s)" in m and "stages" in m for m in e), e
+
+e = errs({"required": {"on": "events", "match": "x"},
+          "checkpoints": {"a": "reached the review stage"}})
+assert any("must be an object" in m for m in e), e
+
+e = errs("reached the end")
+assert any("must be an object" in m for m in e), e
+
+# Every defect in a multi-defect block is reported (fail closed on ALL).
+e = errs({"required": {"on": "nope"}, "extra": 1})
+assert len(e) >= 3, e
+
+# The defect names the scenario it belongs to.
+e = td.probe_block_errors({"id": "publish-path", "probe": []})
+assert any("publish-path" in m for m in e), e
+PY
+pass "schema: well-formed parses untouched, every malformation named"
+
+# Integration: a malformed probe fails the whole load closed (exit 2) even
+# under --estimate, and a valid/absent block loads fine.
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+drive="$here/tanuki-drive"
+
+cat > "$tmp/bad.scenarios.json" <<'EOF'
+{
+  "target": "t", "plugin": "/nonexistent",
+  "scenarios": [
+    {"id": "ok-none", "charter": "c", "prompt": "p"},
+    {"id": "bad-probe", "charter": "c", "prompt": "p",
+     "probe": {"required": {"on": "vibes", "match": "x"}}}
+  ]
+}
+EOF
+set +e
+out="$(python3 "$drive" --target t --plugin /nonexistent \
+  --scenarios "$tmp/bad.scenarios.json" --run r1 --estimate 2>&1)"
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail "malformed probe must exit 2 (got $rc)"
+echo "$out" | grep -q "bad-probe" || fail "defect must name the scenario: $out"
+echo "$out" | grep -q "'events' or 'raw'" || fail "defect must be named: $out"
+pass "load fails closed naming the defect (exit 2, --estimate included)"
+
+cat > "$tmp/good.scenarios.json" <<'EOF'
+{
+  "target": "t", "plugin": "/nonexistent",
+  "scenarios": [
+    {"id": "plain", "charter": "c", "prompt": "p"},
+    {"id": "probed", "charter": "c", "prompt": "p",
+     "probe": {"required": {"on": "events", "type": "result", "match": "done"},
+               "checkpoints": {"mid": {"on": "raw", "match": "MID"}}}}
+  ]
+}
+EOF
+python3 "$drive" --target t --plugin /nonexistent \
+  --scenarios "$tmp/good.scenarios.json" --run r1 --estimate >/dev/null \
+  || fail "valid probe block must not block the load"
+pass "valid + absent blocks load; absence changes nothing"
+
+echo "all checks passed"

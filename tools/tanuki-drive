@@ -175,6 +175,75 @@ def effective_inputs(data):
     return resolved
 
 
+def probe_predicate_errors(sid, where, pred):
+    """Validate one probe predicate `{on: events|raw, type?, match}`.
+    Returns defect strings naming the scenario and predicate — the caller
+    fails closed on any."""
+    prefix = f"scenario '{sid}': probe {where}"
+    if not isinstance(pred, dict):
+        return [f"{prefix} must be an object {{on, type?, match}}"]
+    errs = []
+    unknown = sorted(set(pred) - {"on", "type", "match"})
+    if unknown:
+        errs.append(f"{prefix}: unknown key(s) {unknown}")
+    on = pred.get("on")
+    if on not in ("events", "raw"):
+        errs.append(f"{prefix}: `on` must be 'events' or 'raw' "
+                    f"(got {on!r})")
+    if "type" in pred:
+        if not isinstance(pred["type"], str) or not pred["type"]:
+            errs.append(f"{prefix}: `type` must be a non-empty string")
+        elif on == "raw":
+            errs.append(f"{prefix}: `type` is only valid with `on: events` "
+                        "— raw stream lines are untyped")
+    match = pred.get("match")
+    if not isinstance(match, str) or not match:
+        errs.append(f"{prefix}: missing `match` (substring or regex over "
+                    "the recorded evidence)")
+    else:
+        try:
+            re.compile(match)
+        except re.error as e:
+            errs.append(f"{prefix}: invalid regex {match!r} ({e})")
+    return errs
+
+
+def probe_block_errors(scenario):
+    """Charter probe block (story 1.24 / #164; normative schema:
+    spec-tanuki-scenario-lifecycle "Charter probe block"): one `required`
+    evidence predicate plus an unordered named set of `checkpoints` of the
+    same shape. Absence is legitimate (opt-in). A malformed block fails the
+    load closed with every defect named — never silently ignored or
+    partially applied. Checkpoint names are opaque strings: no ordering or
+    cross-checkpoint comparability exists to validate. Returns a list of
+    defect strings ([] when valid or absent)."""
+    sid = scenario.get("id")
+    block = scenario.get("probe")
+    if block is None:
+        return []
+    if not isinstance(block, dict):
+        return [f"scenario '{sid}': `probe` must be an object "
+                "{required, checkpoints?}"]
+    errs = []
+    unknown = sorted(set(block) - {"required", "checkpoints", "_comment"})
+    if unknown:
+        errs.append(f"scenario '{sid}': probe: unknown key(s) {unknown}")
+    if "required" not in block:
+        errs.append(f"scenario '{sid}': probe: missing `required` — the "
+                    "probe-completion predicate")
+    else:
+        errs += probe_predicate_errors(sid, "`required`", block["required"])
+    cps = block.get("checkpoints", {})
+    if not isinstance(cps, dict):
+        errs.append(f"scenario '{sid}': probe: `checkpoints` must be an "
+                    "object of named predicates")
+    else:
+        for name in cps:
+            errs += probe_predicate_errors(sid, f"checkpoint '{name}'",
+                                           cps[name])
+    return errs
+
+
 BINDING_TOKEN = re.compile(r"\{([a-z][a-z0-9_]*)\}")
 
 
@@ -989,6 +1058,15 @@ def main():
         if args.host is None:
             args.host = hosts[host_binding]
     scenarios = scenario_file["scenarios"]
+    # Charter probe blocks (story 1.24) validate for the WHOLE file, before
+    # --only filtering: a malformed probe is a config defect, never
+    # selection-dependent, never partially applied. Valid blocks ride on the
+    # scenario dict unchanged for the drive layer to consume.
+    probe_errors = [e for s in scenarios for e in probe_block_errors(s)]
+    if probe_errors:
+        for e in probe_errors:
+            print(f"error: {e}", file=sys.stderr)
+        return 2
     cfg = load_config(scenario_file)
     # Stage-entry fixtures (spec-host-snapshot "Stage-entry fixtures"; story
     # 1.17): resolve per-scenario entry_fixture references against the

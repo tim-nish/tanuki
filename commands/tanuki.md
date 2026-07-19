@@ -94,7 +94,12 @@ Argument handling ($ARGUMENTS):
   recorded runs never took) plus `uncovered_findings` — the ledger's friction
   history no matrix scenario probes, with ad-hoc promotion candidates
   flagged (`adhoc_origin`) and host tags passed through. Proposes charters at
-  the plan gate; the user approves/edits/rejects; only then are they written
+  the plan gate — each proposal MAY carry a `probe` block (one `required`
+  evidence predicate plus named `checkpoints`; story 1.24, normative schema
+  in the lifecycle spec's "Charter probe block"), rendered alongside its
+  charter so probe and charter are approved, edited, or rejected together
+  (a probe the human never reviewed is a coverage verdict the human never
+  authorized); the user approves/edits/rejects; only then are they written
   and `tanuki-scheduler sync`'d (new ids enter as unexplored) — the sync call
   carries the pass's finalized record,
   `--generation '{"trigger": "...", "proposed": N, "rejected": N}'`, so the
@@ -167,6 +172,9 @@ Run from inside the plugin repo (contract:
    decision points, AND the ledger's finding history when one exists (past
    friction seeds probes the docs would never suggest). Propose 4–6 charters
    (including at least one pinned decision-point branch and one error-path).
+   A charter that exists to probe a specific stage MAY declare a `probe`
+   block (lifecycle spec "Charter probe block") — propose it with the
+   charter; the two are reviewed together at the gate, never separately.
    Present everything at one plan gate, apply the user's edits, then write
    `~/.tanuki/scenarios/<slug>.scenarios.json` and run
    `tanuki-scheduler --target <slug> sync --scenarios <file>
