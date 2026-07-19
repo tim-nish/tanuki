@@ -134,6 +134,22 @@ def write_json(path, obj):
     os.replace(tmp, path)
 
 
+def run_key(run):
+    """Chronological sort key for a run id — mirrors tanuki-ledger run_key().
+    Driven runs are '<YYYYMMDD>-<rand>' but manual ingests are
+    'manual-<YYYYMMDD>[-<HHMMSS>]', so plain lexical order is NOT
+    chronological ('manual-…' would sort after every dated run forever —
+    F221: history picked last_execution lexicographically). Key on the
+    embedded 8-digit date wherever it appears; an id with no date sorts
+    oldest."""
+    m = re.search(r"\d{8}", run or "")
+    return (m.group(0) if m else "00000000", run or "")
+
+
+def warn(msg):
+    print(f"warning: {msg}", file=sys.stderr)
+
+
 def sched_path(target):
     return os.path.join(TANUKI_ROOT, target, "scheduler.json")
 
@@ -197,6 +213,13 @@ def matrix_data(scenarios_file, target=None):
     tags and cost keys (story 1.19), sharing matrix_ids' adhoc guard."""
     with open_scenarios(scenarios_file, target) as f:
         data = json.load(f)
+    # F222: the file's own `target` field is otherwise never consulted — a
+    # mismatch means the file was probably written for another namespace.
+    # One-line warning naming both values; the CLI value wins, as today.
+    file_target = data.get("target")
+    if target and file_target and file_target != target:
+        warn(f"scenarios file declares target '{file_target}' but --target "
+             f"is '{target}' — the CLI value wins (F222)")
     by_id = {}
     for s in data["scenarios"]:
         if s["id"].startswith("adhoc-"):
@@ -319,8 +342,34 @@ def cmd_sync(args):
     # starts its own lifecycle) keeps the hand-written-matrix rule: active.
     first = (not os.path.exists(sched_path(args.target))
              or (binding is not None and not view["scenarios"]))
+    matrix = matrix_data(args.scenarios, args.target)
+    # F94: ~/.tanuki is a machine-wide shared namespace, so a later sync can
+    # silently merge a DIFFERENT project's matrix into pre-existing state
+    # (first_sync:false, scenario count off from what the file defines).
+    # Name the collision signals — never block.
+    file_path = os.path.realpath(os.path.expanduser(args.scenarios))
+    prior_path = view.get("scenarios_file")
+    collision = []
+    if not first:
+        stale = sorted(set(view["scenarios"]) - set(matrix))
+        if stale:
+            collision.append(
+                f"state holds {len(stale)} scenario id(s) absent from this "
+                f"file: {', '.join(stale)}")
+        if prior_path and prior_path != file_path:
+            collision.append(
+                f"state was last synced from a different scenarios file: "
+                f"{prior_path}")
+    warning = None
+    if collision:
+        warning = (f"target '{args.target}' has pre-existing scheduler state "
+                   "that does not match this scenarios file — merging, not "
+                   "replacing (~/.tanuki is machine-wide; is this the right "
+                   "target?): " + "; ".join(collision))
+        warn(warning)
+    view["scenarios_file"] = file_path
     added = []
-    for sid, s in matrix_data(args.scenarios, args.target).items():
+    for sid, s in matrix.items():
         if sid not in view["scenarios"]:
             view["scenarios"][sid] = {
                 "state": "active" if first else "unexplored",
@@ -342,6 +391,7 @@ def cmd_sync(args):
     out({"first_sync": first, "added": added,
          "total": len(view["scenarios"]),
          **({"binding": binding} if binding else {}),
+         **({"warning": warning} if warning else {}),
          **({"generation_recorded": entry} if entry else {})})
 
 
@@ -378,6 +428,40 @@ def compat_unmet(s, data, binding):
             unmet.append(f"entry fixture '{fx}' is single-host committed "
                          f"state (no per-host set for '{binding}')")
     return unmet
+
+
+def empty_plan_note(view, matrix, scen, compat_skipped, cap, cfg):
+    """F220: a plan of [] carried no top-level explanation — the operator had
+    to reverse-engineer the selection logic. Name the cause, mirroring the
+    selection order above: cap, no synced state, empty matrix, no shared ids,
+    compat filtering, whole-pool regression cooldown; anything else (e.g.
+    exploration_quota 0 leaving only unexplored ids) gets the state census."""
+    if cap <= 0:
+        return (f"cap is {cap} (--max / max_scenarios) — no scenario can be "
+                "scheduled")
+    if not view["scenarios"]:
+        return "no scenarios synced — run `sync --scenarios <file>` first"
+    if not matrix:
+        return "the scenarios file defines no scenarios"
+    if not scen:
+        if compat_skipped:
+            return (f"all {len(compat_skipped)} scenarios incompatible with "
+                    "the effective host binding (see compat_skipped)")
+        return ("no scheduler-state scenario appears in this scenarios file "
+                "— state and file share no ids (wrong file or target?)")
+    if all(st["state"] == "regression" for st in scen.values()):
+        nearest = min(max(0, cfg["regression_every"] - st["since_regression"])
+                      for st in scen.values())
+        return (f"all {len(scen)} scenarios resting in regression cooldown — "
+                f"nearest due in {nearest} run{'s' if nearest != 1 else ''} "
+                "(see regression_pool)")
+    census = {}
+    for st in scen.values():
+        census[st["state"]] = census.get(st["state"], 0) + 1
+    return ("no scenario selectable this round ("
+            + ", ".join(f"{census[s]} {s}" for s in STATES if s in census)
+            + f"; exploration_quota {cfg['exploration_quota']}, "
+              f"regression_every {cfg['regression_every']})")
 
 
 def cmd_plan(args):
@@ -538,13 +622,18 @@ def cmd_plan(args):
               **({"regression_pool": regression_pool} if regression_pool
                  else {}),
               "unexplored_remaining": [s for s in unexplored if s not in seen]}
+    # F220: an empty plan explains itself at top level.
+    if not plan:
+        record["note"] = empty_plan_note(view, matrix, scen, compat_skipped,
+                                         cap, cfg)
     # F162: a what-if plan must be possible without mutating rotation order or
     # the selection history — --dry-run computes the identical record and
     # persists nothing.
     if args.dry_run:
+        dr = ("nothing persisted — rotation counters and the plan "
+              "history are untouched")
         out({**record, "dry_run": True,
-             "note": "nothing persisted — rotation counters and the plan "
-                     "history are untouched"})
+             "note": f"{record['note']} ({dr})" if "note" in record else dr})
         return
     for s in plan:
         scen[s]["last_planned"] = tick
@@ -564,8 +653,9 @@ def cmd_record_run(args):
     # streaks, no demotion/regression arithmetic, and never enters
     # runs_recorded. Findings still entered the ledger (host-tagged there);
     # canonical scheduler state must be provably untouched.
-    manifest = read_json(os.path.join(TANUKI_ROOT, args.target, "events",
-                                      args.run, "manifest.json"), {})
+    manifest_path = os.path.join(TANUKI_ROOT, args.target, "events",
+                                 args.run, "manifest.json")
+    manifest = read_json(manifest_path, {})
     if manifest.get("override"):
         out({"ok": True, "run": args.run,
              "excluded": "per-run override — exploratory run; canonical "
@@ -581,6 +671,22 @@ def cmd_record_run(args):
     if args.run in view["runs_recorded"]:
         out({"ok": True, "already_recorded": args.run})
         return
+    # F218: recording a run with no manifest is legal (ok:true, empty yield)
+    # but PERMANENT — runs_recorded blocks any re-record after the manifest
+    # lands. Keep the behavior; make the trap loud in both channels.
+    warning = None
+    if not os.path.exists(manifest_path):
+        warning = (f"no manifest found for run {args.run} — recorded with "
+                   "zero yield; this cannot be re-recorded")
+        warn(warning)
+    # F219: yield comes from ledger evidence pointers, never from inline
+    # result fields — a result carrying yield-shaped keys is being ignored.
+    inline = sorted({k for r in manifest.get("results", [])
+                     for k in r if k in ("findings", "actionable", "yield")})
+    if inline:
+        warn(f"manifest results carry {', '.join(inline)} — inline findings "
+             "are ignored; yield is derived from ledger evidence pointers "
+             "(see record-run --help)")
     yields = run_yield(args.target, args.run)
     changes = {}
 
@@ -618,15 +724,19 @@ def cmd_record_run(args):
     # recomputation — this is the exact record).
     view.setdefault("history", {})[args.run] = yields
     write_json(sched_path(args.target), sched)
-    out({"ok": True, "run": args.run, "yield": yields, "transitions": changes})
+    out({"ok": True, "run": args.run, "yield": yields, "transitions": changes,
+         **({"warning": warning} if warning else {})})
 
 
 def all_manifests(target):
-    """[(run, manifest)] for every recorded run dir, chronological."""
+    """[(run, manifest)] for every recorded run dir, chronological — by
+    run_key, not lexical order (F221: 'manual-<date>' ingests sorted after
+    every dated run, so history's last_execution / last_run / recent-yield
+    windows picked the wrong runs)."""
     events_dir = os.path.join(TANUKI_ROOT, target, "events")
     outp = []
     if os.path.isdir(events_dir):
-        for run in sorted(os.listdir(events_dir)):
+        for run in sorted(os.listdir(events_dir), key=run_key):
             m = read_json(os.path.join(events_dir, run, "manifest.json"), None)
             if m is not None:
                 outp.append((run, m))
@@ -645,7 +755,8 @@ def trajectory_view(target, sid, run_filter, as_json):
     events_dir = os.path.join(TANUKI_ROOT, target, "events")
     runs = []
     if os.path.isdir(events_dir):
-        for run in sorted(os.listdir(events_dir), reverse=True):  # newest first
+        # newest first, chronologically (run_key, not lexical — F221)
+        for run in sorted(os.listdir(events_dir), key=run_key, reverse=True):
             if run_filter and run != run_filter:
                 continue
             path = os.path.join(events_dir, run, f"{sid}.events.jsonl")
@@ -1312,7 +1423,27 @@ def main():
                     help="compute the plan without persisting it — rotation "
                          "counters and the selection history are untouched "
                          "(a plain plan call is stateful, F162)")
-    sp = sub.add_parser("record-run"); sp.add_argument("--run", required=True)
+    sp = sub.add_parser(
+        "record-run",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="""\
+Fold a run's yield into streaks and apply the state machine.
+
+Consumed manifest shape (F219) — events/<run>/manifest.json, minimal:
+  {"results": [{"scenario": "<id>",     # which scenarios were driven
+                "status": "<free-form>" # optional; shown by history, not
+               }, ...],                 #   read by record-run
+   "override": true,                    # optional: exploratory run — state
+                                        #   untouched (story 1.29)
+   "host_binding": "<binding id>"}      # optional: multi-binding fold target
+
+Actionable yield is NOT read from the manifest: it is derived from the
+ledger's evidence pointers — a finding whose evidence pointer is
+'<run>/<scenario>#<seq>' attributes to that (run, scenario). Inline result
+fields like 'findings' are ignored. Record findings with
+`tanuki-ledger upsert-finding --evidence <run>/<scenario>#<seq>` BEFORE
+record-run: a run records once, permanently (re-record is a no-op).""")
+    sp.add_argument("--run", required=True)
     sp = sub.add_parser("history")
     sp.add_argument("--scenario", default=None)
     sp.add_argument("--trajectory", action="store_true",
