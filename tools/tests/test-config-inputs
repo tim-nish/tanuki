@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# Fixture for the declared-input configuration tool (story 1.27 / issue #172,
+# spec-tanuki-scenario-lifecycle "Host bindings & declared-input
+# configuration"): `tanuki-config` show/set/check over a target-authored
+# `inputs` block. Asserts typed-only validation (path exists / git toplevel /
+# enum membership — never target semantics), the labeled effective chain,
+# read-only rendering of undeclared fields, refusal to set undeclared
+# fields, atomic writes, fail-closed loading of malformed blocks, and that
+# hand-edits round-trip through `show`.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+cfg="$here/tanuki-config"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+C=("$cfg" --target t)
+
+# --- fixtures: a git repo (valid repo-path), a plain dir, a file ---------------
+repo="$tmp/host-repo"; mkdir -p "$repo"; git -C "$repo" init -q
+sub="$repo/sub"; mkdir -p "$sub"
+plain="$tmp/plain-dir"; mkdir -p "$plain"
+
+canon="$TANUKI_ROOT/scenarios/t.scenarios.json"
+mkdir -p "$(dirname "$canon")"
+cat > "$canon" <<EOF
+{"target":"t","plugin":"$plain","host":"$repo",
+ "defaults":{"max_turns":25},
+ "inputs":{
+   "host":{"type":"repo-path","scope":"per-target","binds":"host",
+           "description":"repository being written about"},
+   "driver_model":{"type":"enum","values":["claude-sonnet-5","claude-haiku-4-5"],
+                   "scope":"per-target","binds":"defaults.driver_model"},
+   "notes_path":{"type":"path","scope":"per-run","binds":"notes"},
+   "label":{"type":"string","scope":"per-target","binds":"label"}
+ },
+ "scenarios":[{"id":"s1","charter":"c","prompt":"p"}]}
+EOF
+
+# --- show: declared fields with source labels, undeclared read-only ------------
+s="$("${C[@]}" show --json)"
+echo "$s" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+by = {f["field"]: f for f in d["declared"]}
+assert by["host"]["source"] == "scenarios file", by["host"]
+assert by["driver_model"]["value"] == "claude-sonnet-5" \
+    and by["driver_model"]["source"] == "built-in", by["driver_model"]
+ro = {r["key"]: r for r in d["read_only"]}
+assert ro["max_turns"]["value"] == 25 and ro["max_turns"]["source"] == "scenarios file", ro["max_turns"]
+assert ro["min_recurrence"]["source"] == "built-in", ro["min_recurrence"]
+assert "plugin" in ro, "undeclared top-level keys must render read-only"
+assert "host" not in ro, "a declared binds target must not also render read-only"
+' || fail "show must label every value's source and mark undeclared read-only"
+"${C[@]}" show | grep -q "read-only — not declared in inputs" \
+  || fail "human render must mark undeclared fields read-only"
+pass "show: effective chain labeled per value; undeclared fields read-only"
+
+# --- set: typed validation gates the write -------------------------------------
+"${C[@]}" set --field host --value "$plain" 2>/dev/null \
+  && fail "a non-git dir must fail repo-path validation" || true
+"${C[@]}" set --field host --value "$sub" 2>/dev/null \
+  && fail "a subdirectory must fail the git-toplevel rule" || true
+"${C[@]}" set --field driver_model --value gpt-4 2>/dev/null \
+  && fail "enum validation must reject a non-member" || true
+"${C[@]}" set --field notes_path --value "$tmp/nope.md" 2>/dev/null \
+  && fail "path validation must require existence" || true
+python3 -c '
+import json; d = json.load(open("'"$canon"'"))
+assert d["host"] == "'"$repo"'", "failed validations must write NOTHING"
+assert "driver_model" not in d.get("defaults", {}), d.get("defaults")
+' || fail "a failed set must leave the file untouched"
+pass "set: typed validation (repo-path/toplevel/enum/path) blocks the write"
+
+repo2="$tmp/other-repo"; mkdir -p "$repo2"; git -C "$repo2" init -q
+"${C[@]}" set --field host --value "$repo2" > /dev/null \
+  || fail "a valid git toplevel must pass repo-path validation"
+"${C[@]}" set --field driver_model --value claude-haiku-4-5 > /dev/null
+python3 -c '
+import json; d = json.load(open("'"$canon"'"))
+assert d["host"] == "'"$repo2"'", d["host"]
+assert d["defaults"]["driver_model"] == "claude-haiku-4-5", d["defaults"]
+assert d["defaults"]["max_turns"] == 25, "sibling defaults must survive a set"
+' || fail "set must write exactly the binds path, atomically"
+[ ! -e "$canon.tmp" ] || fail "atomic write must leave no temp file behind"
+pass "set: valid values land at the binds path; siblings survive; no temp litter"
+
+# --- set refuses undeclared fields ---------------------------------------------
+"${C[@]}" set --field max_turns --value 10 2>"$tmp/err" \
+  && fail "set on an undeclared field must be refused" || true
+grep -q "not a declared input" "$tmp/err" \
+  || fail "the refusal must say the field is undeclared"
+pass "set: undeclared field -> refusal, not a silent no-op"
+
+# --- check validates without writing -------------------------------------------
+before="$(cat "$canon")"
+"${C[@]}" check --field label --value anything > /dev/null \
+  || fail "string check must pass"
+"${C[@]}" check --field driver_model --value bogus 2>/dev/null \
+  && fail "check must fail on enum non-membership" || true
+[ "$(cat "$canon")" = "$before" ] || fail "check must never write"
+pass "check: validate-only, exit code carries the verdict, no writes"
+
+# --- hand-edit round-trips through show ----------------------------------------
+python3 -c '
+import json; p = "'"$canon"'"; d = json.load(open(p))
+d["host"] = "'"$repo"'"; json.dump(d, open(p, "w"))
+'
+"${C[@]}" show --json | python3 -c '
+import json, sys
+by = {f["field"]: f for f in json.load(sys.stdin)["declared"]}
+assert by["host"]["value"] == "'"$repo"'", by["host"]
+' || fail "a hand-edit must re-display correctly (file is source of truth)"
+pass "hand-edit round-trip: show renders the edited state"
+
+# --- malformed inputs blocks fail closed, naming the defect --------------------
+break_with() { python3 -c '
+import json; p = "'"$canon"'"; d = json.load(open(p))
+d["inputs"] = json.loads("""'"$1"'"""); json.dump(d, open(p, "w"))
+'; }
+break_with '{"f":{"type":"nope","binds":"x"}}'
+"${C[@]}" show 2>"$tmp/err" && fail "unknown type must fail closed" || true
+grep -q "unknown type" "$tmp/err" || fail "defect must be named (type)"
+break_with '{"f":{"type":"enum","binds":"x"}}'
+"${C[@]}" show 2>/dev/null && fail "enum without values must fail closed" || true
+break_with '{"f":{"type":"string"}}'
+"${C[@]}" show 2>"$tmp/err" && fail "missing binds must fail closed" || true
+grep -q "binds" "$tmp/err" || fail "defect must be named (binds)"
+pass "malformed inputs block -> fail closed, defect named, nothing applied"
+
+# --- no inputs block: show says so; nothing editable ---------------------------
+python3 -c '
+import json; p = "'"$canon"'"; d = json.load(open(p))
+del d["inputs"]; json.dump(d, open(p, "w"))
+'
+"${C[@]}" show | grep -q "no inputs declared" \
+  || fail "absent inputs block must render the one-line state"
+"${C[@]}" set --field host --value "$repo" 2>/dev/null \
+  && fail "no declarations -> nothing is editable" || true
+pass "absent inputs block: one-line state, nothing editable"
+
+echo "all checks passed"

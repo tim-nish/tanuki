@@ -1,0 +1,316 @@
+#!/usr/bin/env python3
+"""tanuki-config: declared-input target configuration — deterministic
+show/set/check over the scenarios file's target-authored `inputs` block
+(contract: specs/spec-tanuki-scenario-lifecycle/SPEC.md "Host bindings &
+declared-input configuration", issue #172 / story 1.27).
+
+Tanuki provides the workflow; targets declare the fields. This tool never
+interprets meaning — validation is BY TYPE ONLY (path exists, repo-path is a
+git toplevel, enum membership). Any target-semantic knowledge in here is a
+contract bug (the story-1.17 / writing-assistant#409 ownership rule).
+
+The `inputs` block (in ~/.tanuki/scenarios/<target>.scenarios.json), keyed
+by field name; only declared fields are editable:
+
+  "inputs": {
+    "host":         {"type": "repo-path", "scope": "per-target",
+                     "binds": "host", "description": "..."},
+    "driver_model": {"type": "enum", "values": ["claude-sonnet-5", "..."],
+                     "scope": "per-target", "binds": "defaults.driver_model",
+                     "description": "..."}
+  }
+
+- `type`: repo-path | path | string | enum (enum requires non-empty
+  `values`). `scope`: per-target | per-run. `binds`: a dot-path into the
+  scenarios file (e.g. `host`, `defaults.max_turns`) — where the per-target
+  value lives. A malformed block fails closed naming the defect; partial
+  application never happens.
+- Effective chain (docs/tanuki-spec.md "Configuration", extended by the
+  ratified spec section): built-in defaults < ~/.tanuki/config.json < file
+  `defaults`/bound value < persisted per-run override
+  (~/.tanuki/<target>/override.json — written by the override lifecycle,
+  story 1.29; rendered here whenever present) < CLI flags (drive-time only;
+  never persisted, so never rendered as a stored layer).
+
+Subcommands (JSON out with --json; human text default):
+  --target T show [--json]     effective configuration: every declared field
+                               with value + SOURCE LAYER + scope/type;
+                               undeclared config keys render read-only —
+                               visible, never editable here
+  --target T set --field F --value V
+                               typed validation, then an ATOMIC write
+                               (temp + rename) of the field's binds path in
+                               the scenarios file. Refuses undeclared fields.
+                               Hand-edits to the JSON remain legal; show
+                               re-displays them (the file is the source of
+                               truth, this tool is an editor of it)
+  --target T check --field F --value V
+                               validate only — exit 0/2, writes nothing
+
+Zero dependencies (stdlib + git for repo-path checks). Nothing is ever
+written into a target repository; the scenarios file is Tanuki-owned.
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+
+TANUKI_ROOT = os.environ.get("TANUKI_ROOT", os.path.expanduser("~/.tanuki"))
+# Built-in defaults — the config table in docs/tanuki-spec.md
+# "Configuration". Only keys a target may bind via `defaults.<key>`.
+BUILTIN_DEFAULTS = {"driver_model": "claude-sonnet-5", "model_ceiling": "sonnet",
+                    "max_scenarios": 6, "max_turns": 40, "timeout_s": 900,
+                    "est_cost_per_scenario_usd": 1.5, "min_recurrence": 3,
+                    "min_scenarios": 2, "compaction_unseen_runs": 3,
+                    "demote_after": 2, "regression_every": 3,
+                    "exploration_quota": 1, "low_yield_threshold": 0,
+                    "brief_max_proposals": 10, "issue_label_prefix": "tanuki"}
+TYPES = ("repo-path", "path", "string", "enum")
+SCOPES = ("per-target", "per-run")
+
+
+def die(msg):
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(2)
+
+
+def out(obj):
+    print(json.dumps(obj, indent=2))
+
+
+def read_json(path, default):
+    if not os.path.exists(path):
+        return default
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def scen_path(target):
+    return os.path.join(TANUKI_ROOT, "scenarios", f"{target}.scenarios.json")
+
+
+def override_path(target):
+    return os.path.join(TANUKI_ROOT, target, "override.json")
+
+
+def load_scenarios(target):
+    p = scen_path(target)
+    if not os.path.exists(p):
+        die(f"scenarios config not found: {p} (create it with `/tanuki init`)")
+    with open(p, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def load_inputs(data):
+    """Parse and validate the declared `inputs` block. Fails closed on the
+    first defect, naming it — a malformed declaration must never be
+    partially applied (the probe-block load posture)."""
+    block = data.get("inputs")
+    if block is None:
+        return {}
+    if not isinstance(block, dict):
+        die("inputs block must be an object keyed by field name")
+    for name, d in block.items():
+        if not isinstance(d, dict):
+            die(f"inputs.{name} must be an object")
+        t = d.get("type")
+        if t not in TYPES:
+            die(f"inputs.{name}: unknown type {t!r} (one of {', '.join(TYPES)})")
+        if t == "enum":
+            vals = d.get("values")
+            if not isinstance(vals, list) or not vals:
+                die(f"inputs.{name}: enum requires a non-empty `values` list")
+        scope = d.get("scope", "per-target")
+        if scope not in SCOPES:
+            die(f"inputs.{name}: unknown scope {scope!r} "
+                f"(one of {', '.join(SCOPES)})")
+        binds = d.get("binds")
+        if not isinstance(binds, str) or not binds:
+            die(f"inputs.{name}: missing `binds` (a dot-path into the "
+                "scenarios file, e.g. `host` or `defaults.max_turns`)")
+    return block
+
+
+def get_path(obj, dotted):
+    cur = obj
+    for part in dotted.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None, False
+        cur = cur[part]
+    return cur, True
+
+
+def set_path(obj, dotted, value):
+    parts = dotted.split(".")
+    cur = obj
+    for part in parts[:-1]:
+        nxt = cur.get(part)
+        if nxt is None:
+            nxt = cur[part] = {}
+        elif not isinstance(nxt, dict):
+            die(f"binds path '{dotted}' collides with a non-object at "
+                f"'{part}'")
+        cur = nxt
+    cur[parts[-1]] = value
+
+
+def validate(name, decl, value):
+    """Type-only validation. Returns the (possibly coerced) value or dies
+    with the type rule named. NO target semantics — ever."""
+    t = decl["type"]
+    if t == "string":
+        return value
+    if t == "enum":
+        if value not in decl["values"]:
+            die(f"{name}: {value!r} is not one of "
+                f"{', '.join(map(repr, decl['values']))} (enum membership)")
+        return value
+    p = os.path.expanduser(value)
+    if t == "path":
+        if not os.path.exists(p):
+            die(f"{name}: path does not exist: {p}")
+        return value
+    # repo-path: must exist AND be a git toplevel.
+    if not os.path.isdir(p):
+        die(f"{name}: repo-path does not exist or is not a directory: {p}")
+    r = subprocess.run(["git", "-C", p, "rev-parse", "--show-toplevel"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        die(f"{name}: repo-path is not inside a git repository: {p}")
+    top = r.stdout.strip()
+    if os.path.realpath(top) != os.path.realpath(p):
+        die(f"{name}: repo-path must be a git toplevel, not a subdirectory "
+            f"(toplevel is {top}): {p}")
+    return value
+
+
+def effective(target, data, decl):
+    """(value, source) for one declared field through the stored chain.
+    CLI flags are drive-time and never persisted, so the highest stored
+    layer wins here."""
+    binds = decl["binds"]
+    value, source = None, "unset"
+    key = binds.split(".")[-1]
+    if binds.startswith("defaults.") and key in BUILTIN_DEFAULTS:
+        value, source = BUILTIN_DEFAULTS[key], "built-in"
+    g = read_json(os.path.join(TANUKI_ROOT, "config.json"), {})
+    if binds.startswith("defaults.") and key in g:
+        value, source = g[key], "~/.tanuki/config.json"
+    v, found = get_path(data, binds)
+    if found:
+        value, source = v, "scenarios file"
+    ov = read_json(override_path(target), {})
+    if isinstance(ov, dict) and decl.get("name") in ov:
+        value, source = ov[decl["name"]], "per-run override (pending)"
+    return value, source
+
+
+def cmd_show(args):
+    data = load_scenarios(args.target)
+    inputs = load_inputs(data)
+    fields = []
+    bound = set()
+    for name in sorted(inputs):
+        decl = dict(inputs[name], name=name)
+        value, source = effective(args.target, data, decl)
+        bound.add(decl["binds"])
+        fields.append({"field": name, "type": decl["type"],
+                       "scope": decl.get("scope", "per-target"),
+                       "binds": decl["binds"], "value": value,
+                       "source": source,
+                       "description": decl.get("description", "")})
+    # Undeclared but present/known keys: visible, read-only — the surface
+    # edits only what the target declared.
+    read_only = []
+    g = read_json(os.path.join(TANUKI_ROOT, "config.json"), {})
+    for key in sorted(BUILTIN_DEFAULTS):
+        binds = f"defaults.{key}"
+        if binds in bound:
+            continue
+        value, source = BUILTIN_DEFAULTS[key], "built-in"
+        if key in g:
+            value, source = g[key], "~/.tanuki/config.json"
+        v, found = get_path(data, binds)
+        if found:
+            value, source = v, "scenarios file"
+        read_only.append({"key": key, "value": value, "source": source})
+    for top in ("plugin", "host"):
+        if top in data and top not in bound:
+            read_only.append({"key": top, "value": data[top],
+                              "source": "scenarios file"})
+    result = {"target": args.target, "declared": fields,
+              "read_only": read_only}
+    if args.json:
+        out(result)
+        return
+    print(f"tanuki config — {args.target}")
+    if not fields:
+        print("  no inputs declared — the target's scenarios file has no "
+              "`inputs` block; only hand-editing is available")
+    for f in fields:
+        print(f"  {f['field']:<20} = {f['value']!r:<32} [{f['source']}] "
+              f"({f['type']}, {f['scope']})")
+    for r in read_only:
+        print(f"  {r['key']:<20} = {r['value']!r:<32} [{r['source']}] "
+              "(read-only — not declared in inputs)")
+
+
+def cmd_set(args):
+    data = load_scenarios(args.target)
+    inputs = load_inputs(data)
+    if args.field not in inputs:
+        declared = ", ".join(sorted(inputs)) or "(none)"
+        die(f"'{args.field}' is not a declared input — only declared fields "
+            f"are editable (declared: {declared}); undeclared values are "
+            "read-only here (hand-editing the JSON remains legal)")
+    decl = dict(inputs[args.field], name=args.field)
+    value = validate(args.field, decl, args.value)
+    set_path(data, decl["binds"], value)
+    # Atomic: temp + rename. The file stays the source of truth; a crash
+    # mid-write must never leave a half-written config.
+    p = scen_path(args.target)
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, p)
+    out({"ok": True, "field": args.field, "value": value,
+         "binds": decl["binds"], "path": p})
+
+
+def cmd_check(args):
+    data = load_scenarios(args.target)
+    inputs = load_inputs(data)
+    if args.field not in inputs:
+        die(f"'{args.field}' is not a declared input")
+    value = validate(args.field, dict(inputs[args.field], name=args.field),
+                     args.value)
+    out({"ok": True, "field": args.field, "value": value})
+
+
+def slug_target(value):
+    if (value and not value.startswith(".")
+            and all(c.isalnum() or c in "._-" for c in value)):
+        return value
+    raise argparse.ArgumentTypeError(
+        f"--target must be a simple namespace slug, not a path: {value!r}")
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--target", required=True, type=slug_target)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sp = sub.add_parser("show")
+    sp.add_argument("--json", action="store_true")
+    for name in ("set", "check"):
+        sp = sub.add_parser(name)
+        sp.add_argument("--field", required=True)
+        sp.add_argument("--value", required=True)
+    args = p.parse_args()
+    {"show": cmd_show, "set": cmd_set, "check": cmd_check}[args.cmd](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
