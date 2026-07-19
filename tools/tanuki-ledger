@@ -24,6 +24,8 @@ Usage:
   tanuki-ledger --target <slug> upsert-finding --title T --kind friction|papercut|gap \
       --evidence run/scenario#seq[,…] [--match F3] [--note "…"]
   tanuki-ledger --target <slug> promote [--min-recurrence 3] [--min-scenarios 2] [--dry-run]
+      (the default bar is chronic-only; a fresh finding starts at 1/1, so a
+       first end-to-end walk needs --min-recurrence 1 --min-scenarios 1)
   tanuki-ledger --target <slug> set-status --id F3 --status open|proposed|accepted|dismissed
   tanuki-ledger --target <slug> consolidate [--status proposed,open] [--min-similarity 0.5]
   tanuki-ledger --target <slug> compact [--unseen-runs N]   # needs re-DRIVEN runs
@@ -1433,7 +1435,13 @@ def main():
             "already proposed/accepted/dismissed are never touched. With "
             "--dry-run the same listing is printed and nothing is written. "
             "Defaults: --min-recurrence %(mr)s, --min-scenarios %(ms)s (from "
-            "config); the applied bar is always named in the output."
+            "config); the applied bar is always named in the output. "
+            "The default bar promotes CHRONIC findings only: a freshly "
+            "created finding starts at recurrence 1 / 1 scenario — below it "
+            "by design — so the base lifecycle (ingest -> upsert-finding -> "
+            "promote) is a no-op until a finding recurs or spreads. To walk "
+            "the lifecycle end-to-end on a single fresh finding, widen the "
+            "bar explicitly: promote --min-recurrence 1 --min-scenarios 1."
             % {"mr": cfg["min_recurrence"], "ms": cfg["min_scenarios"]}))
     # Keep "(default: N)" early in each help string: argparse wraps this column
     # at ~56 chars, and a trailing default can split across lines mid-token.
