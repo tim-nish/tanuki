@@ -210,6 +210,19 @@ never model memory** — which requires three additive persistence changes:
    `{run, plan, verify, explore, due, quota_met}` to a `plans` list — the
    selection history with reasons.
 
+**Membership history (AMENDED 2026-07-19, #170).** A fourth additive
+persistence change, same pattern: matrix *entry* is recorded, not just later
+priority changes. The generate workflow authors the pass record at plan-gate
+close and hands it to `sync --generation '{"trigger", "proposed",
+"rejected"}'` (trigger is open vocabulary — `init`, `drift`, `pool-empty`,
+`on-demand`, `host-change`, …); sync appends it to a `generations` list in
+`scheduler.json`, adding what only the tool knows (`added` from the matrix
+diff — never trusted from the caller — and the timestamp). A bare sync that
+added ids appends a membership-only `source: "sync"` entry: hand-edits are
+recorded, never dressed up as generation passes. Rendered in `history`
+(repo-wide list; per-scenario `entered` in the deep view). Pre-revision
+state simply has no list — the standing lossiness boundary applies.
+
 **Interface:** a new `tanuki-scheduler history` subcommand — repo-wide
 coverage table by default; `--scenario <id>` for the single-scenario deep
 view (executions with dates/pins/yield, cumulative findings + recurrence,

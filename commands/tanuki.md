@@ -91,7 +91,12 @@ Argument handling ($ARGUMENTS):
   ledger's friction history, and **trajectory-observed unexplored branches**
   (decision-point alternatives recorded runs never took). Proposes charters at
   the plan gate; the user approves/edits/rejects; only then are they written
-  and `tanuki-scheduler sync`'d (new ids enter as unexplored). Advisory and
+  and `tanuki-scheduler sync`'d (new ids enter as unexplored) — the sync call
+  carries the pass's finalized record,
+  `--generation '{"trigger": "...", "proposed": N, "rejected": N}'`, so the
+  membership history is persisted at the gate, never reconstructed later
+  (#170; trigger is open vocabulary: `drift`, `pool-empty`, `on-demand`, …).
+  Advisory and
   operator-invoked — never automatic, never during an unattended loop, and no
   tool mutates the matrix. No driving.
 
@@ -114,7 +119,9 @@ Run from inside the plugin repo (contract:
    (including at least one pinned decision-point branch and one error-path).
    Present everything at one plan gate, apply the user's edits, then write
    `~/.tanuki/scenarios/<slug>.scenarios.json` and run
-   `tanuki-scheduler --target <slug> sync --scenarios <file>`. (Declaring an
+   `tanuki-scheduler --target <slug> sync --scenarios <file>
+   --generation '{"trigger": "init", "proposed": N, "rejected": N}'` —
+   the persisted membership record, #170. (Declaring an
    `axes`/`covers` exploration space was REMOVED 2026-07-18 — operator
    decision; a matrix may still carry the keys, tools ignore them.)
 5. Offer the `"loop"` block (derive a `test_cmd` per /tanuki-loop's rule).
