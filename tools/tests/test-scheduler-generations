@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# Fixture for the persisted membership history (issue #170 / spec-tanuki-
+# scenario-lifecycle "Membership history"): the generate workflow finalizes a
+# generation-pass record at plan-gate close and hands it to
+# `sync --generation '<json>'`; sync appends it to `generations` with what
+# only the tool knows (`added` from the matrix diff, the timestamp). A bare
+# sync that added ids records a membership-only `source: "sync"` entry; a
+# caller-supplied `added`/`at`/`source` is discarded, never merged. Rendered
+# by `history` (repo-wide list; per-scenario `entered` in the deep view);
+# legacy state without the list renders nothing.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+sched="$here/tanuki-scheduler"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+S=("$sched" --target t)
+
+canon="$TANUKI_ROOT/scenarios/t.scenarios.json"
+mkdir -p "$(dirname "$canon")"
+matrix() {  # matrix <id>... : write a matrix holding exactly those ids
+  local ids="" sep=""
+  for id in "$@"; do
+    ids+="$sep{\"id\":\"$id\",\"charter\":\"c\",\"prompt\":\"p\"}"; sep=","
+  done
+  echo "{\"target\":\"t\",\"scenarios\":[$ids]}" > "$canon"
+}
+
+# --- bare first sync: membership-only entry, source sync -----------------------
+matrix s1 s2
+"${S[@]}" sync --scenarios "$canon" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+g = r["generation_recorded"]
+assert g["source"] == "sync" and g["added"] == ["s1", "s2"], g
+assert "trigger" not in g, "bare sync must not invent a generation pass: %r" % g
+assert g["at"], g
+' || fail "bare sync with new ids must record a membership-only entry"
+pass "bare sync -> membership-only entry (source sync, added computed, no trigger)"
+
+# --- no-op sync: no entry at all -----------------------------------------------
+"${S[@]}" sync --scenarios "$canon" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert "generation_recorded" not in r, r
+' || fail "a sync that added nothing must record nothing"
+python3 -c '
+import json, os
+s = json.load(open(os.path.join(os.environ["TANUKI_ROOT"], "t", "scheduler.json")))
+assert len(s["generations"]) == 1, s["generations"]
+' || fail "no-op sync must not append to generations"
+pass "no-op sync -> no membership entry"
+
+# --- generate workflow finalizes the record ------------------------------------
+# added/at/source supplied by the caller are DISCARDED: the tool computes them.
+matrix s1 s2 s3
+"${S[@]}" sync --scenarios "$canon" \
+  --generation '{"trigger":"drift","proposed":4,"rejected":3,"added":["lie"],"source":"lie"}' \
+  | python3 -c '
+import json, sys
+g = json.load(sys.stdin)["generation_recorded"]
+assert g["source"] == "generate" and g["trigger"] == "drift", g
+assert g["proposed"] == 4 and g["rejected"] == 3, g
+assert g["added"] == ["s3"], "added must come from the matrix diff: %r" % g
+' || fail "--generation must record the workflow record with tool-computed added"
+pass "generate pass -> source generate, trigger kept, caller added/source discarded"
+
+# --- a pass that added nothing is still a recorded fact ------------------------
+"${S[@]}" sync --scenarios "$canon" --generation '{"trigger":"on-demand","proposed":2,"rejected":2}' \
+  | python3 -c '
+import json, sys
+g = json.load(sys.stdin)["generation_recorded"]
+assert g["source"] == "generate" and g["added"] == [], g
+' || fail "an all-rejected pass must still be recorded (proposed but nothing added)"
+pass "all-rejected generation pass is still a persisted fact"
+
+# --- malformed --generation dies loudly ----------------------------------------
+"${S[@]}" sync --scenarios "$canon" --generation 'not json' 2>/dev/null \
+  && fail "malformed --generation must die" || true
+"${S[@]}" sync --scenarios "$canon" --generation '["list"]' 2>/dev/null \
+  && fail "non-object --generation must die" || true
+"${S[@]}" sync --scenarios "$canon" --generation '{"trigger":7}' 2>/dev/null \
+  && fail "non-string trigger must die" || true
+pass "malformed --generation is rejected at the door"
+
+# --- history renders the membership record -------------------------------------
+h="$("${S[@]}" history --json)"
+echo "$h" | python3 -c '
+import json, sys
+g = json.load(sys.stdin)["generations"]
+assert [e["source"] for e in g] == ["sync", "generate", "generate"], g
+' || fail "history --json must carry the generations list in order"
+"${S[@]}" history | grep -q "generation .*trigger=drift added: s3 (proposed 4, rejected 3)" \
+  || fail "history text must render the generation line with trigger + counts"
+"${S[@]}" history | grep -q "matrix-edit .*added: s1, s2" \
+  || fail "history text must render bare-sync entries as matrix-edit"
+"${S[@]}" history --scenario s3 --json | python3 -c '
+import json, sys
+e = json.load(sys.stdin)["entered"]
+assert e and e["trigger"] == "drift" and e["source"] == "generate", e
+' || fail "the deep view must name when/why the scenario entered"
+"${S[@]}" history --scenario s3 | grep -q "entered .*trigger=drift" \
+  || fail "deep-view text must show the entered line"
+pass "history renders membership: repo-wide lines + per-scenario entered"
+
+# --- legacy state (no generations list) renders nothing, never crashes ---------
+python3 -c '
+import json, os
+p = os.path.join(os.environ["TANUKI_ROOT"], "t", "scheduler.json")
+s = json.load(open(p)); s.pop("generations")
+json.dump(s, open(p, "w"))
+'
+"${S[@]}" history > /dev/null || fail "legacy state must not crash history"
+"${S[@]}" history | grep -qE "generation \[|matrix-edit \[" \
+  && fail "legacy state must render no membership lines" || true
+"${S[@]}" history --scenario s3 --json | python3 -c '
+import json, sys
+assert json.load(sys.stdin)["entered"] is None
+' || fail "legacy deep view must report entered: null"
+pass "lossiness boundary: legacy state renders no membership history"
+
+echo "all checks passed"

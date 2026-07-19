@@ -21,10 +21,18 @@ Subcommands (JSON out):
   --target T register --repo P     map a repo path to a target (Tanuki-owned;
                                    never writes into the repo)
   resolve --cwd P                  target for P or any parent, else null
-  sync --scenarios F               absorb the matrix: first sync marks every
+  sync --scenarios F [--generation J]
+                                   absorb the matrix: first sync marks every
                                    scenario active (backward compat for
                                    hand-written matrices); later syncs mark
-                                   NEW ids unexplored
+                                   NEW ids unexplored. --generation appends
+                                   the generate workflow's finalized pass
+                                   record (trigger/proposed/rejected — open
+                                   vocabulary) to a persisted `generations`
+                                   list; `added`/`at` are computed here, never
+                                   trusted from the caller. A bare sync that
+                                   added ids records a membership-only
+                                   `source: "sync"` entry (#170)
   plan --scenarios F [--max N] [--run R]
                                    next run's scenario set, priority-ordered:
                                    verify set (accepted findings awaiting
@@ -80,6 +88,7 @@ import argparse
 import json
 import os
 import sys
+import time
 
 TANUKI_ROOT = os.environ.get("TANUKI_ROOT", os.path.expanduser("~/.tanuki"))
 CONFIG_DEFAULTS = {"demote_after": 2, "regression_every": 3,
@@ -219,7 +228,32 @@ def cmd_resolve(args):
 def cmd_sync(args):
     """First sync: every matrix scenario -> active (a hand-written matrix
     keeps today's behavior). Later syncs: new ids -> unexplored (generated
-    charters enter as exploration candidates). Ids never leave the state."""
+    charters enter as exploration candidates). Ids never leave the state.
+
+    Membership history (issue #170): the generate workflow is the AUTHOR of
+    generation metadata — at plan-gate close it passes the finalized record
+    via --generation, and sync appends it to a `generations` list alongside
+    what only the tool knows (`added`, computed from the matrix diff and never
+    trusted from the caller; the timestamp). A bare sync appends a
+    membership-only `source: "sync"` entry when it added ids — hand-edits are
+    recorded but never dressed up as generation passes that didn't happen.
+    Same posture as `transitions`/`plans`: persisted, not just printed."""
+    gen = None
+    if args.generation:
+        try:
+            gen = json.loads(args.generation)
+        except ValueError as e:
+            die(f"--generation must be a JSON object: {e}")
+        if not isinstance(gen, dict):
+            die("--generation must be a JSON object")
+        if not isinstance(gen.get("trigger", ""), str):
+            die("--generation trigger must be a string (open vocabulary: "
+                "init, drift, pool-empty, on-demand, host-change, …)")
+        # `added` and `at` are the tool's to compute — a caller-supplied value
+        # is discarded, never merged.
+        gen.pop("added", None)
+        gen.pop("at", None)
+        gen.pop("source", None)
     first = not os.path.exists(sched_path(args.target))
     sched = read_json(sched_path(args.target), {"scenarios": {}, "runs_recorded": []})
     added = []
@@ -235,9 +269,16 @@ def cmd_sync(args):
         # the matrix on every sync (the file is the source of truth), no
         # normalization — visible in status/history.
         sched["scenarios"][sid]["covers"] = list(s.get("covers") or [])
+    entry = None
+    if gen is not None or added:
+        entry = {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "added": added,
+                 "source": "generate" if gen is not None else "sync",
+                 **(gen or {})}
+        sched.setdefault("generations", []).append(entry)
     write_json(sched_path(args.target), sched)
     out({"first_sync": first, "added": added,
-         "total": len(sched["scenarios"])})
+         "total": len(sched["scenarios"]),
+         **({"generation_recorded": entry} if entry else {})})
 
 
 def cmd_plan(args):
@@ -678,8 +719,14 @@ def cmd_history(args):
     if args.scenario:
         sid = args.scenario
         st = sched["scenarios"].get(sid, {})
+        # Membership record (#170): the generations entry that added this id
+        # — when it entered and under which trigger. None for pre-revision
+        # entries (the lossiness boundary, stated not hidden).
+        entered = next((g for g in sched.get("generations", [])
+                        if sid in g.get("added", [])), None)
         data = {"scenario": sid,
                 "state": st.get("state", "(not in scheduler)"),
+                "entered": entered,
                 "covers": st.get("covers", []),
                 "low_streak": st.get("low_streak", 0),
                 "runs_driven": len(executions.get(sid, [])),
@@ -694,6 +741,10 @@ def cmd_history(args):
         print(f"scenario {sid} — {data['state']} · driven "
               f"{data['runs_driven']}x · low streak {data['low_streak']} · "
               f"cumulative recurrence {data['cumulative']['recurrence']}")
+        if entered:
+            print(f"  entered [{entered['at']}] via {entered['source']}"
+                  + (f" trigger={entered['trigger']}"
+                     if entered.get("trigger") else ""))
         for e in data["executions"]:
             pins = "; ".join(f"{p.get('point')}={p.get('choice')}"
                              if isinstance(p, dict) else str(p)
@@ -740,6 +791,10 @@ def cmd_history(args):
     data = {"scenarios": rows, "coverage": cover,
             "feature_drift": drift,
             "unexplored_pool_empty": pool_empty,
+            # Membership history (#170): when and why charters entered the
+            # matrix. Legacy state without the list renders nothing — same
+            # lossiness boundary as the yield-snapshot revision.
+            "generations": sched.get("generations", [])[-args.plans:],
             "selection_history": sched.get("plans", [])[-args.plans:]}
     if args.json:
         out(data)
@@ -765,6 +820,15 @@ def cmd_history(args):
                           for u in drift["uncovered"])
         print(f"  feature-drift: uncovered {names} — "
               f"run `{drift['generate']}` to charter it")
+    for g in data["generations"]:
+        if g.get("source") == "generate":
+            counts = ", ".join(f"{k} {g[k]}" for k in ("proposed", "rejected")
+                               if k in g)
+            print(f"  generation [{g['at']}] trigger={g.get('trigger', '?')} "
+                  f"added: {', '.join(g['added']) or '-'}"
+                  + (f" ({counts})" if counts else ""))
+        else:
+            print(f"  matrix-edit [{g['at']}] added: {', '.join(g['added'])}")
     for p in data["selection_history"]:
         print(f"  plan [{p.get('run') or '?'}] -> {', '.join(p['plan'])} "
               f"(verify {len(p['verify'])}, explore {len(p['explore'])}, "
@@ -819,7 +883,13 @@ def main():
     sp = sub.add_parser("register")
     sp.add_argument("--repo", required=True)
     sp = sub.add_parser("resolve"); sp.add_argument("--cwd", required=True)
-    sp = sub.add_parser("sync"); sp.add_argument("--scenarios", required=True)
+    sp = sub.add_parser("sync")
+    sp.add_argument("--scenarios", required=True)
+    sp.add_argument("--generation", default=None,
+                    help="finalized generation-pass record (JSON object: "
+                         "trigger/proposed/rejected…) from the generate "
+                         "workflow at plan-gate close; added/at are computed "
+                         "here, never trusted from the caller (#170)")
     sp = sub.add_parser("plan")
     sp.add_argument("--scenarios", required=True)
     sp.add_argument("--max", type=int, default=None)
