@@ -467,6 +467,43 @@ regression cadence, the dry-rule convergence definition, and the plan-gated
 charter-generation pass are all untouched. No new config keys; `max_scenarios`
 and `exploration_quota` keep their meanings.
 
+## Host bindings & declared-input configuration (RATIFIED 2026-07-19 — decomposed 2026-07-19)
+
+Design records: issues #172 (declared-input configuration surface) and #173
+(host portability); identity ruling in
+`DECISION-2026-07-19-host-identity.md` (this directory). The invariants,
+folded here so the spec is self-contained; the issues carry the full design:
+
+- **Execution identity is `(scenario_id, host_binding_id)`.** Scheduler
+  state — yield, streaks, demotion/regression, transitions — is kept per
+  host binding; ledger evidence carries the binding id; recurrence and
+  driven-absence evaluate one binding at a time. Single-binding targets are
+  unchanged until a second binding is declared (no migration).
+- **`host_binding_id` is logically stable and separate from the commit
+  pin.** It names the declared binding, never a snapshot; re-pinning or
+  advancing the host repo never changes identity. Renaming a binding is an
+  explicit operator act.
+- **Configuration is a declared-input surface, not a hidden file hunt.**
+  Targets declare editable fields (`inputs` block: type from a small generic
+  vocabulary, scope, binding point, optional opaque doctor hook); Tanuki
+  validates by type only and never interprets meaning. The surface is an
+  action in the existing `/tanuki` picker — no new top-level command. The
+  backing JSON stays the source of truth; hand-editing remains legal.
+- **A one-shot per-run override never touches canonical state.** It expires
+  after exactly one drive, the manifest records the effective resolved
+  inputs, an active override renders loudly, and the run is excluded from
+  `record-run` and driven-absence — its evidence enters the ledger
+  host-tagged. Full per-host accrual applies only to declared bindings.
+- **Portability is fail-closed and surfaced.** The compatibility check runs
+  at plan time; skips persist in the plan record (`compat_skipped`, the
+  `verify_deferred` posture); a compat-skipped verify replay accrues no
+  driven-absence; a compat-skipped exploration slot forces `quota_met`
+  false. Host-coupling detection renders through the existing read-only
+  surfaces, never a new door.
+
+Decomposition: stories 1.27–1.29 (umbrella #172) and 1.30–1.33 (umbrella
+#173) — created `ready`, flowing through /publish-issues → /implement-story.
+
 ## Compatibility and migration
 
 - **Existing targets keep working untouched.** A hand-written matrix with no
