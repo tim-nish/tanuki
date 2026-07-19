@@ -67,6 +67,7 @@ import argparse
 import concurrent.futures
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -172,6 +173,60 @@ def effective_inputs(data):
             cur = cur[part]
         resolved[field] = cur if found else None
     return resolved
+
+
+BINDING_TOKEN = re.compile(r"\{([a-z][a-z0-9_]*)\}")
+
+
+def resolve_bindings(data, scenarios, host_binding):
+    """Declared bindings/placeholders (story 1.31 / #173): scenario prompts
+    and `host_setup` commands may reference `{name}` tokens declared in the
+    scenarios file's `bindings` block — a per-target scalar ("draft_location"
+    : "drafts/") or a per-host map keyed by host_binding_id
+    ("subject_sources": {"a": "specs/x.md", "b": "docs/y.md"}). Resolution
+    happens HERE, before the driver ever sees the text — a raw placeholder
+    reaching a prompt is the failure mode this function exists to prevent.
+
+    Rules: only DECLARED names substitute — an undeclared `{token}` (or any
+    other brace construct, e.g. JSON literals) passes through untouched, so
+    literal braces stay legal. A referenced name with no value under the
+    effective host binding FAILS CLOSED naming the binding (plan/start time,
+    never mid-drive). Returns {name: value} for what was actually resolved —
+    recorded in the manifest so history never needs model memory. Values are
+    target-declared and opaque: no interpretation, ever."""
+    bindings = data.get("bindings")
+    if not isinstance(bindings, dict) or not bindings:
+        return {}
+    used = {}
+
+    def value_of(name):
+        decl = bindings[name]
+        if isinstance(decl, dict):
+            if host_binding is None or host_binding not in decl:
+                raise RuntimeError(
+                    f"binding '{name}' has no value for host binding "
+                    f"{host_binding!r} (declared for: {sorted(decl)}) — "
+                    "declare one or drop the reference; a raw placeholder "
+                    "is never handed to the driver")
+            return str(decl[host_binding])
+        return str(decl)
+
+    def subst(text):
+        def repl(m):
+            name = m.group(1)
+            if name not in bindings:
+                return m.group(0)
+            used[name] = value_of(name)
+            return used[name]
+        return BINDING_TOKEN.sub(repl, text)
+
+    for s in scenarios:
+        if isinstance(s.get("prompt"), str):
+            s["prompt"] = subst(s["prompt"])
+        if isinstance(s.get("host_setup"), list):
+            s["host_setup"] = [subst(c) if isinstance(c, str) else c
+                               for c in s["host_setup"]]
+    return used
 
 
 def load_config(scenario_file_data=None):
@@ -974,6 +1029,16 @@ def main():
         print("error: no scenarios selected", file=sys.stderr)
         return 2
 
+    # Declared bindings resolve for the SELECTED scenarios before anything
+    # else sees their text (story 1.31): estimate and real drives alike, so
+    # an unresolvable reference surfaces at plan time, never mid-drive.
+    try:
+        bindings_used = resolve_bindings(scenario_file, scenarios,
+                                         host_binding)
+    except RuntimeError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
     # Ceiling violations are usage errors: fail the whole invocation up front,
     # in --estimate and real runs alike, not scenario-by-scenario mid-run.
     try:
@@ -1063,6 +1128,10 @@ def main():
         manifest["override"] = override
     if host_binding:
         manifest["host_binding"] = host_binding
+    if bindings_used:
+        # Story 1.31: the resolved values this run actually drove with —
+        # persisted, so two hosts' runs of one charter stay distinguishable.
+        manifest["bindings_resolved"] = bindings_used
     if scenario_file.get("inputs"):
         manifest["effective_inputs"] = effective_inputs(scenario_file)
     with open(os.path.join(run_dir, "manifest.json"), "w", encoding="utf-8") as f:
