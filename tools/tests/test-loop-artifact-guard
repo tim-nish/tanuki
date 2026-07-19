@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Fixture for the loop's build-artifact guard (story 1.4 / issue #71 + ledger
-# findings F64/F102; arbitration 2026-07-17). Regenerable output is not work
-# product:
+# findings F64/F102; check (e) of the five-part integration invariant —
+# spec-tanuki-loop AMENDED 2026-07-19, triage of issue #159, superseding the
+# 2026-07-17 report-only arbitration). Regenerable output is not work product:
 #   - untracked artifacts never make the worktree "dirty" (no false friction);
-#   - artifacts COMMITTED to the integration branch are REPORTED at the commit
-#     that introduced them — named, with the cause, in iter-verify's output and
-#     in status — but are NEVER a breaker: halting there would add a fifth halt
-#     to the documented four-part integration invariant and would stop an
-#     unattended run over a merely-incomplete .gitignore;
-#   - gate-push REFUSES to push a merge carrying artifacts. That is the
-#     enforcement point: the last mechanical boundary before the remote, and an
-#     attended one. F102's incident was artifacts riding through the merge AND
-#     gate-push onto origin with nothing objecting anywhere on that path;
+#   - artifacts COMMITTED to the integration branch are an immediate-stop
+#     BREAKER at the commit that introduced them — named, with the cause and a
+#     concrete remedy hint — because doctor's test-cmd-artifacts check runs
+#     only at doctor time, which Phase 1 may skip;
+#   - a legitimate binary is declared per path with --allow-artifact; the
+#     override is audited and check (e) passes for declared paths only;
+#   - gate-push STILL refuses to push a merge carrying artifacts
+#     (belt-and-suspenders past an overridden check (e));
 #   - a clean bracket is unaffected (iter-start -> work -> iter-verify).
 set -euo pipefail
 
@@ -69,7 +69,7 @@ pass "a real dirty file still trips not-clean (guard is not a blanket ignore)"
 rm -f "$wt/real-leftover.txt"
 "${L[@]}" rollback >/dev/null 2>&1 || true
 
-# --- committed artifacts: REPORTED at the commit, never a breaker -------------
+# --- committed artifacts: check (e) is an immediate-stop breaker --------------
 # The actual contamination path: an agent's `git add -A` sweeps them in.
 "${L[@]}" iter-start >/dev/null
 mkdir -p "$wt/pkg/__pycache__"
@@ -78,28 +78,42 @@ echo "work" >> "$wt/f.py"
 gwt add -A                      # the mistake this guard exists to catch
 gwt commit -qm "work + swept-in artifacts"
 rc=0; b="$("${L[@]}" iter-verify 2>&1)" || rc=$?
-[ "$rc" = "0" ] \
-  || fail "committed artifacts must NOT halt the iteration (4-part invariant), got $rc"
+[ "$rc" = "3" ] \
+  || fail "committed artifacts must stop the iteration (check (e)), got $rc"
+echo "$b" | grep -q "build artifacts committed" \
+  || fail "breaker must name the cause: $b"
+echo "$b" | grep -q "pkg/__pycache__/mod.cpython-311.pyc" \
+  || fail "breaker must name the swept paths: $b"
+echo "$b" | grep -q "allow-artifact" \
+  || fail "breaker hint must name the deliberate override remedy: $b"
+pass "committed artifacts break at the commit that introduced them (check (e))"
+
+# --- the override: declared paths only, audited -------------------------------
+rc=0; b="$("${L[@]}" iter-verify --allow-artifact stray-other.bin 2>&1)" || rc=$?
+[ "$rc" = "3" ] \
+  || fail "an override for a DIFFERENT path must not admit the artifact, got $rc"
+pass "--allow-artifact admits declared paths only (no blanket stand-down)"
+
+rc=0; b="$("${L[@]}" iter-verify --allow-artifact pkg/__pycache__ 2>&1)" || rc=$?
+[ "$rc" = "0" ] || fail "a declared artifact must verify (deliberate override), got $rc: $b"
 [ "$(echo "$b" | jget '["ok"]')" = "True" ] || fail "the iteration should verify: $b"
 echo "$b" | jget '["build_artifacts_committed"]' \
   | grep -q "pkg/__pycache__/mod.cpython-311.pyc" \
-  || fail "iter-verify must name the swept paths: $b"
-echo "$b" | jget '["warning"]' | grep -qi "build artifacts committed" \
-  || fail "iter-verify must warn, naming the cause: $b"
-pass "committed artifacts are reported at the commit, never fatal (invariant stays 4-part)"
+  || fail "iter-verify must still name the committed paths: $b"
+echo "$b" | jget '["warning"]' | grep -qi "allow-artifact" \
+  || fail "the override must be visible in the output, never silent: $b"
+grep -q "check (e) override" "$root/t/loop/"*/audit.md \
+  || fail "the override must be recorded in the audit trail"
+pass "the override is per-path, visible in output, and audited"
 
-# The warning must reach the morning gate — status is what the operator reads
-# before approving the merge. Always present, explicitly null when clean.
+# The record must reach the morning gate — status is what the operator reads
+# before approving the merge.
 s="$("${L[@]}" status)"
-echo "$s" | jget '["warning"]' | grep -qi "build artifacts" \
-  || fail "status must carry the artifact warning for the gate: $s"
 echo "$s" | jget '["build_artifacts_committed"]' | grep -q "mod.cpython-311.pyc" \
-  || fail "status must name the swept paths"
-pass "the warning reaches status, which the morning gate reads"
+  || fail "status must name the swept paths for the gate"
+pass "the committed-artifact record reaches status, which the morning gate reads"
 
-# --- gate-push REFUSES: the enforcement point ---------------------------------
-# F102: artifacts rode the integration branch through the merge AND gate-push
-# onto the remote, with nothing objecting anywhere along that path.
+# --- gate-push STILL refuses: belt-and-suspenders past the override -----------
 integ="$("${L[@]}" status | jget '["integration_branch"]')"
 git -C "$repo" merge -q --no-ff "$integ" -m "merge integration"
 rc=0; g="$("${L[@]}" gate-push 2>&1)" || rc=$?
@@ -109,11 +123,11 @@ echo "$g" | jget '["build_artifacts"]' | grep -q "mod.cpython-311.pyc" \
   || fail "gate-push must name the offending paths: $g"
 [ "$(git -C "$bare" ls-tree -r --name-only "$base" 2>/dev/null | grep -c pycache)" = "0" ] \
   || fail "an artifact reached the remote — F102 reproduced"
-pass "gate-push refuses; the artifact never reaches the remote (F102 closed)"
+pass "gate-push still refuses; the artifact never reaches the remote (F102 closed)"
 
-# The override exists and is deliberate.
+# The push-side override exists and is deliberate.
 rc=0; "${L[@]}" gate-push --allow-artifacts >/dev/null 2>&1 || rc=$?
 [ "$rc" = "0" ] || fail "--allow-artifacts must permit a deliberate push, got $rc"
-pass "--allow-artifacts is the deliberate override"
+pass "--allow-artifacts is the deliberate push-side override"
 
 echo "ALL PASS"
