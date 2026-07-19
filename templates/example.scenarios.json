@@ -14,7 +14,15 @@
       "id": "first-run",
       "charter": "First-time user follows the README quickstart and judges whether the plugin's primary command is understandable end to end.",
       "prompt": "Run the plugin's main command as a brand-new user following its README. Then, as the user, check: did you understand what it produced, and could you tell what to do next?",
-      "max_turns": 40
+      "max_turns": 40,
+      "probe": {
+        "_comment": "Optional (story 1.24): one required evidence predicate — the run REACHED its probe iff this matches the recorded events — plus an unordered named set of checkpoint predicates. Each is {on: events|raw, type?, match(regex)}. Names are opaque; no ordering is assumed. Omit the block entirely when the charter has no specific stage to probe (coverage then reads `undeclared`).",
+        "required": {"on": "events", "type": "outcome", "match": "primary command completed|produced output"},
+        "checkpoints": {
+          "readme-read": {"on": "events", "match": "README"},
+          "command-invoked": {"on": "events", "type": "skill_start", "match": "."}
+        }
+      }
     },
     {
       "id": "pinned-branch",
