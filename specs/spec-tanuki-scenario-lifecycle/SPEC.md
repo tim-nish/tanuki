@@ -469,8 +469,8 @@ and `exploration_quota` keep their meanings.
 
 ## Host bindings & declared-input configuration (RATIFIED 2026-07-19 — decomposed 2026-07-19)
 
-Design records: issues #172 (declared-input configuration surface) and #173
-(host portability); identity ruling in
+Design records: issues #172 (declared-input configuration surface), #173
+(host portability), and #208 (built-in input catalog); identity ruling in
 `DECISION-2026-07-19-host-identity.md` (this directory). The invariants,
 folded here so the spec is self-contained; the issues carry the full design:
 
@@ -484,11 +484,30 @@ folded here so the spec is self-contained; the issues carry the full design:
   advancing the host repo never changes identity. Renaming a binding is an
   explicit operator act.
 - **Configuration is a declared-input surface, not a hidden file hunt.**
-  Targets declare editable fields (`inputs` block: type from a small generic
-  vocabulary, scope, binding point, optional opaque doctor hook); Tanuki
-  validates by type only and never interprets meaning. The surface is an
-  action in the existing `/tanuki` picker — no new top-level command. The
-  backing JSON stays the source of truth; hand-editing remains legal.
+  The editable surface is the union of **target-declared fields** (`inputs`
+  block: type from a small generic vocabulary, scope, binding point,
+  optional opaque doctor hook) and the **built-in input catalog** (below);
+  a target declaration shadows, and may explicitly suppress, a catalog
+  entry of the same name. Tanuki validates by type only and never
+  interprets meaning. The surface is an action in the existing `/tanuki`
+  picker — no new top-level command. The backing JSON stays the source of
+  truth; hand-editing remains legal.
+- **The built-in input catalog (amended 2026-07-19 — issue #208).** Tanuki
+  ships declarations for its own generic keys, so `configure` works on a
+  fresh target with no hand-authored `inputs` block. Catalog fields behave
+  exactly like declared inputs in `show`/`check`/`set` (typed validation,
+  dry-run, review-before-persist), source-labeled `[built-in input]` vs
+  `[declared]`; values persist into the target's scenarios file at the
+  `binds` path — the catalog supplies only the declaration, never the
+  storage. A suppressed catalog field renders read-only with the
+  suppression stated. **Admission rule:** a field enters the catalog only
+  if Tanuki owns its semantics and can validate values with zero target
+  knowledge; growing the catalog means amending this table first.
+
+  | catalog field (v1)  | type | values                | binds                    |
+  |---------------------|------|-----------------------|--------------------------|
+  | `drive_model`       | enum | cheap tiers only      | `loop.drive_model`       |
+  | `drive_concurrency` | enum | `1`, `2`, `4`, `8`    | `loop.drive_concurrency` |
 - **A one-shot per-run override never touches canonical state.** It expires
   after exactly one drive, the manifest records the effective resolved
   inputs, an active override renders loudly, and the run is excluded from
@@ -503,6 +522,8 @@ folded here so the spec is self-contained; the issues carry the full design:
 
 Decomposition: stories 1.27–1.29 (umbrella #172) and 1.30–1.33 (umbrella
 #173) — created `ready`, flowing through /publish-issues → /implement-story.
+Story 1.37 (umbrella #208, bound `issue: 208`) carries the built-in input
+catalog.
 
 ## Compatibility and migration
 

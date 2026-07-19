@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# Fixture for the built-in input catalog (story 1.37 / issue #208,
+# spec-tanuki-scenario-lifecycle "Host bindings & declared-input
+# configuration" — catalog table). Asserts: a fresh target with NO `inputs`
+# block gets the catalog fields editable end-to-end (show/check/dry-run/set,
+# value landing at the binds path); a target declaration of the same name
+# shadows the catalog wholesale (narrowed enum wins); a null declaration
+# suppresses the field (read-only, set/check refused); null on a non-catalog
+# name fails closed; non-catalog undeclared fields stay read-only exactly as
+# before.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+cfg="$here/tanuki-config"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+C=("$cfg" --target t)
+
+canon="$TANUKI_ROOT/scenarios/t.scenarios.json"
+mkdir -p "$(dirname "$canon")"
+cat > "$canon" <<EOF
+{"target":"t","plugin":"$tmp/plugin",
+ "scenarios":[{"id":"s1","charter":"c","prompt":"p"}]}
+EOF
+
+# --- fresh target, no inputs block: catalog fields are editable ----------------
+s="$("${C[@]}" show --json)"
+echo "$s" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+by = {f["field"]: f for f in d["declared"]}
+assert "drive_model" in by and "drive_concurrency" in by, sorted(by)
+assert by["drive_model"]["declaration"] == "built-in input", by["drive_model"]
+assert by["drive_model"]["value"] == "claude-sonnet-5" \
+    and by["drive_model"]["source"] == "built-in input", by["drive_model"]
+assert by["drive_concurrency"]["binds"] == "loop.drive_concurrency"
+assert d["suppressed"] == [], d["suppressed"]
+' || fail "catalog fields must render editable with [built-in input] source"
+"${C[@]}" show | grep -q "built-in input" \
+  || fail "human render must label catalog declarations"
+"${C[@]}" show | grep -q "no inputs declared" \
+  || fail "absent inputs block still renders its one-line state"
+"${C[@]}" show | grep -q "only hand-editing is available" \
+  && fail "the no-inputs line must not claim only hand-editing remains" || true
+pass "fresh target: catalog editable, [built-in input] labeled, notice reworded"
+
+# --- end-to-end: check -> dry-run (no write) -> set lands at binds path --------
+"${C[@]}" check --field drive_concurrency --value 4 > /dev/null \
+  || fail "catalog field must pass check"
+before="$(cat "$canon")"
+"${C[@]}" set --field drive_concurrency --value 4 --dry-run > /dev/null
+[ "$(cat "$canon")" = "$before" ] || fail "dry-run must write nothing"
+"${C[@]}" set --field drive_concurrency --value 4 > /dev/null \
+  || fail "catalog field set must persist"
+python3 -c '
+import json; d = json.load(open("'"$canon"'"))
+assert d["loop"]["drive_concurrency"] == "4", d.get("loop")
+' || fail "catalog set must land at the binds path in the scenarios file"
+"${C[@]}" set --field drive_model --value gpt-4 2>/dev/null \
+  && fail "catalog enum must reject a non-member" || true
+"${C[@]}" show --json | python3 -c '
+import json, sys
+by = {f["field"]: f for f in json.load(sys.stdin)["declared"]}
+assert by["drive_concurrency"]["value"] == "4" \
+    and by["drive_concurrency"]["source"] == "scenarios file", by["drive_concurrency"]
+' || fail "a persisted catalog value must re-display from the file layer"
+pass "end-to-end: check, dry-run (no write), set persists at binds path"
+
+# --- shadowing: a target declaration of the same name wins wholesale -----------
+python3 -c '
+import json; p = "'"$canon"'"; d = json.load(open(p))
+d["inputs"] = {"drive_model": {"type": "enum",
+                               "values": ["claude-sonnet-5"],
+                               "scope": "per-target",
+                               "binds": "loop.drive_model"}}
+json.dump(d, open(p, "w"))
+'
+"${C[@]}" set --field drive_model --value claude-haiku-4-5-20251001 2>/dev/null \
+  && fail "a target-narrowed enum must reject what the catalog would accept" \
+  || true
+"${C[@]}" show --json | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+by = {f["field"]: f for f in d["declared"]}
+assert by["drive_model"]["declaration"] == "declared", by["drive_model"]
+assert by["drive_concurrency"]["declaration"] == "built-in input"
+' || fail "shadowed field must render as declared; the rest stay catalog"
+pass "shadowing: same-name declaration wins wholesale, narrowed enum enforced"
+
+# --- suppression: null declaration -> read-only, set/check refused -------------
+python3 -c '
+import json; p = "'"$canon"'"; d = json.load(open(p))
+d["inputs"] = {"drive_model": None}; json.dump(d, open(p, "w"))
+'
+"${C[@]}" show --json | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["suppressed"] == ["drive_model"], d["suppressed"]
+assert "drive_model" not in {f["field"] for f in d["declared"]}
+' || fail "null declaration must suppress the catalog field"
+"${C[@]}" show | grep -q "suppressed catalog field" \
+  || fail "human render must state the suppression"
+"${C[@]}" set --field drive_model --value claude-sonnet-5 2>"$tmp/err" \
+  && fail "set on a suppressed field must be refused" || true
+grep -q "suppressed" "$tmp/err" || fail "the refusal must name the suppression"
+"${C[@]}" check --field drive_model --value claude-sonnet-5 2>/dev/null \
+  && fail "check on a suppressed field must be refused" || true
+pass "suppression: null -> read-only with the state named, set/check refused"
+
+# --- null on a non-catalog name fails closed -----------------------------------
+python3 -c '
+import json; p = "'"$canon"'"; d = json.load(open(p))
+d["inputs"] = {"mystery": None}; json.dump(d, open(p, "w"))
+'
+"${C[@]}" show 2>"$tmp/err" && fail "null on a non-catalog name must fail" || true
+grep -q "not in the built-in catalog" "$tmp/err" \
+  || fail "the defect must be named"
+pass "null on a non-catalog name: fail closed, defect named"
+
+# --- non-catalog undeclared fields stay read-only ------------------------------
+python3 -c '
+import json; p = "'"$canon"'"; d = json.load(open(p))
+del d["inputs"]; json.dump(d, open(p, "w"))
+'
+"${C[@]}" set --field max_turns --value 10 2>"$tmp/err" \
+  && fail "a non-catalog undeclared field must stay read-only" || true
+grep -q "not a declared input" "$tmp/err" \
+  || fail "the refusal must say the field is undeclared"
+pass "non-catalog undeclared field: read-only exactly as before"
+
+echo "all checks passed"

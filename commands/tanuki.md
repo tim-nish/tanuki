@@ -114,10 +114,16 @@ Argument handling ($ARGUMENTS):
   spec section). A bare word — it does not drive. The flow, entirely over
   `tanuki-config` (deterministic substrate; render, don't compute):
   1. Render `tanuki-config --target <t> show` — effective configuration with
-     each value's source labeled; undeclared fields are read-only. With no
-     `inputs` block, show's one-line state is the whole answer plus a
-     pointer at declaring one — never a guess.
-  2. Pick the field to change via AskUserQuestion (declared fields only —
+     each value's source labeled. Editable = the target's declared fields
+     plus the **built-in input catalog** (story 1.37 / #208: Tanuki-owned
+     generic keys — `drive_model`, `drive_concurrency` — shipped so
+     `configure` works on a fresh target with no `inputs` block; a
+     same-name declaration shadows a catalog entry, a `null` declaration
+     suppresses it). Suppressed and undeclared fields are read-only. With
+     no `inputs` block, show still lists the catalog fields as editable and
+     notes that declaring an `inputs` block adds target-specific ones —
+     never a guess.
+  2. Pick the field to change via AskUserQuestion (editable fields only —
      selection beats typing), then collect the new value.
   3. `tanuki-config check --field F --value V` — typed validation; a
      failure is relayed and the flow returns to step 2.
@@ -182,7 +188,11 @@ Run from inside the plugin repo (contract:
    the persisted membership record, #170. (Declaring an
    `axes`/`covers` exploration space was REMOVED 2026-07-18 — operator
    decision; a matrix may still carry the keys, tools ignore them.)
-5. Offer the `"loop"` block (derive a `test_cmd` per /tanuki-loop's rule).
+5. Offer the `"loop"` block (derive a `test_cmd` per /tanuki-loop's rule),
+   and mention that `/tanuki <slug> configure` already works out of the box:
+   the built-in input catalog (`drive_model`, `drive_concurrency`) is
+   editable with no `inputs` block — declaring one only adds target-specific
+   fields (story 1.37 / #208).
 
 Manual alternative (still supported): copy an existing scenarios file (or the
 bundled `${CLAUDE_PLUGIN_ROOT}/templates/example.scenarios.json`) to
