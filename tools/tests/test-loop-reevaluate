@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Fixture for `tanuki-loop site-record` + `reevaluate` — finding-level,
+# per-manifestation-site behavior re-evaluation (story 1.39, #212; #210).
+#
+# The load-bearing rule: a finding is resolved/superseded ONLY when its
+# behavior is closed at EVERY known site. Regression anchors:
+#   F77 — two sites, base fixed only one; "superseded" shipped a half-fix.
+#   F79 — independently resolved; must auto-classify resolved WITH stored
+#         reproducing evidence, not re-litigated by hand each sitting.
+# Fail closed: no recorded sites, or a probe that cannot run -> needs-owner.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
+export TANUKI_ROOT="$root"
+L=("$here/tanuki-loop" --target t)
+jget() { python3 -c "import json,sys;print(json.load(sys.stdin)$1)"; }
+
+repo="$root/repo"; git init -q "$repo"
+git -C "$repo" checkout -qb main
+git -C "$repo" config user.email a@b.c; git -C "$repo" config user.name t
+# Base behavior: cmd_review_consulted carries the fix; cmd_journal does NOT.
+printf 'def cmd_review_consulted():\n    guard_interview_seam()\n' > "$repo/review.py"
+printf 'def cmd_journal():\n    pass  # unguarded\n' > "$repo/journal.py"
+git -C "$repo" add -A; git -C "$repo" commit -qm base
+"${L[@]}" init --loop-repo "$repo" --cap 2 >/dev/null
+
+# An unresolved branch citing F77 makes the finding enter the sweep set.
+git -C "$repo" branch tanuki-loop/t/20260101-aaa main
+git -C "$repo" checkout -q tanuki-loop/t/20260101-aaa
+echo x > "$repo/wip"; git -C "$repo" add -A
+git -C "$repo" commit -qm "wip (F77)"
+git -C "$repo" checkout -q main
+
+# --- fail closed: cited finding with no recorded sites -----------------------
+o="$("${L[@]}" reevaluate --json)"
+v="$(echo "$o" | jget '["findings"]["F77"]["verdict"]')"
+[ "$v" = "needs-owner" ] || fail "no recorded sites must fail closed: $v"
+pass "fail closed: cited finding, no sites recorded -> needs-owner"
+
+# --- F77 two sites: one closed, one live -> never superseded -----------------
+"${L[@]}" site-record --finding F77 --site cmd_review_consulted \
+  --file review.py --contains guard_interview_seam >/dev/null
+"${L[@]}" site-record --finding F77 --site cmd_journal \
+  --file journal.py --contains guard_interview_seam >/dev/null
+o="$("${L[@]}" reevaluate --json)"
+v="$(echo "$o" | jget '["findings"]["F77"]["verdict"]')"
+[ "$v" = "still-applicable-at-remaining-sites" ] \
+  || fail "F77 must NOT be superseded while cmd_journal is live: $v"
+r="$(echo "$o" | jget '["findings"]["F77"]["remaining_sites"]')"
+[ "$r" = "['cmd_journal']" ] || fail "the live site must be NAMED: $r"
+pass "F77 guard: two sites, one live -> still-applicable, live site named"
+
+# --- closing the second site flips the verdict to resolved -------------------
+printf 'def cmd_journal():\n    guard_interview_seam()\n' > "$repo/journal.py"
+git -C "$repo" commit -qam "fix journal seam"
+o="$("${L[@]}" reevaluate --json)"
+v="$(echo "$o" | jget '["findings"]["F77"]["verdict"]')"
+[ "$v" = "resolved" ] || fail "both sites closed must resolve: $v"
+pass "closure at every known site -> resolved"
+
+# --- superseded label: ledger holds the finding accepted-and-tombstoned ------
+python3 - "$root/t/ledger.json" <<'EOF'
+import json,sys
+json.dump({"findings":[{"id":"F77","status":"accepted",
+                        "tombstone":{"by":"test"}}]}, open(sys.argv[1],"w"))
+EOF
+o="$("${L[@]}" reevaluate --json)"
+v="$(echo "$o" | jget '["findings"]["F77"]["verdict"]')"
+[ "$v" = "superseded" ] \
+  || fail "accepted-and-tombstoned + all sites closed -> superseded: $v"
+pass "all closed + accepted-and-tombstoned ledger entry -> superseded"
+
+# --- F79: independently resolved, auto-classified with stored evidence -------
+"${L[@]}" site-record --finding F79 --site working-note-start \
+  --run "grep -q guard_interview_seam journal.py" >/dev/null
+o="$("${L[@]}" reevaluate --finding F79 --json)"
+v="$(echo "$o" | jget '["findings"]["F79"]["verdict"]')"
+[ "$v" = "resolved" ] || fail "F79 must auto-classify resolved: $v"
+ev="$(echo "$o" | jget '["findings"]["F79"]["sites"][0]["evidence"]')"
+echo "$ev" | grep -q "rc 0" || fail "reproducing evidence must be stored: $ev"
+pass "F79: behavior probe rc 0 -> resolved, with stored evidence"
+
+# --- evidence persists and is re-derivable -----------------------------------
+python3 - "$root/t/reconcile.json" <<'EOF'
+import json,sys
+d=json.load(open(sys.argv[1]))
+f=d["findings"]["F77"]["verdict"]
+assert f["verdict"]=="superseded", f
+assert all("evidence" in s and s["closed"] for s in f["sites"]), f
+assert "evaluated_against" in f, f
+EOF
+pass "per-site closure evidence persisted, auditable, re-derivable"
+
+# --- fail closed: a probe that cannot execute --------------------------------
+"${L[@]}" site-record --finding F80 --site broken \
+  --run "/no/such/binary --x" >/dev/null
+o="$("${L[@]}" reevaluate --finding F80 --json)"
+v="$(echo "$o" | jget '["findings"]["F80"]["verdict"]')"
+[ "$v" = "needs-owner" ] || fail "unexecutable probe must fail closed: $v"
+pass "fail closed: unexecutable probe -> needs-owner, never assumed closed"
+
+echo "ALL PASS"
