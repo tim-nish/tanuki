@@ -1368,6 +1368,191 @@ def load_policy_source(target):
     return block
 
 
+def load_contribute_back(target):
+    """The optional contribute_back block (spec-den-distill §2), sibling of
+    policy_source with the same precedence: ~/.tanuki/config.json < the
+    target scenarios file's "defaults" block. None when unset — the feature
+    then does not exist (zero behavior change anywhere)."""
+    block = None
+    path = os.path.join(TANUKI_ROOT, "config.json")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            block = json.load(f).get("contribute_back", block)
+    spath = os.path.join(TANUKI_ROOT, "scenarios", f"{target}.scenarios.json")
+    if os.path.exists(spath):
+        with open(spath, encoding="utf-8") as f:
+            block = json.load(f).get("defaults", {}).get("contribute_back",
+                                                         block)
+    return block
+
+
+def cb_validate(block):
+    """Validate the contribute_back block by SHAPE only (the doctor check,
+    spec-den-distill §2): path exists and is a directory, schema template
+    resolves to a file. Raises ValueError naming the defect. No hub
+    semantics — the template's content is the hub's business."""
+    if not isinstance(block, dict):
+        raise ValueError("contribute_back must be an object "
+                         "{path: <staging dir>, schema: <template file>}")
+    path, schema = block.get("path"), block.get("schema")
+    if not path or not isinstance(path, str):
+        raise ValueError("contribute_back.path missing (the hub staging "
+                         "directory — the ONLY path this feature may write)")
+    p = os.path.expanduser(path)
+    if not os.path.isdir(p):
+        raise ValueError(f"contribute_back.path is not an existing "
+                         f"directory: {p}")
+    if not schema or not isinstance(schema, str):
+        raise ValueError("contribute_back.schema missing (the intake "
+                         "template file the hub declares)")
+    t = os.path.expanduser(schema)
+    if not os.path.isfile(t):
+        raise ValueError(f"contribute_back.schema does not resolve to a "
+                         f"file: {t}")
+    return p, t
+
+
+def distill_candidates(ledger, cfg):
+    """Findings that cleared the EXISTING promotion bar (chronic >=
+    min_recurrence OR breadth >= min_scenarios — no new thresholds, spec-den-
+    distill §3), are alive (no tombstone, not dismissed), and were not
+    already contributed. Deterministic enumeration; which of these are
+    lesson-shaped is the gate's judgment, never this tool's."""
+    return [f for f in ledger["findings"]
+            if not f.get("tombstone") and f.get("status") != "dismissed"
+            and not f.get("contributed")
+            and (f.get("recurrence", 1) >= cfg["min_recurrence"]
+                 or len(f.get("scenarios", [])) >= cfg["min_scenarios"])]
+
+
+def cmd_distill(args, ledger):
+    """den-distill contribute-back (spec-den-distill; story 1.34 / #178):
+    proposal-only, schema-conforming, STAGING-DIRECTORY-ONLY.
+
+    --check          doctor substrate: validate the block, exit 0/2 naming
+                     the defect — run before anything consumes the config
+    --list           enumerate bar-clearing, not-yet-contributed candidates
+                     (works unconfigured — the command layer's "N candidates;
+                     contribute-back not configured" notice needs the count)
+    --id F --slug s  emit ONE candidate as a staging-intake file rendered
+                     from the configured template ({slug}/{created}/
+                     {source_repo}/{title}/{kind}/{tags}/{perishable}/
+                     {recurrence}/{provenance}/{body} tokens replaced;
+                     everything else verbatim — rendering is mechanical, the
+                     judgment happened at the gate). The write lands inside
+                     the configured staging directory or not at all; an
+                     existing file is never clobbered. Records a
+                     `contributed` MARKER on the finding ({at, file, slug} —
+                     a modifier like `tombstone`, per the issue-#62
+                     precedent, never a fifth status): re-runs bump
+                     recurrence but can never re-emit a duplicate.
+
+    Attended-gate work: this tool writes only when explicitly invoked per
+    item; /tanuki-loop never calls it (spec-den-distill §1)."""
+    cfg = load_config()
+    block = load_contribute_back(args.target)
+    if args.check:
+        if block is None:
+            print("error: contribute_back is not configured (set "
+                  "{path, schema} under defaults in the scenarios file or "
+                  "~/.tanuki/config.json)", file=sys.stderr)
+            sys.exit(2)
+        try:
+            p, t = cb_validate(block)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(2)
+        print(json.dumps({"ok": True, "path": p, "schema": t}, indent=2))
+        return
+    cands = distill_candidates(ledger, cfg)
+    if args.list:
+        print(json.dumps(
+            {"configured": block is not None,
+             "candidates": [{"id": f["id"], "title": f["title"],
+                             "kind": f["kind"],
+                             "recurrence": f.get("recurrence", 1),
+                             "scenarios": f.get("scenarios", []),
+                             "status": f.get("status")} for f in cands]},
+            indent=2))
+        return
+    if not args.id:
+        print("error: one of --check, --list, or --id is required",
+              file=sys.stderr)
+        sys.exit(2)
+    if block is None:
+        print("error: contribute_back is not configured — nothing can be "
+              "emitted (candidates remain visible via --list)",
+              file=sys.stderr)
+        sys.exit(2)
+    try:
+        staging, template_path = cb_validate(block)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(2)
+    finding = next((f for f in ledger["findings"] if f["id"] == args.id),
+                   None)
+    if finding is None:
+        print(f"error: no finding {args.id}", file=sys.stderr)
+        sys.exit(2)
+    if finding.get("contributed"):
+        print(f"error: {args.id} was already contributed "
+              f"({finding['contributed']['file']}) — re-observation bumps "
+              "recurrence but never re-emits (the dedupe contract)",
+              file=sys.stderr)
+        sys.exit(2)
+    if finding not in cands:
+        print(f"error: {args.id} has not cleared the promotion bar "
+              f"(recurrence >= {cfg['min_recurrence']} or scenarios >= "
+              f"{cfg['min_scenarios']}) or is dead — not a candidate",
+              file=sys.stderr)
+        sys.exit(2)
+    slug = re.sub(r"[^a-z0-9-]+", "-",
+                  (args.slug or f"tanuki-{args.target}-{finding['id']}")
+                  .lower()).strip("-")
+    if not slug:
+        print("error: slug reduces to nothing after sanitization",
+              file=sys.stderr)
+        sys.exit(2)
+    dest = os.path.join(staging, f"{slug}.md")
+    # The write-path allowlist is the boundary this feature stands on: the
+    # rendered file lands inside the configured staging directory or nowhere.
+    if os.path.realpath(os.path.dirname(dest)) != os.path.realpath(staging):
+        print(f"error: refusing write outside the staging directory: {dest}",
+              file=sys.stderr)
+        sys.exit(2)
+    if os.path.exists(dest):
+        print(f"error: {dest} already exists — never clobbered (pick "
+              "another --slug)", file=sys.stderr)
+        sys.exit(2)
+    with open(template_path, encoding="utf-8") as f:
+        rendered = f.read()
+    sentences = [finding["title"].rstrip(".") + "."]
+    sentences += [n.rstrip(".") + "." for n in finding.get("notes", [])]
+    provenance = (f"finding {finding['id']} (kind {finding['kind']}); "
+                  f"recurrence {finding.get('recurrence', 1)}; scenarios "
+                  f"{', '.join(finding.get('scenarios', [])) or '-'}; "
+                  f"evidence {', '.join(finding.get('evidence', [])[:4]) or '-'}")
+    for token, value in (("{slug}", slug),
+                         ("{created}", date.today().isoformat()),
+                         ("{source_repo}", args.target),
+                         ("{title}", finding["title"]),
+                         ("{kind}", finding["kind"]),
+                         ("{tags}", f"tanuki, {finding['kind']}"),
+                         ("{perishable}", "false"),
+                         ("{recurrence}", str(finding.get("recurrence", 1))),
+                         ("{provenance}", provenance),
+                         ("{body}", " ".join(sentences))):
+        rendered = rendered.replace(token, value)
+    tmp = dest + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(rendered)
+    os.replace(tmp, dest)
+    finding["contributed"] = {"at": date.today().isoformat(), "file": dest,
+                              "slug": slug}
+    save(args.target, ledger)
+    print(f"contributed {finding['id']} -> {dest}")
+
+
 def cmd_policy_surface(args, ledger):
     """Bounded, pinned, read-only policy reader (specs/spec-policy-advisory §2).
     Reads ONLY the configured `files` allowlist under policy_source.path, pins
@@ -1704,6 +1889,22 @@ def main():
             "enhancer, not a dependency: unset policy_source -> "
             "{\"configured\": false}; unusable path -> {\"available\": false}. "
             "See specs/spec-policy-advisory."))
+    sp = sub.add_parser(
+        "distill",
+        help="den-distill contribute-back (spec-den-distill): --check "
+             "validates the contribute_back block (the doctor substrate); "
+             "--list enumerates bar-clearing, not-yet-contributed "
+             "candidates; --id emits ONE candidate as a schema-conforming "
+             "staging-intake file — staging-directory-only, never "
+             "re-emitted, attended-gate work (the loop never calls this)",
+        description=cmd_distill.__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    sp.add_argument("--check", action="store_true")
+    sp.add_argument("--list", action="store_true")
+    sp.add_argument("--id", default=None)
+    sp.add_argument("--slug", default=None,
+                    help="staging file slug (sanitized to [a-z0-9-]; "
+                         "default tanuki-<target>-<finding id>)")
     args = p.parse_args()
 
     if args.cmd == "upsert-finding" and not args.match and not args.title:
@@ -1717,6 +1918,7 @@ def main():
      "consolidate": cmd_consolidate,
      "compact": cmd_compact, "scenario-yield": cmd_scenario_yield,
      "stats": cmd_stats, "policy-surface": cmd_policy_surface,
+     "distill": cmd_distill,
      "status": cmd_status, "next": cmd_next}[args.cmd](args, ledger)
     return 0
 
