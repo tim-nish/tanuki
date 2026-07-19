@@ -29,9 +29,11 @@ printf '{"run":"r001","scenario":"login","seq":1,"type":"note","detail":"x"}\n' 
 status="$("${L[@]}" status)"
 nxt="$("${L[@]}" next)"
 
-# (a) threshold is named on both surfaces, from config (default 3).
-echo "$status" | grep -q "hint:" \
-  || fail "status must carry a compaction hint under the ACCEPTED block"
+# (a) threshold is named on both surfaces, from config (default 3). The hint
+#     sentence renders exactly ONCE per output (F183: the ACCEPTED block used
+#     to repeat the same sentence the trailing next: line already carries).
+[ "$(echo "$status" | grep -c "compaction tombstones")" = "1" ] \
+  || fail "status must render the compaction hint sentence exactly once"
 echo "$status" | grep -Eq -- '>= 3 run\(s\).*--unseen-runs|--unseen-runs' \
   || fail "status hint must name the --unseen-runs threshold (3)"
 echo "$status" | grep -q "3 run(s)" \

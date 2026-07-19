@@ -79,7 +79,7 @@ import os
 import re
 import subprocess
 import sys
-from datetime import date
+from datetime import date, datetime
 
 TANUKI_ROOT = os.environ.get("TANUKI_ROOT", os.path.expanduser("~/.tanuki"))
 KINDS = ("friction", "papercut", "gap")
@@ -145,10 +145,11 @@ def run_of(pointer):
 
 def run_key(run):
     """Chronological sort key for a run id. Driven runs are '<YYYYMMDD>-<rand>'
-    but manual ingests are 'manual-<YYYYMMDD>' (ingest-note), so plain lexical
-    order is NOT chronological ('manual-…' would sort after every dated run
-    forever, starving compaction's absence counting). Key on the embedded
-    8-digit date wherever it appears; an id with no date sorts oldest."""
+    but manual ingests are 'manual-<YYYYMMDD>-<HHMMSS>' (ingest-note; pre-F184
+    dirs are 'manual-<YYYYMMDD>' and stay valid), so plain lexical order is
+    NOT chronological ('manual-…' would sort after every dated run forever,
+    starving compaction's absence counting). Key on the embedded 8-digit date
+    wherever it appears; an id with no date sorts oldest."""
     m = re.search(r"\d{8}", run or "")
     return (m.group(0) if m else "00000000", run or "")
 
@@ -284,6 +285,15 @@ def cmd_ingest(args, ledger):
     # manual manifest (skips any run that already has a driven one).
     for run in sorted(runs_seen):
         write_manual_manifest(args.target, run)
+        # run_key() sorts by the embedded 8-digit date; an id without one
+        # silently sorts oldest, so `status`'s latest-run line and elapsed-runs
+        # compaction counting quietly stop working for it (F172). Warn at the
+        # one moment the id enters the system — never reject the ingest.
+        if not re.search(r"\d{8}", run):
+            print(f"warning: run id {run!r} has no 8-digit YYYYMMDD date — it "
+                  f"will sort as the OLDEST run, so chronological ordering "
+                  f"(status 'latest') and elapsed-runs compaction tracking "
+                  f"will not work for it", file=sys.stderr)
     # flush: piped stdout is block-buffered while stderr is not, so without it
     # the collapsed detail lines (stderr) overtake this summary in a merged
     # capture and the output reads backwards (F121).
@@ -303,20 +313,25 @@ def cmd_ingest(args, ledger):
 def cmd_ingest_note(args, ledger):
     """Record human feedback verbatim as an Event — the human never classifies
     (docs/tanuki-spec.md "Human feedback ingest"). Writes an
-    unjudged `note` event (source: human, run id manual-<date>) to the run's
-    events file and into the ledger. Semantic judgment — whether it yields a
+    unjudged `note` event (source: human, run id manual-<YYYYMMDD>-<HHMMSS>)
+    to the run's events file and into the ledger. Semantic judgment — whether it yields a
     finding, its kind, bump-vs-new — is the caller's downstream extraction +
     dedupe pass, exactly as for a driven run; this tool only stores the fact."""
     text = args.text.strip()
     if not text:
         print("error: --text must be non-empty feedback", file=sys.stderr)
         sys.exit(2)
-    run = "manual-" + date.today().strftime("%Y%m%d")
+    # F184 (approved contract change): the run id carries the note's time, not
+    # just its date — same-day notes used to collapse into one manual-<date>
+    # run, so elapsed-runs compaction never advanced across them. Old
+    # manual-<YYYYMMDD> run dirs stay valid on read (run_key sorts by the
+    # embedded date either way); no migration.
+    run = "manual-" + datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir = os.path.join(TANUKI_ROOT, args.target, "events", run)
     announce_new_target(args.target)
     os.makedirs(run_dir, exist_ok=True)
     events_file = os.path.join(run_dir, "ingest.events.jsonl")
-    # Sequence within the day so repeated same-day ingests don't collide.
+    # Sequence within the run so same-second ingests don't collide.
     seq = 1
     if os.path.exists(events_file):
         with open(events_file, encoding="utf-8") as f:
@@ -1324,13 +1339,20 @@ def cmd_status(args, ledger):
             print(f"    {priority(f)} {f['id']} [{f['kind']}] "
                   f"rec:{f['recurrence']} scen:{len(f['scenarios'])} — "
                   f"{f['title'][:90]}")
+    # Derived once, shared with the trailing `next:` line so the compaction
+    # hint can render exactly once (F183): in the accepted-awaiting state
+    # render_next() already ends with the same sentence, so printing it here
+    # too repeated it verbatim within one output.
+    nxt = next_step(args.target, ledger)
     # Tombstoned accepted findings are already verified-fixed — not awaiting.
     awaiting = [f for f in by["accepted"] if not f.get("tombstone")]
     if awaiting:
         print("\n  ACCEPTED — awaiting fix verification (should stop recurring):")
         for f in awaiting:
             print(f"    {f['id']} rec:{f['recurrence']} — {f['title'][:90]}")
-        print(f"    hint: {compaction_hint(awaiting)}")
+        hint = compaction_hint(awaiting)
+        if hint not in nxt:
+            print(f"    hint: {hint}")
     watching = sorted(by["open"], key=lambda f: (-f["recurrence"],
                                                  -len(f["scenarios"])))
     if watching:
@@ -1345,7 +1367,7 @@ def cmd_status(args, ledger):
                   f"{f['title'][:90]}")
     # Derived, never patched string logic (F24/F36/F76): the same closed-
     # enumeration derivation the `next` subcommand exposes alone.
-    print(f"\n  next: {next_step(args.target, ledger)}")
+    print(f"\n  next: {nxt}")
 
 
 # specs/spec-policy-advisory: the read allowlist is capped and code-enforced.
@@ -1679,7 +1701,18 @@ def main():
                         "are rejected); state lives under "
                         "$TANUKI_ROOT/<target>/ (default ~/.tanuki/<target>/)")
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("init")
+    sub.add_parser(
+        "init",
+        help="create the target's ledger (or reuse an existing one — the "
+             "namespace is shared machine-wide)",
+        description=(
+            "Create the target's ledger file. The namespace is SHARED "
+            "machine-wide: every session's --target <slug> resolves to the "
+            "same $TANUKI_ROOT/<target>/ (default ~/.tanuki/<target>/), so "
+            "init on a slug some other session already used REUSES that "
+            "ledger — a note on stderr names the reuse and its size; nothing "
+            "is ever wiped and there is no fresh-start flag (F164). If you "
+            "expected a fresh target, pick an unused slug."))
     sp = sub.add_parser(
         "ingest",
         help="record events from JSONL file(s); exact dupes collapse to a count",
