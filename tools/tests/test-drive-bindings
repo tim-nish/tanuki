@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Fixture for declared bindings/placeholders (story 1.31 / issue #173):
+# scenario prompts and host_setup may reference {name} tokens declared in the
+# scenarios file's `bindings` block — per-target scalars or per-host maps
+# keyed by host_binding_id. Resolution happens before the driver sees any
+# text; a referenced name with no value under the effective binding fails
+# closed naming the binding; undeclared braces (JSON literals, prose) pass
+# through untouched; the same charter resolves differently under two hosts
+# with zero prompt edits.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+
+python3 - "$here/tanuki-drive" <<'PY' || fail "resolve_bindings contract"
+import copy, importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("td", sys.argv[1])
+spec = importlib.util.spec_from_loader("td", loader)
+td = importlib.util.module_from_spec(spec); loader.exec_module(td)
+
+data = {
+    "bindings": {
+        "subject_sources": {"a": "specs/qa.md", "b": "docs/spec.md"},
+        "draft_location": "drafts/",
+    },
+}
+def scen():
+    return [{"id": "s1",
+             "prompt": 'Review {subject_sources}, save to {draft_location}. '
+                       'Literal JSON {"x":1} and {undeclared} stay.',
+             "host_setup": ["cp {subject_sources} work/", "echo {\"y\":2}"]}]
+
+# Per-host + per-target resolution under binding a.
+s = scen()
+used = td.resolve_bindings(data, s, "a")
+assert used == {"subject_sources": "specs/qa.md",
+                "draft_location": "drafts/"}, used
+assert s[0]["prompt"].startswith("Review specs/qa.md, save to drafts/."), s[0]["prompt"]
+assert '{"x":1}' in s[0]["prompt"], "JSON literals must pass through untouched"
+assert "{undeclared}" in s[0]["prompt"], "undeclared tokens stay literal"
+assert s[0]["host_setup"][0] == "cp specs/qa.md work/", s[0]["host_setup"]
+assert s[0]["host_setup"][1] == 'echo {"y":2}', s[0]["host_setup"]
+
+# The SAME charter under binding b: different values, zero edits.
+s2 = scen()
+used2 = td.resolve_bindings(copy.deepcopy(data), s2, "b")
+assert used2["subject_sources"] == "docs/spec.md", used2
+assert s2[0]["prompt"].startswith("Review docs/spec.md"), s2[0]["prompt"]
+
+# Referenced but unresolvable under the effective binding: fail closed,
+# naming the binding — a raw placeholder never reaches the driver.
+try:
+    td.resolve_bindings(data, scen(), "c")
+    raise AssertionError("missing per-host value must fail closed")
+except RuntimeError as e:
+    assert "subject_sources" in str(e) and "'c'" in str(e), e
+
+# Per-host reference in a single-binding (None) world: also fail closed.
+try:
+    td.resolve_bindings(data, scen(), None)
+    raise AssertionError("per-host binding with no effective binding must fail")
+except RuntimeError as e:
+    assert "subject_sources" in str(e), e
+
+# No placeholders / no bindings block: unchanged, empty resolution.
+plain = [{"id": "s2", "prompt": "no tokens here", "host_setup": ["true"]}]
+assert td.resolve_bindings({}, copy.deepcopy(plain), "a") == {}
+p2 = copy.deepcopy(plain)
+assert td.resolve_bindings(data, p2, "a") == {}
+assert p2 == plain, "scenarios without references must be untouched"
+PY
+pass "resolution: per-host + per-target values, literal braces safe, fail-closed"
+
+echo "all checks passed"
