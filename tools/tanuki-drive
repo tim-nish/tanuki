@@ -111,6 +111,69 @@ def open_scenarios(path, target):
     return open(p, encoding="utf-8")
 
 
+def consume_override(target, data, estimate):
+    """One-shot per-run override (story 1.29 / #172, ratified spec section
+    "Host bindings & declared-input configuration"): ~/.tanuki/<target>/
+    override.json holds {field: value} written by `tanuki-config set` on a
+    per-run-scoped declared input. Consumed by EXACTLY ONE drive: read,
+    applied to the in-memory scenarios data via each field's declared binds
+    path, then DELETED — a loop iteration is one drive, and a forgotten
+    override must never leak into the next one. --estimate is not a drive
+    and consumes nothing. Values were already type-validated at set time;
+    a field with no surviving declaration is skipped loudly, never guessed.
+    Returns {field: value} of what was applied ({} when none)."""
+    path = os.path.join(TANUKI_ROOT, target, "override.json")
+    if estimate or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            override = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"warning: unreadable override.json ignored and consumed: {e}",
+              file=sys.stderr)
+        os.unlink(path)
+        return {}
+    os.unlink(path)   # consumed at drive start — one drive, then gone
+    if not isinstance(override, dict) or not override:
+        return {}
+    inputs = data.get("inputs") or {}
+    applied = {}
+    for field, value in override.items():
+        decl = inputs.get(field)
+        if not isinstance(decl, dict) or not decl.get("binds"):
+            print(f"warning: override field '{field}' has no declared input "
+                  "binding — skipped (consumed, not persisted)", file=sys.stderr)
+            continue
+        cur = data
+        parts = decl["binds"].split(".")
+        for part in parts[:-1]:
+            cur = cur.setdefault(part, {})
+        cur[parts[-1]] = value
+        applied[field] = value
+        print(f"per-run override: {field} -> {value!r} (override.json "
+              "consumed — this drive only)", file=sys.stderr)
+    return applied
+
+
+def effective_inputs(data):
+    """{field: value} for every declared input, resolved from the (possibly
+    override-mutated) scenarios data — recorded in the manifest so history
+    can distinguish an overridden run without model memory (story 1.29)."""
+    resolved = {}
+    for field, decl in (data.get("inputs") or {}).items():
+        if not isinstance(decl, dict) or not decl.get("binds"):
+            continue
+        cur = data
+        found = True
+        for part in decl["binds"].split("."):
+            if not isinstance(cur, dict) or part not in cur:
+                found = False
+                break
+            cur = cur[part]
+        resolved[field] = cur if found else None
+    return resolved
+
+
 def load_config(scenario_file_data=None):
     cfg = dict(CONFIG_DEFAULTS)
     path = os.path.join(TANUKI_ROOT, "config.json")
@@ -845,6 +908,15 @@ def main():
 
     with open_scenarios(args.scenarios, args.target) as f:
         scenario_file = json.load(f)
+    # One-shot per-run override (story 1.29): applied to the in-memory data
+    # BEFORE the config chain is built, then gone. When it re-binds `host`,
+    # the caller's --host (a relay of the file's stored value) is superseded
+    # for this drive — the exclusion rule keeps this run out of canonical
+    # scheduler/ledger arithmetic either way.
+    override = consume_override(args.target, scenario_file, args.estimate)
+    if "host" in {(scenario_file.get("inputs") or {}).get(f, {}).get("binds")
+                  for f in override}:
+        args.host = scenario_file.get("host")
     scenarios = scenario_file["scenarios"]
     cfg = load_config(scenario_file)
     # Stage-entry fixtures (spec-host-snapshot "Stage-entry fixtures"; story
@@ -968,6 +1040,13 @@ def main():
                 "config": {k: cfg[k] for k in sorted(cfg)},
                 "plugin": args.plugin, "plugin_ref": args.plugin_ref,
                 "host": args.host, "results": results}
+    # Story 1.29: an overridden run is marked in its manifest — the ONE
+    # signal record-run's exclusion and the ledger's off-host tagging key
+    # off — and the effective resolved inputs are recorded for history.
+    if override:
+        manifest["override"] = override
+    if scenario_file.get("inputs"):
+        manifest["effective_inputs"] = effective_inputs(scenario_file)
     with open(os.path.join(run_dir, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
     prog["stage"] = "complete"

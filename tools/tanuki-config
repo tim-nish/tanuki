@@ -305,13 +305,28 @@ def cmd_set(args):
             "read-only here (hand-editing the JSON remains legal)")
     decl = dict(inputs[args.field], name=args.field)
     value = validate(args.field, decl, args.value)
-    old, _ = get_path(data, decl["binds"])
+    # Story 1.29: a per-run-scoped field NEVER rewrites the canonical
+    # default — it persists as a one-shot override the next drive consumes
+    # (and deletes). The canonical scenarios file is untouched. Dry-run
+    # (story 1.28) and the doctor gate apply either way; scope only changes
+    # where the value lands.
+    per_run = decl.get("scope") == "per-run"
+    if per_run:
+        op = override_path(args.target)
+        ov = read_json(op, {})
+        if not isinstance(ov, dict):
+            ov = {}
+        old = ov.get(args.field)
+    else:
+        old, _ = get_path(data, decl["binds"])
     if args.dry_run:
         # Review-before-persist substrate (story 1.28): the resulting change
         # and the exact storage path, with nothing written and no doctor
         # run — the command layer shows this, asks, then calls the real set.
         out({"dry_run": True, "field": args.field, "old": old, "new": value,
-             "binds": decl["binds"], "path": scen_path(args.target),
+             "binds": decl["binds"],
+             "path": op if per_run else scen_path(args.target),
+             "scope": decl.get("scope", "per-target"),
              "doctor": decl.get("doctor")})
         return
     rc = run_doctor(decl, args.target, value)
@@ -323,6 +338,18 @@ def cmd_set(args):
                 "verdict, relayed verbatim)")
         print(f"warning: doctor failed (exit {rc}); persisting anyway "
               "(--override-doctor)", file=sys.stderr)
+    if per_run:
+        ov[args.field] = value
+        os.makedirs(os.path.dirname(op), exist_ok=True)
+        tmp = op + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(ov, f, indent=2)
+        os.replace(tmp, op)
+        out({"ok": True, "field": args.field, "value": value,
+             "scope": "per-run", "path": op,
+             "note": "one-shot override — consumed (and deleted) by the "
+                     "next drive; the canonical default is untouched"})
+        return
     set_path(data, decl["binds"], value)
     # Atomic: temp + rename. The file stays the source of truth; a crash
     # mid-write must never leave a half-written config.
