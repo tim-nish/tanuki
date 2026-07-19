@@ -315,9 +315,15 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
    **Look at `status`'s `warning` field before approving.** If the loop's
    commits swept build artifacts (`__pycache__`, `*.pyc`) onto the integration
    branch, `iter-verify` recorded them and `status` names them — they reach the
-   remote at step 4 unless removed now (F102). Use `--no-ff` so the batch
+   remote at step 4 unless removed now (F102). A non-null value looks like
+   `"warning": "build artifacts committed: tools/__pycache__/ (2 files) — see
+   iter 3"` (an example of the shape, not literal output); `null` means nothing
+   was flagged (F106). Use `--no-ff` so the batch
    lands as one reviewable merge commit that `gate-check` can then confirm is
    reachable; executed by the gate only after approval, never unattended (F12).
+   Being a hand-run git command, the merge itself prints no tool confirmation —
+   `gate-check` succeeding in step 3 **is** the success signal for the merge
+   (F187).
 3. **Verify** with `tanuki-loop gate-check` (integration HEAD reachable from
    base).
 4. **Push the base branch** with `tanuki-loop gate-push` — the first
