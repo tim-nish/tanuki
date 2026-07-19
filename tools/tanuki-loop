@@ -1068,21 +1068,16 @@ def _write_reconcile_state(target, payload):
     return p
 
 
-def cmd_dispose(args):
-    """Classify every unresolved unit and (with --apply) act on the
-    deterministic ones. Dry-run by default: classification + evidence only."""
+def _dispose_run(target, repo, base=None, branch=None, apply=False):
+    """The disposition engine's core, shared by `dispose` and the reconcile
+    orchestration (#213 consumes #211, never re-implements it). Returns the
+    payload and persists the evidence."""
     import tempfile as _tf
-    repo = _loop_repo_for(args.target, getattr(args, "loop_repo", None))
-    if not repo or not os.path.isdir(repo):
-        body, typed = empty_state("unresolved:no-loop-repo", args.target)
-        out({"target": args.target, "loop_repo": repo, "units": [],
-             "empty_state": typed})
-        return
-    base, _base_sha = resolve_base(repo, getattr(args, "base", None))
-    rows = unresolved_branches(repo, args.target, base)
-    if args.branch:
-        rows = [r for r in rows if r["branch"] == args.branch]
-    staging = _staging_branch(args.target)
+    base, _base_sha = resolve_base(repo, base)
+    rows = unresolved_branches(repo, target, base)
+    if branch:
+        rows = [r for r in rows if r["branch"] == branch]
+    staging = _staging_branch(target)
     have_staging = git(repo, "rev-parse", "--verify", "-q", staging)[0] == 0
     units, cls_wt, apply_wt = [], None, None
     try:
@@ -1107,7 +1102,7 @@ def cmd_dispose(args):
                                             "(idempotent re-run)"})
                     continue
                 rec = _dispose_unit(repo, cls_wt, base, c, r["branch"])
-                if args.apply and rec["action"] in ("cherry-pick", "port"):
+                if apply and rec["action"] in ("cherry-pick", "port"):
                     if apply_wt is None:
                         apply_wt = _tf.mkdtemp(prefix="tanuki-dispose-apply-")
                         rc, msg = (git(repo, "worktree", "add", apply_wt,
@@ -1118,24 +1113,40 @@ def cmd_dispose(args):
                             die("dispose: could not create the staging "
                                 f"work tree: {msg}")
                         have_staging = True
-                    _apply_unit(repo, apply_wt, rec, args.target)
+                    _apply_unit(repo, apply_wt, rec, target)
                 units.append(rec)
     finally:
         for w in (cls_wt, apply_wt):
             if w:
                 git(repo, "worktree", "remove", "--force", w)
         git(repo, "worktree", "prune")
-    payload = {"target": args.target, "loop_repo": repo, "base": base,
+    payload = {"target": target, "loop_repo": repo, "base": base,
                "staging": staging if have_staging else None,
-               "evaluated_against": base, "applied": bool(args.apply),
+               "evaluated_against": base, "applied": bool(apply),
                "units": units,
                "escalations": [u for u in units
                                if u.get("action") == "escalate"]}
-    _write_reconcile_state(args.target, payload)
+    _write_reconcile_state(target, payload)
+    return payload
+
+
+def cmd_dispose(args):
+    """Classify every unresolved unit and (with --apply) act on the
+    deterministic ones. Dry-run by default: classification + evidence only."""
+    repo = _loop_repo_for(args.target, getattr(args, "loop_repo", None))
+    if not repo or not os.path.isdir(repo):
+        body, typed = empty_state("unresolved:no-loop-repo", args.target)
+        out({"target": args.target, "loop_repo": repo, "units": [],
+             "empty_state": typed})
+        return
+    payload = _dispose_run(args.target, repo,
+                           base=getattr(args, "base", None),
+                           branch=args.branch, apply=args.apply)
+    units = payload["units"]
     if args.json:
         out(payload)
         return
-    print(f"dispose — {args.target} (against {base}"
+    print(f"dispose — {args.target} (against {payload['base']}"
           + (", applied" if args.apply else ", dry-run") + ")")
     if not units:
         print("  nothing unresolved — no units to dispose")
@@ -1273,29 +1284,22 @@ def _cited_finding_ids(rows):
     return ids
 
 
-def cmd_reevaluate(args):
-    """Re-evaluate findings against CURRENT base behavior, per site.
-
-    Verdicts: resolved / superseded (closed at EVERY known site — superseded
-    when the ledger already carries it accepted-and-tombstoned),
-    still-applicable-at-remaining-sites (with the live sites named), or
-    needs-owner (no sites recorded, or a probe that could not run — fail
-    closed, never assumed closed)."""
+def _reevaluate_run(target, repo, base=None, finding=None):
+    """Core of `reevaluate`, shared with the reconcile orchestration (#213
+    consumes #212, never re-implements it). Returns the payload and
+    persists per-site verdicts + evidence."""
     import tempfile as _tf
-    repo = _loop_repo_for(args.target, getattr(args, "loop_repo", None))
-    if not repo or not os.path.isdir(repo):
-        die("reevaluate: no loop repo (run init)")
-    base, base_sha = resolve_base(repo, getattr(args, "base", None))
-    st = _load_reconcile_state(args.target)
+    base, base_sha = resolve_base(repo, base)
+    st = _load_reconcile_state(target)
     findings = st.setdefault("findings", {})
     ids = set(findings)
-    if not args.finding:
-        rows = unresolved_branches(repo, args.target, base)
+    if not finding:
+        rows = unresolved_branches(repo, target, base)
         ids |= _cited_finding_ids(rows)
     else:
-        ids = {args.finding}
+        ids = {finding}
     statuses = {c["id"]: c for c in
-                _cited_findings(args.target, " ".join(sorted(ids)))}
+                _cited_findings(target, " ".join(sorted(ids)))}
     wt, results = None, {}
     try:
         wt = _tf.mkdtemp(prefix="tanuki-reeval-")
@@ -1343,12 +1347,29 @@ def cmd_reevaluate(args):
         if wt:
             git(repo, "worktree", "remove", "--force", wt)
             git(repo, "worktree", "prune")
-    _save_reconcile_state(args.target, st)
-    payload = {"target": args.target, "base": base, "findings": results}
+    _save_reconcile_state(target, st)
+    return {"target": target, "base": base, "findings": results}
+
+
+def cmd_reevaluate(args):
+    """Re-evaluate findings against CURRENT base behavior, per site.
+
+    Verdicts: resolved / superseded (closed at EVERY known site — superseded
+    when the ledger already carries it accepted-and-tombstoned),
+    still-applicable-at-remaining-sites (with the live sites named), or
+    needs-owner (no sites recorded, or a probe that could not run — fail
+    closed, never assumed closed)."""
+    repo = _loop_repo_for(args.target, getattr(args, "loop_repo", None))
+    if not repo or not os.path.isdir(repo):
+        die("reevaluate: no loop repo (run init)")
+    payload = _reevaluate_run(args.target, repo,
+                              base=getattr(args, "base", None),
+                              finding=args.finding)
+    results = payload["findings"]
     if args.json:
         out(payload)
         return
-    print(f"reevaluate — {args.target} (against {base})")
+    print(f"reevaluate — {args.target} (against {payload['base']})")
     if not results:
         print("  no findings to re-evaluate — none cited, none with "
               "recorded sites")
@@ -1362,6 +1383,282 @@ def cmd_reevaluate(args):
                 mark = {True: "closed", False: "LIVE",
                         None: "unevidenced"}[s["closed"]]
                 print(f"      {s['site']:<24} {mark:<12} {s['evidence']}")
+
+
+# ── Reconcile orchestration — one invocation, one gate, terminal ─────────────
+# Story 1.40 (#213), composing the disposition engine (#211) and per-site
+# finding re-evaluation (#212) under the #210 terminal contract. One
+# invocation: enumerate ALL unresolved runs → dispose/reevaluate to a
+# FIXPOINT → verification → ONE gate holding only genuine owner decisions →
+# after approval, merge → push → update state → clean up, no further
+# commands. The whole flow is a persisted, resumable, idempotent transaction
+# in reconcile.json: re-running never re-ports (dispose skips applied
+# units), never re-merges (reachability check), never re-pushes
+# (up-to-date), and never re-asks an answered gate (approval is persisted
+# per item-key set). Terminal states: complete | needs-owner | blocked.
+
+def _reconcile_report(tx, payload, as_json):
+    if as_json:
+        out(payload)
+        return
+    print(f"reconcile — {payload['target']}: {tx['state'].upper()}"
+          + (f" — {tx.get('reason')}" if tx.get("reason") else ""))
+    fp = tx.get("fixpoint") or {}
+    if fp:
+        print(f"  fixpoint: {fp.get('iterations')} iteration(s), "
+              f"{fp.get('applied', 0)} unit(s) applied, "
+              f"{fp.get('dropped', 0)} dropped, "
+              f"{fp.get('escalated', 0)} escalated")
+    v = tx.get("verify") or {}
+    if v:
+        print("  verify: " + (v.get("skipped") or
+                              f"`{v.get('cmd')}` rc {v.get('rc')} "
+                              f"at {v.get('ref')}"))
+    for it in (tx.get("gate") or {}).get("open_items") or []:
+        print(f"  gate: {it['kind']} {it['key']} — {it['summary']}")
+    t = tx.get("terminal") or {}
+    for k in ("merged", "pushed", "pr", "cleaned"):
+        if t.get(k) is not None:
+            print(f"  {k}: {t[k]}")
+    if tx["state"] == "needs-owner":
+        print("  parked at the gate — decide the items above (resolve, "
+              "site-record, or discard by hand), then re-run; "
+              "`reconcile --approve` proceeds with the deterministic work "
+              "while they stay parked.")
+
+
+def _terminal_block(target, st, tx, reason, payload, as_json):
+    tx.update(state="blocked", reason=reason)
+    st["transaction"] = tx
+    _save_reconcile_state(target, st)
+    payload["transaction"] = tx
+    _reconcile_report(tx, payload, as_json)
+
+
+def cmd_reconcile(args):
+    """The terminal reconcile invocation (#210). No identifiers required —
+    the default is ALL unresolved runs; --branch is an advanced filter and
+    hashes/branch names appear only as evidence."""
+    import tempfile as _tf
+    repo = _loop_repo_for(args.target, getattr(args, "loop_repo", None))
+    if not repo or not os.path.isdir(repo):
+        die("reconcile: no loop repo (run init)")
+    base, _sha = resolve_base(repo, getattr(args, "base", None))
+    st = _load_reconcile_state(args.target)
+    tx = st.get("transaction") or {}
+    payload = {"target": args.target, "loop_repo": repo, "base": base}
+
+    # Phase 1 — classify → apply → re-evaluate, to a fixpoint.
+    iters, applied_total = 0, 0
+    while True:
+        iters += 1
+        dp = _dispose_run(args.target, repo,
+                          base=getattr(args, "base", None),
+                          branch=args.branch, apply=True)
+        n = sum(1 for u in dp["units"] if u.get("applied"))
+        applied_total += n
+        if n == 0:
+            break
+        if iters >= 5:
+            _terminal_block(args.target, st, tx,
+                            "no fixpoint after 5 disposition rounds — "
+                            "evidence in reconcile.json", payload,
+                            args.json)
+            return
+    rp = _reevaluate_run(args.target, repo,
+                         base=getattr(args, "base", None))
+    st = _load_reconcile_state(args.target)   # both runs persisted evidence
+    tx["fixpoint"] = {
+        "iterations": iters, "applied": applied_total,
+        "dropped": sum(1 for u in dp["units"] if u["action"] == "drop"),
+        "escalated": len(dp["escalations"])}
+    staging = dp["staging"]
+    payload.update(units=dp["units"], findings=rp["findings"],
+                   staging=staging)
+
+    # Phase 2 — verification, a gate condition (fail closed: something to
+    # merge with no configured test_cmd is blocked, never waved through).
+    try:
+        run_state = load_state(args.target)
+    except SystemExit:
+        run_state = {}
+    test_cmd = run_state.get("test_cmd")
+    ref = staging or base
+    if test_cmd:
+        wt = _tf.mkdtemp(prefix="tanuki-reconcile-verify-")
+        try:
+            rc, msg = git(repo, "worktree", "add", "--detach", wt, ref)
+            if rc != 0:
+                _terminal_block(args.target, st, tx,
+                                f"could not check out {ref} to verify: "
+                                f"{msg}", payload, args.json)
+                return
+            try:
+                r = subprocess.run(test_cmd, shell=True, cwd=wt,
+                                   capture_output=True, text=True,
+                                   timeout=1800)
+            except subprocess.TimeoutExpired:
+                _terminal_block(args.target, st, tx,
+                                "verification timed out after 1800s",
+                                payload, args.json)
+                return
+        finally:
+            git(repo, "worktree", "remove", "--force", wt)
+            git(repo, "worktree", "prune")
+        tx["verify"] = {"cmd": test_cmd, "ref": ref, "rc": r.returncode}
+        if r.returncode != 0:
+            tx["verify"]["tail"] = (r.stdout + r.stderr)[-2000:]
+            _terminal_block(args.target, st, tx,
+                            "verification failed — nothing merged",
+                            payload, args.json)
+            return
+    elif staging:
+        _terminal_block(args.target, st, tx,
+                        "applied work exists but no test_cmd is configured "
+                        "in the run state — the verification gate cannot "
+                        "run (fail closed)", payload, args.json)
+        return
+    else:
+        tx["verify"] = {"skipped": "nothing applied and no test_cmd — "
+                                   "nothing to verify"}
+
+    # Phase 3 — ONE gate, genuine owner decisions only.
+    items = ([{"kind": "unit", "key": u["sha"],
+               "summary": f"{u['disposition']} — {u.get('reason', '')} "
+                          f"({u.get('subject', '')[:48]})"}
+              for u in dp["escalations"]]
+             + [{"kind": "finding", "key": fid,
+                 "summary": f"{r['verdict']} — "
+                            + (", ".join(r.get("remaining_sites", []))
+                               or r.get("reason", ""))}
+                for fid, r in rp["findings"].items()
+                if r["verdict"] in ("needs-owner",
+                                    "still-applicable-at-remaining-sites")
+                # A finding with NO recorded sites makes no closure claim —
+                # its needs-owner verdict is advisory, not an owner decision
+                # the gate owes; a finding with sites that are live or
+                # unevidencable is a genuine one.
+                and r.get("sites")])
+    keys = sorted(f"{i['kind']}:{i['key']}" for i in items)
+    gate = tx.get("gate") or {}
+    already = set(gate.get("approved_keys") or [])
+    if args.approve and items:
+        gate.update(approved_keys=sorted(already | set(keys)),
+                    mode="explicit")
+        already = set(gate["approved_keys"])
+    gate["open_items"] = items
+    approved = (not items) or set(keys) <= already
+    if not items:
+        gate.setdefault("mode", "empty — nothing a tool could have closed")
+    tx["gate"] = gate
+
+    # Phase 4 — terminal actions after approval: merge → push → state →
+    # cleanup. All idempotent; a killed run resumes without repeating any.
+    term = tx.setdefault("terminal", {})
+    if approved and staging:
+        gate_mode = run_state.get("gate_mode", "merge")
+        if gate_mode == "pr":
+            # PR-protected target: the terminal "merge" is PR mechanics and
+            # the forge approval is the owner's explicit decision — the
+            # loop still never auto-merges (owner ruling 2026-07-17).
+            if git(repo, "remote", "get-url", "origin")[0] != 0:
+                _terminal_block(args.target, st, tx,
+                                "gate is 'pr' but the loop repo has no "
+                                "origin remote", payload, args.json)
+                return
+            rc, msg = git(repo, "push", "origin", f"{staging}:{staging}")
+            if rc != 0:
+                _terminal_block(args.target, st, tx,
+                                f"could not push {staging}: {msg}",
+                                payload, args.json)
+                return
+            rc, existing = gh(repo, "pr", "list", "--head", staging,
+                              "--state", "open", "--json", "number",
+                              "--jq", ".[0].number")
+            if rc == 0 and existing.strip():
+                term["pr"] = int(existing.strip())
+            else:
+                rc, o = gh(repo, "pr", "create", "--draft", "--base", base,
+                           "--head", staging, "--title",
+                           f"reconcile: {args.target} deterministic "
+                           f"dispositions", "--body",
+                           "Deterministic reconcile work (tanuki-loop "
+                           "reconcile, #210). Evidence: reconcile.json.")
+                if rc != 0:
+                    _terminal_block(args.target, st, tx,
+                                    f"could not open the PR: {o}",
+                                    payload, args.json)
+                    return
+                term["pr"] = o.strip()
+        else:
+            if git(repo, "merge-base", "--is-ancestor", staging,
+                   base)[0] == 0:
+                term.setdefault("merged", "already reachable from base")
+            else:
+                head = git(repo, "symbolic-ref", "--short", "HEAD")[1]
+                dirty = git(repo, "status", "--porcelain")[1].strip()
+                if head != base or dirty:
+                    _terminal_block(
+                        args.target, st, tx,
+                        f"cannot merge: the loop repo must have {base} "
+                        "checked out clean", payload, args.json)
+                    return
+                rc, msg = git(repo, "merge", "--no-edit", staging)
+                if rc != 0:
+                    git(repo, "merge", "--abort")
+                    _terminal_block(args.target, st, tx,
+                                    f"merge of {staging} failed: {msg}",
+                                    payload, args.json)
+                    return
+                term["merged"] = git(repo, "rev-parse", "--short",
+                                     "HEAD")[1].strip()
+            if git(repo, "remote", "get-url", "origin")[0] == 0:
+                rc, msg = git(repo, "push", "origin", base)
+                if rc != 0:
+                    _terminal_block(
+                        args.target, st, tx,
+                        f"push refused ({msg.strip()[:200]}) — reconcile "
+                        "the remote by hand; never force", payload,
+                        args.json)
+                    return
+                term["pushed"] = True
+            else:
+                term["pushed"] = "no-remote"
+    if approved:
+        # Cleanup — the ownership /repo-cleanup formerly held (#210):
+        # delete only branches whose every unit is accounted for
+        # (dropped, applied, or skipped); an escalated branch survives.
+        rows = {r["branch"]: r for r in
+                unresolved_branches(repo, args.target, base)}
+        by_branch = {}
+        for u in dp["units"]:
+            by_branch.setdefault(u.get("branch"), []).append(u)
+        cleaned = list(term.get("cleaned") or [])
+        for b, us in by_branch.items():
+            if not b or any(u.get("action") == "escalate" for u in us):
+                continue
+            if git(repo, "rev-parse", "--verify", "-q", b)[0] != 0:
+                continue           # already gone (idempotent re-run)
+            wt_path = (rows.get(b) or {}).get("worktree")
+            if wt_path:
+                git(repo, "worktree", "remove", "--force", wt_path)
+            git(repo, "branch", "-D", b)
+            cleaned.append(b)
+        if staging and term.get("merged") and \
+                git(repo, "rev-parse", "--verify", "-q", staging)[0] == 0 \
+                and git(repo, "merge-base", "--is-ancestor", staging,
+                        base)[0] == 0:
+            git(repo, "branch", "-d", staging)
+            cleaned.append(staging)
+        git(repo, "worktree", "prune")
+        term["cleaned"] = cleaned
+
+    tx["state"] = "needs-owner" if items else "complete"
+    tx.pop("reason", None)
+    st["transaction"] = tx
+    _save_reconcile_state(args.target, st)
+    payload["transaction"] = tx
+    _reconcile_report(tx, payload, args.json)
 
 
 def resolve_loop_config(args):
@@ -4625,6 +4922,38 @@ def main():
     sp.add_argument("--base", default=None)
     sp.add_argument("--json", action="store_true")
     sp.add_argument("--loop-repo", default=None)
+    sp = sub.add_parser(
+        "reconcile",
+        help="the single terminal reconcile invocation: fixpoint of "
+             "dispose + reevaluate, verification, ONE gate of genuine "
+             "decisions, then merge/push/state/cleanup — resumable and "
+             "idempotent",
+        description=(
+            "The #210 terminal contract in one invocation (story 1.40/"
+            "#213): enumerate ALL unresolved runs (no identifiers "
+            "required — hashes and branch names are evidence, never "
+            "input), apply every deterministic disposition to a fixpoint "
+            "(#211), re-evaluate findings per manifestation site (#212), "
+            "run the configured test_cmd as a gate condition, and present "
+            "ONE gate holding only genuine owner decisions. After "
+            "approval: merge -> push -> update state -> clean up, no "
+            "further commands; on a gate:'pr' target the terminal merge "
+            "is PR mechanics and the loop still never auto-merges. The "
+            "whole flow is a persisted transaction in reconcile.json — "
+            "re-running resumes idempotently: applied units are skipped, "
+            "a reachable staging branch is not re-merged, and an answered "
+            "gate is never re-asked. Terminal states: complete | "
+            "needs-owner | blocked."))
+    sp.add_argument("--approve", action="store_true",
+                    help="record the owner's gate decision: proceed with "
+                         "the deterministic work; open items stay parked "
+                         "(persisted — never re-asked after a restart)")
+    sp.add_argument("--branch", default=None,
+                    help="advanced filter to one unresolved branch — "
+                         "never required")
+    sp.add_argument("--base", default=None)
+    sp.add_argument("--json", action="store_true")
+    sp.add_argument("--loop-repo", default=None)
 
     args = p.parse_args()
     {"init": cmd_init, "doctor": cmd_doctor,
@@ -4638,7 +4967,7 @@ def main():
      "dashboard": cmd_dashboard, "status": cmd_status,
      "unresolved": cmd_unresolved, "dispose": cmd_dispose,
      "site-record": cmd_site_record,
-     "reevaluate": cmd_reevaluate}[args.cmd](args)
+     "reevaluate": cmd_reevaluate, "reconcile": cmd_reconcile}[args.cmd](args)
 
 
 if __name__ == "__main__":
