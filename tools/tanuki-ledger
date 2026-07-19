@@ -391,6 +391,28 @@ def cmd_upsert(args, ledger):
               f"'ingest' scenario, e.g. '<run>/ingest#<seq>')", file=sys.stderr)
         sys.exit(2)
     scenarios = sorted({e.split("#")[0].split("/")[-1] for e in evidence})
+    # Story 1.29 / DECISION-2026-07-19-host-identity: evidence from a run
+    # driven under a one-shot override is OFF-HOST — recorded (host-tagged,
+    # visible, auditable) but ignored by every piece of canonical
+    # arithmetic: recurrence never bumps, last_seen_run never advances (so
+    # driven-absence is never reset by it), scenario links never widen the
+    # canonical verify set.
+    ev_tags = {e: override_host_tag(args.target, run_of(e)) for e in evidence}
+    offhost = [e for e, t in ev_tags.items() if t]
+    onhost = [e for e in evidence if e not in set(offhost)]
+    if args.match and offhost and not onhost:
+        for f in ledger["findings"]:
+            if f["id"] == args.match:
+                f.setdefault("evidence_offhost", []).extend(
+                    {"ptr": e, "host": ev_tags[e]} for e in offhost)
+                save(args.target, ledger)
+                print(f"off-host evidence recorded on {f['id']} "
+                      f"(host {ev_tags[offhost[0]]}); canonical recurrence, "
+                      "last_seen_run, and scenario links unchanged "
+                      "(story 1.29)")
+                return
+        print(f"error: no finding {args.match}", file=sys.stderr)
+        sys.exit(2)
     if args.match:
         for f in ledger["findings"]:
             if f["id"] == args.match:
@@ -398,10 +420,16 @@ def cmd_upsert(args, ledger):
                 f["recurrence"] += 1
                 # Capped evidence: bounded exemplars, chronology preserved
                 # (existing pointers first, new appended), never one per bump.
-                f["evidence"] = cap_evidence(f["evidence"] + evidence)
-                f["scenarios"] = sorted(set(f["scenarios"] + scenarios))
+                # Mixed batches (story 1.29): only ON-host pointers enter the
+                # canonical fields; off-host ones are tagged aside.
+                f["evidence"] = cap_evidence(f["evidence"] + onhost)
+                f["scenarios"] = sorted(set(f["scenarios"]) | {
+                    e.split("#")[0].split("/")[-1] for e in onhost})
+                if offhost:
+                    f.setdefault("evidence_offhost", []).extend(
+                        {"ptr": e, "host": ev_tags[e]} for e in offhost)
                 f["last_seen"] = date.today().isoformat()
-                f["last_seen_run"] = latest_run(evidence, f.get("last_seen_run"))
+                f["last_seen_run"] = latest_run(onhost, f.get("last_seen_run"))
                 if args.note:
                     f.setdefault("notes", []).append(args.note)
                 if args.surface:
@@ -434,10 +462,37 @@ def cmd_upsert(args, ledger):
         sys.exit(2)
     fid = f"F{max((int(f['id'][1:]) for f in ledger['findings']), default=0) + 1}"
     today = date.today().isoformat()
+    if offhost and not onhost:
+        # A finding first observed only off-host still enters the ledger —
+        # host-tagged, with NO canonical evidence/scenario links, so verify
+        # selection and driven-absence never key off it. The host tag is
+        # what candidates (#171) passes through to the plan gate.
+        finding = {"id": fid, "title": args.title, "kind": args.kind,
+                   "first_seen": today, "last_seen": today, "recurrence": 1,
+                   "evidence": [], "scenarios": [],
+                   "evidence_offhost": [{"ptr": e, "host": ev_tags[e]}
+                                        for e in offhost],
+                   "host": ev_tags[offhost[0]],
+                   "status": "open", "last_seen_run": None}
+        if args.note:
+            finding["notes"] = [args.note]
+        if args.surface:
+            finding["surface"] = args.surface
+        ledger["findings"].append(finding)
+        save(args.target, ledger)
+        print(f"created {fid} (off-host, host {finding['host']}): "
+              f"{args.title} — canonical arithmetic will ignore its "
+              "evidence (story 1.29)")
+        return
     finding = {"id": fid, "title": args.title, "kind": args.kind,
                "first_seen": today, "last_seen": today, "recurrence": 1,
-               "evidence": cap_evidence(evidence), "scenarios": scenarios,
-               "status": "open", "last_seen_run": latest_run(evidence)}
+               "evidence": cap_evidence(onhost),
+               "scenarios": sorted({e.split("#")[0].split("/")[-1]
+                                    for e in onhost}),
+               "status": "open", "last_seen_run": latest_run(onhost)}
+    if offhost:
+        finding["evidence_offhost"] = [{"ptr": e, "host": ev_tags[e]}
+                                       for e in offhost]
     if args.note:
         finding["notes"] = [args.note]
     if args.surface:
@@ -793,9 +848,35 @@ def driven_scenarios_by_run(target):
                 manifest = json.load(fh)
         except (json.JSONDecodeError, OSError):
             continue
+        # Story 1.29 / DECISION-2026-07-19-host-identity: a run driven under
+        # a one-shot override was NOT driven against the canonical host — it
+        # must never accrue driven-absence for canonical findings. Absent
+        # from this map, it simply doesn't count as a replay.
+        if manifest.get("override"):
+            out[run] = set()
+            continue
         out[run] = {r.get("scenario") for r in manifest.get("results", [])
                     if r.get("scenario")}
     return out
+
+
+def override_host_tag(target, run):
+    """The host tag for an overridden run's evidence (story 1.29): the
+    overridden host value when the override re-bound one, else the generic
+    marker. None for a canonical (non-overridden) run. Story 1.30 refines
+    the tag into a stable host_binding_id; until then the observed value is
+    the honest label."""
+    mpath = os.path.join(TANUKI_ROOT, target, "events", run, "manifest.json")
+    try:
+        with open(mpath, encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    except (json.JSONDecodeError, OSError):
+        return None
+    ov = manifest.get("override")
+    if not ov:
+        return None
+    return str(manifest.get("host") or next(iter(sorted(ov.values())), None)
+               or "override")
 
 
 def cmd_compact(args, ledger):

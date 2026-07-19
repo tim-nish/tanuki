@@ -400,6 +400,18 @@ def cmd_record_run(args):
     if args.run in sched["runs_recorded"]:
         out({"ok": True, "already_recorded": args.run})
         return
+    # Story 1.29 / DECISION-2026-07-19-host-identity: a run driven under a
+    # one-shot per-run override is EXPLORATORY — it contributes no yield, no
+    # streaks, no demotion/regression arithmetic, and never enters
+    # runs_recorded. Findings still entered the ledger (host-tagged there);
+    # canonical scheduler state must be provably untouched.
+    manifest = read_json(os.path.join(TANUKI_ROOT, args.target, "events",
+                                      args.run, "manifest.json"), {})
+    if manifest.get("override"):
+        out({"ok": True, "run": args.run,
+             "excluded": "per-run override — exploratory run; canonical "
+                         "scheduler state untouched (story 1.29)"})
+        return
     yields = run_yield(args.target, args.run)
     changes = {}
 
@@ -933,6 +945,11 @@ def cmd_status(args):
     # the status view) read the signals here instead of re-deriving them.
     # A target with no scenarios at all is onboarding, not an empty pool.
     drift = feature_drift(args.target)
+    # Story 1.29: a pending (unconsumed) one-shot override must be
+    # impossible to miss — a forgotten override silently redirecting the
+    # next drive is the failure mode this line exists to prevent.
+    pending = read_json(os.path.join(TANUKI_ROOT, args.target,
+                                     "override.json"), None)
     out({"runs_recorded": len(sched["runs_recorded"]),
          "by_state": {k: sorted(v) for k, v in sorted(by_state.items())},
          "scenarios": sched["scenarios"],
@@ -940,6 +957,7 @@ def cmd_status(args):
                         "unexplored_pool_empty":
                             bool(sched["scenarios"])
                             and not by_state.get("unexplored"),
+                        **({"pending_override": pending} if pending else {}),
                         "generate": drift["generate"]}})
 
 

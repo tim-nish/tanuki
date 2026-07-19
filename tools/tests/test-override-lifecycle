@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# Fixture for the one-shot per-run override (story 1.29 / issue #172;
+# DECISION-2026-07-19-host-identity): a per-run-scoped `tanuki-config set`
+# persists an override the NEXT drive consumes and deletes — never rewriting
+# the canonical default. While pending it renders loudly in scheduler
+# `status`. The overridden run is EXCLUDED from canonical arithmetic:
+# record-run mutates no scenario state, driven-absence never counts the run,
+# and its ledger evidence is host-tagged aside (recurrence, last_seen_run,
+# and scenario links untouched).
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+
+repoA="$tmp/host-a"; mkdir -p "$repoA"; git -C "$repoA" init -q
+repoB="$tmp/host-b"; mkdir -p "$repoB"; git -C "$repoB" init -q
+
+canon="$TANUKI_ROOT/scenarios/t.scenarios.json"
+mkdir -p "$(dirname "$canon")"
+cat > "$canon" <<EOF
+{"target":"t","host":"$repoA",
+ "inputs":{"host":{"type":"repo-path","scope":"per-run","binds":"host"}},
+ "scenarios":[{"id":"s1","charter":"c","prompt":"p"}]}
+EOF
+
+# --- per-run set -> override.json; canonical file untouched --------------------
+"$here/tanuki-config" --target t set --field host --value "$repoB" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["scope"] == "per-run" and r["path"].endswith("override.json"), r
+assert "one-shot" in r["note"], r
+' || fail "per-run set must write the override file and say it is one-shot"
+python3 -c '
+import json, os
+d = json.load(open("'"$canon"'"))
+assert d["host"] == "'"$repoA"'", "canonical default must be untouched"
+ov = json.load(open(os.environ["TANUKI_ROOT"] + "/t/override.json"))
+assert ov == {"host": "'"$repoB"'"}, ov
+' || fail "override must persist separately from the canonical default"
+pass "per-run set: override persisted; canonical default untouched"
+
+# --- pending override renders loudly in scheduler status -----------------------
+"$here/tanuki-scheduler" --target t status | python3 -c '
+import json, sys
+a = json.load(sys.stdin)["advisories"]
+assert a.get("pending_override") == {"host": "'"$repoB"'"}, a
+' || fail "a pending override must be named in status advisories"
+pass "pending override is loud in status"
+
+# --- drive consumption: applied once, deleted; estimate consumes nothing -------
+python3 - "$here/tanuki-drive" <<PY || fail "consume_override contract"
+import importlib.machinery, importlib.util, json, os, sys
+loader = importlib.machinery.SourceFileLoader("td", sys.argv[1])
+spec = importlib.util.spec_from_loader("td", loader)
+td = importlib.util.module_from_spec(spec); loader.exec_module(td)
+canon = os.environ["TANUKI_ROOT"] + "/scenarios/t.scenarios.json"
+ov_path = os.environ["TANUKI_ROOT"] + "/t/override.json"
+
+data = json.load(open(canon))
+# --estimate is not a drive: nothing consumed.
+assert td.consume_override("t", data, estimate=True) == {}
+assert os.path.exists(ov_path), "estimate must not consume the override"
+
+# A real drive consumes: applied to the in-memory data, file deleted.
+applied = td.consume_override("t", data, estimate=False)
+assert applied == {"host": "$repoB"}, applied
+assert data["host"] == "$repoB", "override must re-bind the in-memory value"
+assert not os.path.exists(ov_path), "consumed -> deleted (exactly one drive)"
+# effective inputs record the post-override resolution for the manifest.
+assert td.effective_inputs(data) == {"host": "$repoB"}
+# A second drive sees nothing — the loop-iteration expiry edge.
+assert td.consume_override("t", data, estimate=False) == {}
+# The stored canonical default never moved.
+assert json.load(open(canon))["host"] == "$repoA"
+PY
+pass "drive consumes exactly once; estimate never; canonical file never moves"
+
+# --- record-run exclusion: overridden run mutates NO scheduler state -----------
+S=("$here/tanuki-scheduler" --target t)
+"${S[@]}" sync --scenarios "$canon" > /dev/null
+mkdir -p "$TANUKI_ROOT/t/events/r-ov"
+cat > "$TANUKI_ROOT/t/events/r-ov/manifest.json" <<EOF
+{"run":"r-ov","target":"t","host":"$repoB","override":{"host":"$repoB"},
+ "completed_at":"2026-07-19T12:00:00",
+ "results":[{"scenario":"s1","status":"ok","events":3}]}
+EOF
+before="$(cat "$TANUKI_ROOT/t/scheduler.json")"
+"${S[@]}" record-run --run r-ov | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert "excluded" in r and "override" in r["excluded"], r
+' || fail "record-run must name the exclusion"
+[ "$(cat "$TANUKI_ROOT/t/scheduler.json")" = "$before" ] \
+  || fail "an overridden run must leave scheduler state byte-identical"
+pass "record-run: overridden run excluded; scheduler state byte-identical"
+
+# --- ledger: off-host evidence is tagged aside, canonical arithmetic ignores it
+L=("$here/tanuki-ledger" --target t)
+mkdir -p "$TANUKI_ROOT/t/events/r-can"
+cat > "$TANUKI_ROOT/t/events/r-can/manifest.json" <<'EOF'
+{"run":"r-can","target":"t","completed_at":"2026-07-19T11:00:00",
+ "results":[{"scenario":"s1","status":"ok","events":3}]}
+EOF
+"${L[@]}" init > /dev/null 2>&1 || true
+"${L[@]}" upsert-finding --title "canonical finding" --kind friction \
+  --evidence "r-can/s1#1" > /dev/null
+"${L[@]}" upsert-finding --match F1 --evidence "r-ov/s1#2" > /dev/null
+python3 -c '
+import json, os
+led = json.load(open(os.environ["TANUKI_ROOT"] + "/t/ledger.json"))
+f = led["findings"][0]
+assert f["recurrence"] == 1, "off-host evidence must not bump recurrence: %r" % f
+assert f["last_seen_run"] == "r-can", "off-host must not advance last_seen_run: %r" % f
+assert f["scenarios"] == ["s1"] and f["evidence"] == ["r-can/s1#1"], f
+oh = f["evidence_offhost"]
+assert oh[0]["ptr"] == "r-ov/s1#2" and "'"$(basename "$repoB")"'" in oh[0]["host"], oh
+' || fail "off-host bump must tag evidence aside and leave canonical fields alone"
+"${L[@]}" upsert-finding --title "seen only off-host" --kind gap \
+  --evidence "r-ov/s1#3" > /dev/null
+python3 -c '
+import json, os
+led = json.load(open(os.environ["TANUKI_ROOT"] + "/t/ledger.json"))
+f = [x for x in led["findings"] if x["id"] == "F2"][0]
+assert f["evidence"] == [] and f["scenarios"] == [], f
+assert f.get("host"), "an off-host-only finding must carry the host tag"
+assert f["evidence_offhost"][0]["ptr"] == "r-ov/s1#3", f
+' || fail "an off-host-only finding enters host-tagged with no canonical links"
+pass "ledger: off-host evidence tagged aside; recurrence/absence arithmetic clean"
+
+# --- driven-absence never counts the overridden run ----------------------------
+python3 - "$here/tanuki-ledger" <<'PY' || fail "driven map must exclude overridden runs"
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("tl", sys.argv[1])
+spec = importlib.util.spec_from_loader("tl", loader)
+tl = importlib.util.module_from_spec(spec); loader.exec_module(tl)
+driven = tl.driven_scenarios_by_run("t")
+assert driven.get("r-ov") == set(), "overridden run must count NO driven scenarios"
+assert driven.get("r-can") == {"s1"}, driven
+PY
+pass "driven-absence: the overridden run counts as a replay of nothing"
+
+echo "all checks passed"

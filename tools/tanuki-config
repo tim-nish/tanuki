@@ -267,6 +267,25 @@ def cmd_set(args):
             "read-only here (hand-editing the JSON remains legal)")
     decl = dict(inputs[args.field], name=args.field)
     value = validate(args.field, decl, args.value)
+    # Story 1.29: a per-run-scoped field NEVER rewrites the canonical
+    # default — it persists as a one-shot override the next drive consumes
+    # (and deletes). The canonical scenarios file is untouched.
+    if decl.get("scope") == "per-run":
+        op = override_path(args.target)
+        ov = read_json(op, {})
+        if not isinstance(ov, dict):
+            ov = {}
+        ov[args.field] = value
+        os.makedirs(os.path.dirname(op), exist_ok=True)
+        tmp = op + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(ov, f, indent=2)
+        os.replace(tmp, op)
+        out({"ok": True, "field": args.field, "value": value,
+             "scope": "per-run", "path": op,
+             "note": "one-shot override — consumed (and deleted) by the "
+                     "next drive; the canonical default is untouched"})
+        return
     set_path(data, decl["binds"], value)
     # Atomic: temp + rename. The file stays the source of truth; a crash
     # mid-write must never leave a half-written config.
