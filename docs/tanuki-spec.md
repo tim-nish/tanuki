@@ -188,7 +188,10 @@ exact-dupe collapse by fingerprint), `findings` (list, with recurrence counts
 and event pointers), `upsert-finding` (create or bump: `--match <id>` bumps
 recurrence and appends evidence; no match creates a new finding with a fresh
 id), `promote --min-recurrence N` (move chronic/high-confidence candidates
-to `proposed`; `--dry-run` lists without writing),
+to `proposed`; `--dry-run` lists without writing — the default bar is
+chronic-only, so a fresh finding at recurrence 1 / 1 scenario never
+qualifies; a first end-to-end walk of ingest → upsert → promote needs
+`--min-recurrence 1 --min-scenarios 1`),
 `set-status`, `stats`, `status` (the human-readable "where was I?" view:
 runs, latest brief, findings awaiting decision with P1–P3 priorities,
 accepted-awaiting-verification, top watching items), `ingest-note` (verbatim
