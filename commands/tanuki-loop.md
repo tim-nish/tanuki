@@ -78,7 +78,11 @@ live in the scenarios file's `"loop"` block, stored once, never retyped:
    note). Not-ready
    follows the breaker convention (`{"breaker": …}` + exit 3, nothing
    persisted); fix the named checks before `init`. Phase 1 runs may skip
-   this step.
+   this step — but when the repo lacks `.gitignore` coverage for regenerable
+   test output, a Phase 1 run may still want `doctor` for its
+   test-cmd-artifacts check alone (F211): it predicts the gate's
+   `git worktree remove` refusal (morning-gate step 7) before the run starts
+   rather than at its last step.
 3. **Isolation + state — `tanuki-loop init`.** Run `${CLAUDE_PLUGIN_ROOT}/tools/tanuki-loop
    --target <target> init --loop-repo <plugin-repo> --scenarios
    <scenarios-file> --phase <P> [overrides: --cap/--test-cmd/--wall-time/
@@ -379,7 +383,11 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
    base; an unmerged tip is never deleted), and `/repo-cleanup` owns any
    earlier branch/worktree removal. `finish --reason gate-ratified` remains
    accepted for compatibility only, and invoked without a verifiably landed
-   delivery it refuses.
+   delivery it refuses. **These are two separate calls with different
+   purposes (F32):** `finish --reason cap` is the *overnight close* — it
+   records the run's computational stop reason and legitimately precedes any
+   merge — while a later `finish --reason gate-ratified` (compat-only) speaks
+   to settlement; a cap-close before the gate is normal, not a double close.
    **What a repeated `finish` reports** (F108): it echoes `previously_finished`
    with the earlier close's reason and timestamp rather than overwriting it
    silently, so a double close is visible and deliberate.
@@ -396,7 +404,12 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
    breaker and nothing is wrong with the batch: use `git worktree remove
    --force`, or clean the paths first. The durable fix is to stop tracking
    them on the base (`git rm -r --cached <path>` + `.gitignore`), which also
-   removes the `gate-push` artifact refusal for every later run.
+   removes the `gate-push` artifact refusal for every later run. **Untracked**
+   regenerable residue triggers the same refusal (F111 residual): `test_cmd`
+   sheds files like pytest `__pycache__/` into the worktree without any
+   pre-existing commit involved, and `git worktree remove` refuses over those
+   too. Same remedies — `--force` or clean the paths first — and the same
+   `.gitignore` entry prevents both the tracked and the untracked case.
 
 ### PR-protected targets (`"gate": "pr"` in the loop block)
 

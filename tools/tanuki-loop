@@ -45,10 +45,13 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
        out of nowhere (F91).
        Not-ready follows the breaker convention ({"breaker": …} + exit 3)
        but persists nothing — there is no run state to write.
+       Minimal copy-pasteable scenarios-file skeleton (F132):
+         {"target": "<slug>", "plugin": "<path>",
+          "loop": {"test_cmd": "<shell cmd>", "iterations": N,
+                   "wall_time_s": N, "token_budget": N, "attempt_cap": N}}
        `doctor --help` carries the fullest scenarios-file documentation
-       (the exact "loop"-block JSON shape, the canonical path formula, and
-       per-key CLI equivalents) — read it before writing a scenarios file
-       (F132).
+       (the canonical path formula and per-key CLI equivalents) — read it
+       before writing one.
   iter-start                     cap / wall-time / external-modification breakers;
                                  records the iteration start SHA + ledger snapshot
   iter-verify [--no-patch] [--allow-artifact PATH]
@@ -1618,9 +1621,10 @@ def cmd_doctor(args):
         # loop block — existence is the signal that needs a manual ls today.
         _canon = os.path.join(
             TANUKI_ROOT, "scenarios", f"{args.target}.scenarios.json")
+        _canon_exists = os.path.isfile(_canon)
         loop_check["scenarios_file"] = {
             "canonical": _canon,
-            "canonical_file_exists": os.path.isfile(_canon),
+            "canonical_file_exists": _canon_exists,
             "note": ("put the \"loop\" block in this file; its name must match "
                      "--target. doctor/init do NOT auto-load it — pass it with "
                      "--scenarios. $TANUKI_ROOT (default ~/.tanuki) sets the "
@@ -1633,6 +1637,42 @@ def cmd_doctor(args):
                      "cross-session slug collision this canonical location "
                      "is prone to (F94)."),
         }
+        if _canon_exists:
+            # F176: canonical_file_exists alone gave the operator nothing to
+            # judge WHOSE file it is. Surface the three signals that judgment
+            # needs — the file's age (a days-old mtime suggests a leftover),
+            # its declared "target", and whether it carries a "loop" block at
+            # all — so deciding own-file vs. another session's leftover needs
+            # no manual stat/cat.
+            try:
+                _age_s = int(time.time() - os.path.getmtime(_canon))
+            except OSError:
+                _age_s = None
+            _existing = {"mtime_age_s": _age_s, "target": None,
+                         "has_loop_block": None}
+            try:
+                with open(_canon) as _f:
+                    _doc = json.load(_f)
+                if isinstance(_doc, dict):
+                    _existing["target"] = _doc.get("target")
+                    _existing["has_loop_block"] = isinstance(
+                        _doc.get("loop"), dict)
+                    _existing["detail"] = (
+                        "existing canonical file: mtime %s ago, target=%r, "
+                        "loop block %s — check these against your session "
+                        "before trusting or overwriting it" % (
+                            "%ds" % _age_s if _age_s is not None else "?",
+                            _existing["target"],
+                            "present" if _existing["has_loop_block"]
+                            else "ABSENT"))
+                else:
+                    _existing["detail"] = ("existing canonical file parses "
+                                           "but is not a JSON object")
+            except (OSError, ValueError):
+                _existing["detail"] = ("existing canonical file could not be "
+                                       "read as JSON — likely damaged or "
+                                       "mid-write by another session")
+            loop_check["scenarios_file"]["existing_file"] = _existing
     checks.append(loop_check)
 
     # 2. Base freshness — the same measurement init fails closed on (issue #2).
