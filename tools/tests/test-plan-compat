@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# Fixture for the plan-time compatibility check + host-aware entry fixtures
+# (story 1.33 / issue #173): `tanuki-scheduler plan` filters scenarios whose
+# declared requirements are not established on the effective host binding and
+# persists the skips with reasons (`compat_skipped` — the verify_deferred
+# posture, never silent); a compat-skipped exploration slot forces quota_met
+# false; fully compatible hosts produce today's output. `tanuki-drive` keeps
+# the last-line fail-closed check and selects per-host fixture sets.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+S=("$here/tanuki-scheduler" --target t)
+
+hostA="$tmp/host-a"; mkdir -p "$hostA"; git -C "$hostA" init -q
+canon="$TANUKI_ROOT/scenarios/t.scenarios.json"
+mkdir -p "$(dirname "$canon")"
+
+file_with_binding() {  # file_with_binding <a|b>
+  cat > "$canon" <<EOF
+{"target":"t",
+ "hosts":{"a":"$hostA","b":"$tmp/host-b"},
+ "host_binding":"$1",
+ "bindings":{"subject":{"a":"specs/qa.md"}},
+ "entry_fixtures":{"fx":{"hosts":{"a":{"paths":["work/"],
+                                       "source_commit":"abc1234"}}},
+                   "fx-legacy":{"paths":["old/"]}},
+ "scenarios":[
+   {"id":"plain","charter":"c","prompt":"just drive"},
+   {"id":"needs-subject","charter":"c","prompt":"read {subject} now"},
+   {"id":"needs-fx","charter":"c","prompt":"go","entry_fixture":"fx"},
+   {"id":"needs-legacy-fx","charter":"c","prompt":"go",
+    "entry_fixture":"fx-legacy"}]}
+EOF
+}
+
+# --- under binding a: everything except the legacy fixture is compatible -------
+file_with_binding a
+"${S[@]}" sync --scenarios "$canon" > /dev/null
+p="$("${S[@]}" plan --scenarios "$canon" --run r1)"
+echo "$p" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+skipped = {e["scenario"]: e["unmet"] for e in r.get("compat_skipped", [])}
+assert set(skipped) == {"needs-legacy-fx"}, skipped
+assert "single-host committed state" in skipped["needs-legacy-fx"][0]
+assert "needs-legacy-fx" not in r["plan"], r["plan"]
+assert {"plain", "needs-subject", "needs-fx"} <= set(r["plan"]), r["plan"]
+' || fail "under a: only the legacy fixture is incompatible, with the reason named"
+pass "binding a: compatible scenarios planned; legacy fixture skipped with reason"
+
+# --- under binding b: bindings and fixtures both unmet, skips persisted --------
+file_with_binding b
+"${S[@]}" sync --scenarios "$canon" > /dev/null   # b gets its own slice (1.30)
+p="$("${S[@]}" plan --scenarios "$canon" --run r2)"
+echo "$p" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+skipped = {e["scenario"]: e["unmet"] for e in r.get("compat_skipped", [])}
+assert set(skipped) == {"needs-subject", "needs-fx", "needs-legacy-fx"}, skipped
+assert any("subject" in u for u in skipped["needs-subject"]), skipped
+assert any("no artifact set" in u for u in skipped["needs-fx"]), skipped
+assert r["plan"] == ["plain"], r["plan"]
+' || fail "under b: every unmet requirement is named; only plain plans"
+python3 -c '
+import json, os
+s = json.load(open(os.environ["TANUKI_ROOT"] + "/t/scheduler.json"))
+plans = s["bindings"]["b"]["plans"]
+assert plans[-1].get("compat_skipped"), "the skips must PERSIST in the plan record"
+' || fail "compat_skipped must persist, not just print"
+pass "binding b: skips surfaced AND persisted — the verify_deferred posture"
+
+# --- a compat-skipped exploration slot forces quota_met false ------------------
+# Add a new scenario that is unexplored AND incompatible under b.
+python3 -c '
+import json; p = "'"$canon"'"; d = json.load(open(p))
+d["scenarios"].append({"id": "explore-me", "charter": "c",
+                       "prompt": "probe {subject} deeply"})
+json.dump(d, open(p, "w"))
+'
+"${S[@]}" sync --scenarios "$canon" > /dev/null   # enters unexplored (b slice)
+p="$("${S[@]}" plan --scenarios "$canon" --run r3)"
+echo "$p" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert any(e["scenario"] == "explore-me"
+           for e in r.get("compat_skipped", [])), r
+assert r["quota_met"] is False, \
+    "a compat-skipped exploration slot must force quota_met false: %r" % r
+' || fail "an incompatible host must not manufacture convergence"
+pass "quota rule: compat-skipped exploration slot -> quota_met false"
+
+# --- fully compatible: today's output (no compat_skipped key) ------------------
+cat > "$TANUKI_ROOT/scenarios/c.scenarios.json" <<'EOF'
+{"target":"c","scenarios":[{"id":"s1","charter":"c","prompt":"p"}]}
+EOF
+"$here/tanuki-scheduler" --target c sync \
+  --scenarios "$TANUKI_ROOT/scenarios/c.scenarios.json" > /dev/null
+"$here/tanuki-scheduler" --target c plan \
+  --scenarios "$TANUKI_ROOT/scenarios/c.scenarios.json" --run r1 | python3 -c '
+import json, sys
+assert "compat_skipped" not in json.load(sys.stdin)
+' || fail "a fully compatible target must produce today's output"
+pass "happy path: no compat noise on a compatible host"
+
+# --- drive: last-line fail-closed + per-host fixture selection -----------------
+file_with_binding b
+"$here/tanuki-drive" --target t --plugin "$hostA" --host "$hostA" \
+  --scenarios "$canon" --run rX --only needs-fx --estimate 2>"$tmp/err" \
+  && fail "drive must fail closed on a fixture invalid for the binding" || true
+grep -q "no artifact set for host binding 'b'" "$tmp/err" \
+  || fail "the drive error must name the fixture gap: $(cat "$tmp/err")"
+file_with_binding a
+"$here/tanuki-drive" --target t --plugin "$hostA" --host "$hostA" \
+  --scenarios "$canon" --run rX --only needs-fx --estimate > /dev/null \
+  || fail "a per-host set matching the binding must select cleanly"
+pass "drive: per-host fixture selected under a; fail-closed under b"
+
+echo "all checks passed"
