@@ -36,7 +36,7 @@ Argument handling ($ARGUMENTS):
 - `"<free text>"` (with or without a preceding `<target>`): an **ad-hoc
   scenario** — see "Ad-hoc scenarios" below. Disambiguation, in order: a
   **mode word** (`init`, `decide`, `status`, `history`, `view`, `mine`,
-  `ingest`, `generate`, `configure`) always wins — the closed set above is reserved, so a target or
+  `ingest`, `generate`, `configure`, `distill`) always wins — the closed set above is reserved, so a target or
   scenario sharing one of those names is addressed as `/tanuki <target>
   <mode>` (the mode word is only read in mode position, after the target);
   then an argument matching a configured target is a target; then one
@@ -127,6 +127,28 @@ Argument handling ($ARGUMENTS):
      (`--override-doctor`).
   Read-only until step 5; the backing JSON stays the source of truth and
   hand-editing remains legal.
+
+- `<target> distill`: **distill den** (story 1.36 / spec-den-distill §4) —
+  a bare word, it does not drive. Runs the SAME lesson-candidate walk as the
+  decision pass's 4.1c over the *existing* ledger: contributing past history
+  never requires a new run. One code path, two entries — the walk, the
+  accept-emits-via-`tanuki-ledger distill --id` semantics, the verbatim
+  receipts, and the dispositions-by-`set-status` rule are 4.1c's, verbatim.
+  Substrate for the pool and the state hint:
+  `tanuki-ledger --target <t> distill --list` (`configured` + candidate
+  count). Empty states are one typed line each, never a crash or an empty
+  walk: no undecided candidates → "no lesson candidates awaiting decision";
+  candidates present but `contribute_back` unset → the not-configured
+  notice below. When a picker is presented for this target (e.g. the bare
+  `/tanuki` target picker's per-target hint line), the distill hint is
+  state-derived from the same `--list` output — "N lesson candidates
+  awaiting decision" — never re-derived.
+
+  **The not-configured notice (one line, everywhere candidates render):**
+  "N lesson candidates; contribute-back not configured — configure
+  `contribute_back {path, schema}` to stage them into your knowledge hub."
+  Rendered by the brief's lesson-candidates section and by 4.1c/this mode in
+  place of a walk; nothing is written while unconfigured.
 
 ## Init (`/tanuki init` — the normal onboarding flow)
 
