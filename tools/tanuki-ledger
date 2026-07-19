@@ -413,9 +413,27 @@ def cmd_upsert(args, ledger):
                 return
         print(f"error: no finding {args.match}", file=sys.stderr)
         sys.exit(2)
+    cur_b = current_binding(args.target)
     if args.match:
         for f in ledger["findings"]:
             if f["id"] == args.match:
+                # Story 1.30: a finding belongs to ONE binding. A bump from
+                # a different binding's run is recorded aside — recurrence
+                # is per binding, never merged across hosts. A pre-binding
+                # finding adopts the current binding on its first
+                # multi-binding-era observation (no migration).
+                fb = f.get("host_binding")
+                if cur_b and fb and fb != cur_b:
+                    f.setdefault("evidence_offhost", []).extend(
+                        {"ptr": e, "host": cur_b} for e in evidence)
+                    save(args.target, ledger)
+                    print(f"cross-binding evidence recorded on {f['id']} "
+                          f"(finding belongs to binding {fb}, observed under "
+                          f"{cur_b}); canonical arithmetic unchanged "
+                          "(story 1.30)")
+                    return
+                if cur_b and not fb:
+                    f["host_binding"] = cur_b
                 before = f["recurrence"]
                 f["recurrence"] += 1
                 # Capped evidence: bounded exemplars, chronology preserved
@@ -490,6 +508,8 @@ def cmd_upsert(args, ledger):
                "scenarios": sorted({e.split("#")[0].split("/")[-1]
                                     for e in onhost}),
                "status": "open", "last_seen_run": latest_run(onhost)}
+    if cur_b:
+        finding["host_binding"] = cur_b   # story 1.30: born to one binding
     if offhost:
         finding["evidence_offhost"] = [{"ptr": e, "host": ev_tags[e]}
                                        for e in offhost]
@@ -860,12 +880,49 @@ def driven_scenarios_by_run(target):
     return out
 
 
+def current_binding(target):
+    """The target's currently effective host_binding_id (story 1.30), or
+    None for the legacy single-binding world (fewer than two declared
+    `hosts` entries). Mirrors tanuki-scheduler's effective_binding — the id
+    is logically stable and separate from any commit pin."""
+    path = os.path.join(TANUKI_ROOT, "scenarios", f"{target}.scenarios.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            scen = json.load(fh)
+    except (json.JSONDecodeError, OSError):
+        return None
+    hosts = scen.get("hosts")
+    if not isinstance(hosts, dict) or len(hosts) < 2:
+        return None
+    sel = scen.get("host_binding")
+    return sel if sel in hosts else None
+
+
+def bindings_by_run(target):
+    """{run: host_binding_id | None} from run manifests — which binding each
+    run was driven under (None = unstamped legacy run)."""
+    events_dir = os.path.join(TANUKI_ROOT, target, "events")
+    out = {}
+    if not os.path.isdir(events_dir):
+        return out
+    for run in os.listdir(events_dir):
+        try:
+            with open(os.path.join(events_dir, run, "manifest.json"),
+                      encoding="utf-8") as fh:
+                out[run] = json.load(fh).get("host_binding")
+        except (json.JSONDecodeError, OSError):
+            continue
+    return out
+
+
 def override_host_tag(target, run):
-    """The host tag for an overridden run's evidence (story 1.29): the
-    overridden host value when the override re-bound one, else the generic
-    marker. None for a canonical (non-overridden) run. Story 1.30 refines
-    the tag into a stable host_binding_id; until then the observed value is
-    the honest label."""
+    """The off-host tag for a run's evidence, or None for a canonical run.
+    Two ways a run is off-host: driven under a one-shot override (story
+    1.29 — tag is the overridden host value, the honest label until a
+    binding id exists), or stamped with a host_binding_id different from
+    the target's currently effective binding (story 1.30 — tag is the run's
+    binding id). Unstamped runs match whatever binding is current (legacy
+    compatibility, no migration)."""
     mpath = os.path.join(TANUKI_ROOT, target, "events", run, "manifest.json")
     try:
         with open(mpath, encoding="utf-8") as fh:
@@ -873,10 +930,13 @@ def override_host_tag(target, run):
     except (json.JSONDecodeError, OSError):
         return None
     ov = manifest.get("override")
-    if not ov:
-        return None
-    return str(manifest.get("host") or next(iter(sorted(ov.values())), None)
-               or "override")
+    if ov:
+        return str(manifest.get("host")
+                   or next(iter(sorted(ov.values())), None) or "override")
+    rb = manifest.get("host_binding")
+    if rb and rb != current_binding(target):
+        return str(rb)
+    return None
 
 
 def cmd_compact(args, ledger):
@@ -892,6 +952,10 @@ def cmd_compact(args, ledger):
          else cfg["compaction_unseen_runs"])
     runs = all_run_ids(args.target)
     driven = driven_scenarios_by_run(args.target)
+    # Story 1.30: per-binding absence needs each run's binding and the
+    # current one (both None in the legacy single-binding world).
+    binding_of = bindings_by_run(args.target)
+    cur_b = current_binding(args.target)
     # Covering scenarios (story 1.20 / spec "Cheapest covering verify"):
     # the scheduler's synced covers tags generalize driven-absence — a run
     # counts when any scenario COVERING the finding's surface was driven and
@@ -939,6 +1003,11 @@ def cmd_compact(args, ledger):
         # surface counts alongside the originating ones — "replayed N times
         # and gone" now means replayed via any declared cover. Untagged
         # findings keep the originating-only set, byte-for-byte.
+        # Per-binding absence (story 1.30): a run counts only when it was
+        # driven under the FINDING's binding — the same scenario id replayed
+        # on another host verifies nothing here. Unstamped runs and
+        # pre-binding findings normalize to the current binding (legacy,
+        # no migration).
         scen = ((set(f.get("scenarios", [])) - {"ingest"})
                 | covering_scenarios(f))
         if not scen:
@@ -946,7 +1015,9 @@ def cmd_compact(args, ledger):
         last = f.get("last_seen_run")
         return sum(1 for r in runs
                    if (not last or run_key(r) > run_key(last))
-                   and (scen & driven.get(r, set())))
+                   and (scen & driven.get(r, set()))
+                   and ((binding_of.get(r) or cur_b)
+                        == (f.get("host_binding") or cur_b)))
 
     compacted = []
     for i, f in enumerate(ledger["findings"]):

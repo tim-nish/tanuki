@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# Fixture for per-host scheduler state keyed (scenario_id, host_binding_id)
+# (story 1.30 / issue #173; DECISION-2026-07-19-host-identity). Asserts:
+# single-binding targets keep today's state layout byte-for-byte (no
+# migration); a second declared binding gets its own independent
+# streak/demotion arithmetic (a low-yield streak on B leaves A untouched);
+# the binding id is logically stable under re-pinning (path changes move no
+# state); status/plan name the effective binding; ledger recurrence and
+# driven-absence evaluate one binding at a time.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+S=("$here/tanuki-scheduler" --target t)
+L=("$here/tanuki-ledger" --target t)
+
+canon="$TANUKI_ROOT/scenarios/t.scenarios.json"
+mkdir -p "$(dirname "$canon")"
+
+write_file() {  # write_file <hosts-json-or-empty> <host_binding-or-empty>
+  python3 - "$canon" "$1" "$2" <<'PY'
+import json, sys
+path, hosts, sel = sys.argv[1], sys.argv[2], sys.argv[3]
+d = {"target": "t",
+     "scenarios": [{"id": "s1", "charter": "c", "prompt": "p"}]}
+if hosts:
+    d["hosts"] = json.loads(hosts)
+if sel:
+    d["host_binding"] = sel
+json.dump(d, open(path, "w"))
+PY
+}
+
+manifest() {  # manifest <run> <binding-or-empty> [scenario]
+  local run="$1" b="$2" scen="${3:-s1}"
+  mkdir -p "$TANUKI_ROOT/t/events/$run"
+  python3 - "$TANUKI_ROOT/t/events/$run/manifest.json" "$run" "$b" "$scen" <<'PY'
+import json, sys
+path, run, b, scen = sys.argv[1:]
+m = {"run": run, "target": "t", "completed_at": "2026-07-19T12:00:00",
+     "results": [{"scenario": scen, "status": "ok", "events": 3}]}
+if b:
+    m["host_binding"] = b
+json.dump(m, open(path, "w"))
+PY
+}
+
+# --- single binding: legacy layout, no `bindings` key --------------------------
+write_file "" ""
+"${S[@]}" sync --scenarios "$canon" > /dev/null
+manifest 20260719-r1 ""
+"${S[@]}" record-run --run 20260719-r1 > /dev/null
+python3 -c '
+import json, os
+s = json.load(open(os.environ["TANUKI_ROOT"] + "/t/scheduler.json"))
+assert "bindings" not in s, "single-binding layout must be unchanged"
+assert s["runs_recorded"] == ["20260719-r1"], s["runs_recorded"]
+' || fail "legacy single-binding layout must be byte-compatible"
+# One declared host is still the single-binding world.
+write_file '{"a":"/tmp/a"}' ""
+"${S[@]}" status | python3 -c '
+import json, sys
+assert "binding" not in json.load(sys.stdin)
+' || fail "one declared host must not switch layouts"
+pass "no migration: single/one-host targets keep today's layout"
+
+# --- two bindings: independent per-binding arithmetic --------------------------
+write_file '{"a":"/tmp/host-a","b":"/tmp/host-b"}' a
+"${S[@]}" sync --scenarios "$canon" > /dev/null   # binding a: first sync
+manifest 20260719-r2 a
+"${S[@]}" record-run --run 20260719-r2 > /dev/null
+write_file '{"a":"/tmp/host-a","b":"/tmp/host-b"}' b
+"${S[@]}" sync --scenarios "$canon" > /dev/null   # binding b: its own slice
+manifest 20260719-r3 b
+manifest 20260719-r4 b
+"${S[@]}" record-run --run 20260719-r3 > /dev/null
+"${S[@]}" record-run --run 20260719-r4 > /dev/null   # 2 low-yield -> demote in b
+python3 -c '
+import json, os
+s = json.load(open(os.environ["TANUKI_ROOT"] + "/t/scheduler.json"))
+a, b = s["bindings"]["a"], s["bindings"]["b"]
+assert b["scenarios"]["s1"]["state"] == "regression", b["scenarios"]["s1"]
+assert a["scenarios"]["s1"]["state"] == "active", \
+    "a low-yield streak on binding b must leave binding a untouched: %r" % a
+assert a["runs_recorded"] == ["20260719-r2"], a["runs_recorded"]
+assert b["runs_recorded"] == ["20260719-r3", "20260719-r4"], b["runs_recorded"]
+' || fail "per-binding slices must accrue independently"
+pass "independent arithmetic: b demotes, a untouched — the ruling's core promise"
+
+# --- status and plan name the effective binding --------------------------------
+"${S[@]}" status | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["binding"] == "b", r.get("binding")
+assert "a" in r["other_bindings"], r
+' || fail "status must name the effective binding and summarize the others"
+"${S[@]}" plan --scenarios "$canon" --run p1 | python3 -c '
+import json, sys
+assert json.load(sys.stdin)["binding"] == "b"
+' || fail "the plan record must name its binding"
+pass "status/plan: the effective binding is named, others summarized"
+
+# --- binding id is stable under re-pinning (path change moves no state) --------
+before="$(cat "$TANUKI_ROOT/t/scheduler.json")"
+write_file '{"a":"/tmp/host-a","b":"/tmp/host-b-MOVED"}' b
+"${S[@]}" status | python3 -c '
+import json, sys
+assert json.load(sys.stdin)["binding"] == "b"
+' || fail "re-pinning the host path must not change the binding id"
+[ "$(cat "$TANUKI_ROOT/t/scheduler.json")" = "$before" ] \
+  || fail "a path change must move no state"
+pass "host_binding_id is logically stable — separate from the commit pin"
+
+# --- ledger: recurrence and absence evaluate one binding at a time -------------
+"${L[@]}" init > /dev/null 2>&1 || true
+"${L[@]}" upsert-finding --title "b-side finding" --kind friction \
+  --evidence "20260719-r3/s1#1" > /dev/null       # current binding: b
+python3 -c '
+import json, os
+f = json.load(open(os.environ["TANUKI_ROOT"] + "/t/ledger.json"))["findings"][0]
+assert f["host_binding"] == "b", f
+' || fail "a finding is born to the current binding"
+# Switch to binding a; a bump observed there must not merge into b's recurrence.
+write_file '{"a":"/tmp/host-a","b":"/tmp/host-b"}' a
+"${L[@]}" upsert-finding --match F1 --evidence "20260719-r2/s1#2" > /dev/null
+python3 -c '
+import json, os
+f = json.load(open(os.environ["TANUKI_ROOT"] + "/t/ledger.json"))["findings"][0]
+assert f["recurrence"] == 1, "cross-binding bump must not merge recurrence: %r" % f
+assert f["evidence_offhost"][0]["host"] == "a", f["evidence_offhost"]
+assert f["last_seen_run"] == "20260719-r3", f
+' || fail "cross-binding evidence must be recorded aside"
+pass "ledger: recurrence is per binding; cross-binding evidence tagged aside"
+
+# --- driven-absence: replays on another binding verify nothing -----------------
+"${L[@]}" set-status --id F1 --status accepted > /dev/null
+# Current binding is a; runs r5(a)/r6(a) drive s1 AFTER the finding's last
+# sighting — but the finding belongs to b, so nothing accrues.
+manifest 20260719-r5 a; manifest 20260719-r6 a
+"${L[@]}" compact --unseen-runs 2 > /dev/null
+python3 -c '
+import json, os
+f = json.load(open(os.environ["TANUKI_ROOT"] + "/t/ledger.json"))["findings"][0]
+assert not f.get("tombstone"), \
+    "replays on binding a must not verify a b-side finding: %r" % f
+' || fail "cross-binding replays must accrue no driven-absence"
+# Replays under the finding's OWN binding do verify.
+manifest 20260719-r7 b; manifest 20260719-r8 b
+"${L[@]}" compact --unseen-runs 2 > /dev/null
+python3 -c '
+import json, os
+f = json.load(open(os.environ["TANUKI_ROOT"] + "/t/ledger.json"))["findings"][0]
+assert f.get("tombstone") and f["resolution"] == "fixed", f
+' || fail "same-binding replays must verify by absence"
+pass "driven-absence: one binding at a time — the false-verify hole is closed"
+
+echo "all checks passed"

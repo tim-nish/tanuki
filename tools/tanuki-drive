@@ -917,6 +917,22 @@ def main():
     if "host" in {(scenario_file.get("inputs") or {}).get(f, {}).get("binds")
                   for f in override}:
         args.host = scenario_file.get("host")
+    # Story 1.30: a multi-binding target (`hosts` block, 2+ entries) drives
+    # under exactly one declared binding; the manifest is stamped with its
+    # LOGICALLY STABLE id so every downstream arithmetic knows which host
+    # identity this run belongs to. The id names the binding, never a
+    # commit — re-pinning the host repo never changes it.
+    hosts = scenario_file.get("hosts")
+    host_binding = None
+    if isinstance(hosts, dict) and len(hosts) >= 2:
+        host_binding = scenario_file.get("host_binding")
+        if host_binding not in hosts:
+            print(f"error: multi-binding target: `host_binding` must name "
+                  f"one of {sorted(hosts)} (got {host_binding!r})",
+                  file=sys.stderr)
+            return 2
+        if args.host is None:
+            args.host = hosts[host_binding]
     scenarios = scenario_file["scenarios"]
     cfg = load_config(scenario_file)
     # Stage-entry fixtures (spec-host-snapshot "Stage-entry fixtures"; story
@@ -1045,6 +1061,8 @@ def main():
     # off — and the effective resolved inputs are recorded for history.
     if override:
         manifest["override"] = override
+    if host_binding:
+        manifest["host_binding"] = host_binding
     if scenario_file.get("inputs"):
         manifest["effective_inputs"] = effective_inputs(scenario_file)
     with open(os.path.join(run_dir, "manifest.json"), "w", encoding="utf-8") as f:
