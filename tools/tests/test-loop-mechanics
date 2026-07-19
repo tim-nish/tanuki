@@ -43,6 +43,13 @@ pass "sequencing guard: an unclosed iteration blocks the next iter-start"
 # --- integration invariant catches "no patch when one was expected" ----------
 rc=0; "${L[@]}" iter-verify >/tmp/iv.json 2>&1 || rc=$?
 [ "$rc" = "3" ] && grep -q "HEAD == start" /tmp/iv.json || fail "expected no-patch invariant breaker (exit 3)"
+# F131 (residual): the hint must say a commit may have landed OUTSIDE the loop
+# worktree — a commit made in the base repo reads exactly like "no commit" —
+# and name the worktree path to check.
+grep -q "check it landed in the loop worktree" /tmp/iv.json \
+  || fail "no-patch breaker hint must point at the loop worktree (F131)"
+grep -q "$wt" /tmp/iv.json \
+  || fail "no-patch breaker hint must name the worktree path (F131): $(cat /tmp/iv.json)"
 "${L[@]}" iter-verify --no-patch | jget '["ok"]' | grep -q True || fail "--no-patch should accept an unchanged HEAD"
 pass "integration invariant: breaks on missing patch; --no-patch accepts no-op"
 
@@ -137,6 +144,11 @@ EOF
 grep -q "STOPPED — stop reason: cap" /tmp/dash.txt || fail "dashboard missing finish reason"
 grep -q "findings: " /tmp/dash.txt || fail "dashboard missing findings summary"
 grep -q "iterations: 0/3" /tmp/dash.txt || fail "dashboard missing iteration count"
+# F29: the cap-hit health verdict states the numbers it used, with the SAME
+# numerator/denominator as the iterations line — beside "iterations: 0/3
+# consumed", a bare "cap hit" read as a contradiction.
+grep -q "cap hit (0/3 consumed) without convergence" /tmp/dash.txt \
+  || fail "cap-hit health line must state N/N consumed (F29): $(grep 'health' /tmp/dash.txt)"
 grep -q "scenarios: active 1 · regression 1 · unexplored 1" /tmp/dash.txt \
   || fail "dashboard missing scheduler section"
 grep -q "unexplored: s2" /tmp/dash.txt || fail "dashboard missing unexplored list"

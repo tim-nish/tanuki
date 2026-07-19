@@ -40,8 +40,11 @@ grep -qE "scheduler decisions: .+—" <<<"$out"                 || fail "schedul
 pass "missing substrate degrades to a stated reason"
 
 # --- fixed order: the section headings appear in the contract's order --------
+# Key on the heading at the START of each matched line — a greedy match over
+# the whole line picked up section text instead (F166's "expected for this
+# run's state" tag contains the words "this run").
 order="$(grep -nE "^  (health|latest drive|this run|scheduler decisions|convergence):|NEXT:" <<<"$out" \
-  | sed -E 's/.*(health|latest drive|this run|scheduler decisions|convergence|NEXT).*/\1/' | tr '\n' ',')"
+  | sed -E 's/^[0-9]+: *(health|latest drive|this run|scheduler decisions|convergence|NEXT).*/\1/' | tr '\n' ',')"
 [ "$order" = "health,latest drive,this run,scheduler decisions,convergence,NEXT," ] \
   || fail "sections out of order: $order"
 pass "sections render in the fixed contract order"

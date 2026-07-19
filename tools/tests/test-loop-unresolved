@@ -144,6 +144,10 @@ pass "read-only: the loop repo nets zero change; no brief written into it"
 grep -q "note: 1 unresolved loop branch" "$root/err.txt" \
   || fail "the dashboard must note drift on stderr: $(cat "$root/err.txt")"
 grep -q "reconcile" "$root/err.txt" || fail "the note must name the command that acts"
+# F174 (residual): a cold CLI reader has never met a "slash command" — every
+# hint naming one says what that is and where it runs.
+grep -q "a Claude Code slash command, run in a Claude Code session" "$root/err.txt" \
+  || fail "the note must explain what a slash command is (F174): $(cat "$root/err.txt")"
 grep -q "note:" "$root/out.txt" && fail "the note must not pollute stdout"
 grep -q "health:" "$root/out.txt" || fail "the dashboard screen itself is unchanged"
 rc=0; "${L[@]}" dashboard >/dev/null 2>&1 || rc=$?
