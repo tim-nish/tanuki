@@ -1013,11 +1013,10 @@ def main():
                   f"'{name}' but the scenarios file has no "
                   f"entry_fixtures['{name}'] recipe", file=sys.stderr)
             return 2
-        if not registry[name].get("paths"):
-            print(f"error: entry_fixture '{name}' declares no artifact "
-                  "paths", file=sys.stderr)
-            return 2
-        s["_entry_fixture"] = {"name": name, **registry[name]}
+        # Host-conditional validity (paths, per-host set membership) is
+        # checked AFTER --only filtering (story 1.33): an incompatible
+        # fixture on an UNSELECTED scenario is the plan-time compat check's
+        # business, never a reason this drive cannot start.
     if args.only:
         wanted = set(args.only.split(","))
         scenarios = [s for s in scenarios if s["id"] in wanted]
@@ -1028,6 +1027,39 @@ def main():
     if not scenarios:
         print("error: no scenarios selected", file=sys.stderr)
         return 2
+
+    # Host-aware fixture selection for the SELECTED scenarios (story 1.33):
+    # a recipe either declares per-host artifact sets
+    # (`hosts: {<binding_id>: {paths, …}}` — selected by the effective
+    # binding) or is legacy single-host state, valid only in the
+    # single-binding world. Invalid combinations fail HERE — the last-line
+    # fail-closed check; `tanuki-scheduler plan` surfaces the same
+    # conditions earlier as compat_skipped.
+    for s in scenarios:
+        name = s.get("entry_fixture")
+        if not name:
+            continue
+        recipe = registry[name]
+        if isinstance(recipe.get("hosts"), dict):
+            if host_binding not in recipe["hosts"]:
+                print(f"error: entry_fixture '{name}' has no artifact set "
+                      f"for host binding {host_binding!r} — invalid for "
+                      "this host (reported at plan time by "
+                      "`tanuki-scheduler plan` as compat_skipped)",
+                      file=sys.stderr)
+                return 2
+            recipe = recipe["hosts"][host_binding]
+        elif host_binding:
+            print(f"error: entry_fixture '{name}' is single-host committed "
+                  "state but this target drives multiple host bindings — "
+                  "declare per-host sets (`hosts: {<binding>: {paths…}}`)",
+                  file=sys.stderr)
+            return 2
+        if not recipe.get("paths"):
+            print(f"error: entry_fixture '{name}' declares no artifact "
+                  "paths", file=sys.stderr)
+            return 2
+        s["_entry_fixture"] = {"name": name, **recipe}
 
     # Declared bindings resolve for the SELECTED scenarios before anything
     # else sees their text (story 1.31): estimate and real drives alike, so

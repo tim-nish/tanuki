@@ -340,6 +340,41 @@ def cmd_sync(args):
          **({"generation_recorded": entry} if entry else {})})
 
 
+def compat_unmet(s, data, binding):
+    """The scenario's unmet requirements on the effective host binding
+    (story 1.33 / #173) — deterministic inputs only: a referenced per-host
+    binding with no value under the effective binding (the exact condition
+    tanuki-drive's resolver fails closed on), or an entry fixture with no
+    artifact set for it. [] = compatible."""
+    unmet = []
+    bindings = data.get("bindings") if isinstance(data.get("bindings"),
+                                                  dict) else {}
+    texts = [s.get("prompt") or ""] + [c for c in (s.get("host_setup") or [])
+                                       if isinstance(c, str)]
+    seen = set()
+    for text in texts:
+        for name in BINDING_TOKEN.findall(text):
+            decl = bindings.get(name)
+            if (name not in seen and isinstance(decl, dict)
+                    and (binding is None or binding not in decl)):
+                seen.add(name)
+                unmet.append(f"binding '{name}' has no value for host "
+                             f"binding {binding!r}")
+    fx = s.get("entry_fixture")
+    if fx:
+        recipe = ((data.get("entry_fixtures") or {}).get(fx)
+                  if isinstance(data.get("entry_fixtures"), dict) else None)
+        recipe = recipe or {}
+        if isinstance(recipe.get("hosts"), dict):
+            if binding not in recipe["hosts"]:
+                unmet.append(f"entry fixture '{fx}' has no artifact set for "
+                             f"host binding {binding!r}")
+        elif binding is not None:
+            unmet.append(f"entry fixture '{fx}' is single-host committed "
+                         f"state (no per-host set for '{binding}')")
+    return unmet
+
+
 def cmd_plan(args):
     cfg = load_config()
     cap = args.max or cfg["max_scenarios"]
@@ -348,9 +383,29 @@ def cmd_plan(args):
         die("no scheduler state; run `sync --scenarios <file>` first")
     binding = effective_binding(args.target)
     view = sched_view(sched, binding)
+    with open_scenarios(args.scenarios, args.target) as f:
+        file_data = json.load(f)
     matrix = matrix_data(args.scenarios, args.target)
     known = set(matrix)
+    # Compatibility check at plan time (story 1.33): the check runs where
+    # selection happens. Incompatible scenarios are FILTERED here and the
+    # skips persist in the plan record with reasons — surfaced like
+    # verify_deferred, never a silent truncation, never a mid-drive
+    # surprise. Driven-absence is untouched by construction: a skipped
+    # scenario is simply never driven, so it accrues nothing.
+    compat_skipped = []
+    for sid in sorted(known):
+        unmet = compat_unmet(matrix[sid], file_data, binding)
+        if unmet:
+            compat_skipped.append({"scenario": sid, "unmet": unmet})
+            known.discard(sid)
     scen = {k: v for k, v in view["scenarios"].items() if k in known}
+    # An unexplored scenario the compat check skipped: the exploration slot
+    # it would have filled must not read as satisfied.
+    skipped_unexplored = [
+        e["scenario"] for e in compat_skipped
+        if view["scenarios"].get(e["scenario"], {}).get("state")
+        == "unexplored"]
     tick = len(view["runs_recorded"]) + 1
 
     # 1. Verify set — CHEAPEST COVERING scenario per accepted finding
@@ -418,6 +473,10 @@ def cmd_plan(args):
                 plan.append(s)
                 seen.add(s)
     quota_met = (not unexplored) or any(s in seen for s in unexplored)
+    # Story 1.33: a compat-skipped exploration slot never reads satisfied —
+    # an incompatible host must not be able to manufacture convergence.
+    if skipped_unexplored and not any(s in seen for s in unexplored):
+        quota_met = False
     record = {"run": args.run,
               # Story 1.30: the plan names the binding it was computed for —
               # cross-binding plan history must never be ambiguous.
@@ -430,6 +489,8 @@ def cmd_plan(args):
               # scenario in verify_deferred).
               "verify_selection": verify_selection,
               "verify_deferred": sorted(verify_deferred),
+              **({"compat_skipped": compat_skipped} if compat_skipped
+                 else {}),
               "explore": [s for s in explore if s in seen],
               "due_regression": [s for s in due if s in seen],
               "unexplored_remaining": [s for s in unexplored if s not in seen]}
