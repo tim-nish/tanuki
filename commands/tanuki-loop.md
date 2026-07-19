@@ -239,6 +239,10 @@ one.
   attempt cap → **freeze** (that finding only). Keep processing other
   independent actionable findings; stop **only** if a deferred/frozen item
   blocks *all* remaining work.
+- *Breaker precedence* (F93): `iter-start` evaluates the cap breaker before
+  the external-modification check, so once a run reaches its cap the
+  external-modification breaker can no longer fire on it — the cap-breaker
+  message names the checks it skipped; the worktree is unguarded past the cap.
 - *Recovery from the external-modification breaker* (attended;
   spec-tanuki-loop "Circuit breakers"): **detection is deferred** — the breaker
   fires at the *next* `iter-start` (which compares the worktree HEAD against
@@ -321,9 +325,10 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
    was flagged (F106). Use `--no-ff` so the batch
    lands as one reviewable merge commit that `gate-check` can then confirm is
    reachable; executed by the gate only after approval, never unattended (F12).
-   Being a hand-run git command, the merge itself prints no tool confirmation —
-   `gate-check` succeeding in step 3 **is** the success signal for the merge
-   (F187).
+   Being a hand-run git command, the merge itself prints no `tanuki-loop`
+   confirmation (git prints its own merge summary as usual) — `gate-check`
+   succeeding in step 3 **is** the tool-level success signal for the merge
+   (F187, F194).
 3. **Verify** with `tanuki-loop gate-check` (integration HEAD reachable from
    base).
 4. **Push the base branch** with `tanuki-loop gate-push` — the first
