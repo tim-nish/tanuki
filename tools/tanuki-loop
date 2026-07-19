@@ -811,6 +811,348 @@ def write_unresolved_brief(target, payload):
     return p
 
 
+# ── Deterministic disposition + port engine ──────────────────────────────────
+# spec-tanuki-loop "Reconcile substrate" transition note (#210, ratified
+# 2026-07-19), story 1.38 (#211). "Deterministic" = requires no owner semantic
+# decision — established here by mechanical evidence per HUNK (reverse-apply,
+# forward-apply, postimage containment), never by patch identity alone or a
+# subject line. Anything a check cannot evidence FAILS CLOSED to the gate
+# (`conflicting` with the evidence, or `needs-owner` when no evidence could be
+# computed at all). This engine never merges, never pushes, never deletes a
+# branch, and owns no gate — it applies onto a reconcile staging branch that
+# the orchestration (#213) later gates and merges.
+
+def _split_commit_patch(repo, sha):
+    """Per-file, per-hunk decomposition of one commit.
+
+    Returns [{"file", "header", "hunks": [hunktext...], "opaque": reason|None}]
+    — `opaque` marks a file diff the engine cannot classify hunk-by-hunk
+    (binary, rename/copy); an opaque file fails the whole unit closed.
+    """
+    rc, raw = git(repo, "show", "--format=", "--no-color", "-U3", sha)
+    if rc != 0:
+        return None
+    files, cur = [], None
+    for line in raw.splitlines():
+        if line.startswith("diff --git "):
+            cur = {"file": line.split(" b/", 1)[-1], "header": [line],
+                   "hunks": [], "opaque": None}
+            files.append(cur)
+        elif cur is None:
+            continue
+        elif line.startswith("@@"):
+            cur["hunks"].append([line])
+        elif cur["hunks"]:
+            cur["hunks"][-1].append(line)
+        else:
+            cur["header"].append(line)
+            if line.startswith("Binary files"):
+                cur["opaque"] = "binary"
+            elif line.startswith(("rename from", "copy from")):
+                cur["opaque"] = "rename-or-copy"
+    for f in files:
+        f["hunks"] = ["\n".join(h) + "\n" for h in f["hunks"]]
+        f["header"] = "\n".join(f["header"]) + "\n"
+        if not f["hunks"] and not f["opaque"]:
+            f["opaque"] = "no-textual-hunks"
+    return files
+
+
+def _hunk_added_lines(hunk_text):
+    return [ln[1:].strip() for ln in hunk_text.splitlines()
+            if ln.startswith("+") and not ln.startswith("+++")
+            and ln[1:].strip()]
+
+
+def _classify_hunk(wt, header, hunk_text, base_file_text):
+    """One hunk against the evaluation tree checked out at `wt`.
+
+    landed          — reverse-applies: the exact change is already present.
+    applicable      — forward-applies cleanly.
+    landed-diverged — neither applies, but every line the hunk ADDS already
+                      exists in the evaluated version of the file: the
+                      behavior arrived by another route (F72's SKILL.md hunk).
+    conflicting     — none of the above: a genuine divergence; escalates.
+    """
+    import tempfile as _tf
+    patch = header + hunk_text
+    with _tf.NamedTemporaryFile("w", suffix=".patch", delete=False) as f:
+        f.write(patch)
+        pf = f.name
+    try:
+        if git(wt, "apply", "--check", "--reverse", "-p1", pf)[0] == 0:
+            return "landed", "reverse-apply clean"
+        if git(wt, "apply", "--check", "-p1", pf)[0] == 0:
+            return "applicable", "forward-apply clean"
+        added = _hunk_added_lines(hunk_text)
+        if added and base_file_text is not None and \
+                all(a in base_file_text for a in added):
+            return ("landed-diverged",
+                    "every added line already present in the evaluated file")
+        return "conflicting", "neither applies; added lines not all present"
+    finally:
+        os.unlink(pf)
+
+
+def _findings_superseded(cites):
+    """True when every cited finding is accepted-and-tombstoned — the spec's
+    superseded *candidate* signal, used only to LABEL a unit whose hunks the
+    checks already evidenced as landed. Never a verdict by itself."""
+    return bool(cites) and all(
+        c.get("status") == "accepted" and c.get("tombstoned") for c in cites)
+
+
+def _dispose_unit(repo, wt, eval_ref, commit, branch):
+    """Classify one semantic change unit (a commit, decomposed per hunk).
+
+    Returns the unit's disposition record: disposition, action, per-hunk
+    evidence, and — for ports — which hunks land and which are dropped by
+    name. Fail-closed: any hunk the checks cannot evidence escalates the
+    whole unit; nothing is guessed."""
+    sha, subject = commit["sha"], commit["subject"]
+    rec = {"sha": sha, "subject": subject, "branch": branch,
+           "evaluated_against": eval_ref, "hunks": [],
+           "cites_findings": commit.get("cites_findings", [])}
+    files = _split_commit_patch(repo, sha)
+    if files is None:
+        rec.update(disposition="needs-owner", action="escalate",
+                   reason="could not read the commit's patch")
+        return rec
+    statuses = set()
+    for fd in files:
+        if fd["opaque"]:
+            rec["hunks"].append({"file": fd["file"], "status": "unknown",
+                                 "evidence": fd["opaque"]})
+            statuses.add("unknown")
+            continue
+        rc, shown = git(wt, "show", f"HEAD:{fd['file']}")
+        base_text = shown if rc == 0 else None
+        for i, h in enumerate(fd["hunks"]):
+            st, ev = _classify_hunk(wt, fd["header"], h, base_text)
+            rec["hunks"].append({"file": fd["file"], "hunk": i,
+                                 "status": st, "evidence": ev})
+            statuses.add(st)
+    if "unknown" in statuses:
+        rec.update(disposition="needs-owner", action="escalate",
+                   reason="a hunk yielded no computable evidence "
+                          "(fail closed, never guessed)")
+    elif statuses <= {"landed", "landed-diverged"}:
+        rec.update(
+            disposition=("superseded"
+                         if _findings_superseded(rec["cites_findings"])
+                         else "already-landed"),
+            action="drop",
+            reason="every hunk evidenced as already present")
+    elif "conflicting" in statuses:
+        # Plain `apply` is stricter than cherry-pick's three-way merge: a
+        # hunk failing only on drifted context still picks cleanly. The
+        # three-way result is the arbiter; a conflict it cannot resolve is
+        # a genuine divergence and escalates.
+        if _picks_cleanly(repo, sha, eval_ref):
+            rec.update(disposition="still-applicable", action="cherry-pick",
+                       reason="three-way merge against the evaluated tree "
+                              "is clean (apply-context drift only)")
+        else:
+            rec.update(disposition="conflicting", action="escalate",
+                       reason="a hunk genuinely diverges from the "
+                              "evaluated tree")
+    else:
+        whole = all(h["status"] == "applicable" for h in rec["hunks"])
+        if whole and _picks_cleanly(repo, sha, eval_ref):
+            rec.update(disposition="still-applicable", action="cherry-pick",
+                       reason="every hunk applicable; three-way clean")
+        else:
+            # Entangled unit (F72/F10): only the applicable hunks land;
+            # everything already present is dropped BY NAME.
+            rec.update(disposition="still-applicable", action="port",
+                       reason="applicable hunk(s) evidenced against the "
+                              "evaluated tree; the rest already present")
+            rec["dropped_hunks"] = [
+                {"file": h["file"], "hunk": h.get("hunk"),
+                 "why": h["status"]}
+                for h in rec["hunks"] if h["status"] != "applicable"]
+    return rec
+
+
+def _staging_branch(target):
+    return f"tanuki-loop/{target}/reconcile"
+
+
+def _already_applied(repo, staging, sha):
+    """Idempotency: a full source sha in the staging log (cherry-pick -x
+    trailer or the port commit's Source: line) means this unit landed."""
+    rc, full = git(repo, "rev-parse", sha)
+    if rc != 0:
+        return False
+    rc, hits = git(repo, "log", staging, f"--grep={full.strip()}",
+                   "--format=%H")
+    return rc == 0 and bool(hits.strip())
+
+
+def _apply_unit(repo, wt, rec, target):
+    """Perform a cherry-pick or port in the staging worktree. Any failure
+    reverts the worktree and demotes the unit to `conflicting` (fail closed —
+    the staging tip may have diverged from what was classified)."""
+    sha = rec["sha"]
+    full = git(repo, "rev-parse", sha)[1].strip()
+    if rec["action"] == "cherry-pick":
+        rc, _msg = git(wt, "cherry-pick", "-x", sha)
+        if rc != 0:
+            git(wt, "cherry-pick", "--abort")
+            rec.update(disposition="conflicting", action="escalate",
+                       applied=False,
+                       reason="cherry-pick failed against the staging tip")
+            return False
+        rec["applied"] = True
+        rec["applied_as"] = git(wt, "rev-parse", "--short", "HEAD")[1].strip()
+        return True
+    import tempfile as _tf
+    files = _split_commit_patch(repo, sha)
+    keep = {(h["file"], h.get("hunk")) for h in rec["hunks"]
+            if h["status"] == "applicable"}
+    patch = "".join(
+        fd["header"] + "".join(h for i, h in enumerate(fd["hunks"])
+                               if (fd["file"], i) in keep)
+        for fd in files
+        if any((fd["file"], i) in keep for i in range(len(fd["hunks"]))))
+    with _tf.NamedTemporaryFile("w", suffix=".patch", delete=False) as f:
+        f.write(patch)
+        pf = f.name
+    try:
+        if git(wt, "apply", "-p1", pf)[0] != 0:
+            git(wt, "checkout", "--", ".")
+            rec.update(disposition="conflicting", action="escalate",
+                       applied=False,
+                       reason="port apply failed against the staging tip")
+            return False
+        dropped = "\n".join(
+            f"  dropped: {d['file']} hunk {d['hunk']} ({d['why']})"
+            for d in rec.get("dropped_hunks", []))
+        msg = (f"port {sha}: {rec['subject']}\n\n"
+               f"Ported the applicable hunk(s) of an entangled commit; the "
+               f"rest were\nevidenced as already present and dropped by "
+               f"name:\n{dropped or '  (none)'}\n\n"
+               f"Source: {rec['branch']}@{full} (tanuki-loop dispose)")
+        git(wt, "add", "-A")
+        if git(wt, "commit", "-m", msg)[0] != 0:
+            rec.update(disposition="needs-owner", action="escalate",
+                       applied=False, reason="port commit failed")
+            return False
+        rec["applied"] = True
+        rec["applied_as"] = git(wt, "rev-parse", "--short", "HEAD")[1].strip()
+        return True
+    finally:
+        os.unlink(pf)
+
+
+def _write_reconcile_state(target, payload):
+    d = os.path.join(TANUKI_ROOT, target)
+    if not os.path.isdir(d):
+        return None
+    p = os.path.join(d, "reconcile.json")
+    merged = {}
+    if os.path.exists(p):
+        try:
+            with open(p, encoding="utf-8") as f:
+                merged = json.load(f)
+        except (ValueError, OSError):
+            merged = {}
+    units = merged.get("units", {})
+    for r in payload["units"]:
+        units[r["sha"]] = r
+    merged.update(payload, units=units)
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(merged, f, indent=2)
+    os.replace(tmp, p)
+    return p
+
+
+def cmd_dispose(args):
+    """Classify every unresolved unit and (with --apply) act on the
+    deterministic ones. Dry-run by default: classification + evidence only."""
+    import tempfile as _tf
+    repo = _loop_repo_for(args.target, getattr(args, "loop_repo", None))
+    if not repo or not os.path.isdir(repo):
+        body, typed = empty_state("unresolved:no-loop-repo", args.target)
+        out({"target": args.target, "loop_repo": repo, "units": [],
+             "empty_state": typed})
+        return
+    base, _base_sha = resolve_base(repo, getattr(args, "base", None))
+    rows = unresolved_branches(repo, args.target, base)
+    if args.branch:
+        rows = [r for r in rows if r["branch"] == args.branch]
+    staging = _staging_branch(args.target)
+    have_staging = git(repo, "rev-parse", "--verify", "-q", staging)[0] == 0
+    units, cls_wt, apply_wt = [], None, None
+    try:
+        # Classification is ALWAYS against current base behavior (#210);
+        # application happens on the staging branch in its own worktree,
+        # created lazily so a run with nothing to apply leaves no branch.
+        cls_wt = _tf.mkdtemp(prefix="tanuki-dispose-cls-")
+        rc, msg = git(repo, "worktree", "add", "--detach", cls_wt, base)
+        if rc != 0:
+            die(f"dispose: could not create a work tree at {base}: {msg}")
+        for r in rows:
+            if r["branch"] == staging:
+                continue           # the staging branch is not a debt
+            for c in r["commits"]:
+                if have_staging and _already_applied(repo, staging,
+                                                     c["sha"]):
+                    units.append({"sha": c["sha"], "subject": c["subject"],
+                                  "branch": r["branch"],
+                                  "disposition": "already-applied",
+                                  "action": "skip",
+                                  "reason": "found in the staging log "
+                                            "(idempotent re-run)"})
+                    continue
+                rec = _dispose_unit(repo, cls_wt, base, c, r["branch"])
+                if args.apply and rec["action"] in ("cherry-pick", "port"):
+                    if apply_wt is None:
+                        apply_wt = _tf.mkdtemp(prefix="tanuki-dispose-apply-")
+                        rc, msg = (git(repo, "worktree", "add", apply_wt,
+                                       staging) if have_staging else
+                                   git(repo, "worktree", "add", apply_wt,
+                                       "-b", staging, base))
+                        if rc != 0:
+                            die("dispose: could not create the staging "
+                                f"work tree: {msg}")
+                        have_staging = True
+                    _apply_unit(repo, apply_wt, rec, args.target)
+                units.append(rec)
+    finally:
+        for w in (cls_wt, apply_wt):
+            if w:
+                git(repo, "worktree", "remove", "--force", w)
+        git(repo, "worktree", "prune")
+    payload = {"target": args.target, "loop_repo": repo, "base": base,
+               "staging": staging if have_staging else None,
+               "evaluated_against": base, "applied": bool(args.apply),
+               "units": units,
+               "escalations": [u for u in units
+                               if u.get("action") == "escalate"]}
+    _write_reconcile_state(args.target, payload)
+    if args.json:
+        out(payload)
+        return
+    print(f"dispose — {args.target} (against {base}"
+          + (", applied" if args.apply else ", dry-run") + ")")
+    if not units:
+        print("  nothing unresolved — no units to dispose")
+    for u in units:
+        line = (f"  {u['sha']}  {u['disposition']:<17} {u['action']:<11} "
+                f"{u.get('subject', '')[:44]}")
+        print(line)
+        if u.get("reason"):
+            print(f"      {u['reason']}")
+        for d in u.get("dropped_hunks", []):
+            print(f"      dropped: {d['file']} hunk {d['hunk']} ({d['why']})")
+    esc = [u for u in units if u.get("action") == "escalate"]
+    if esc:
+        print(f"\n  {len(esc)} unit(s) escalate to the gate — genuine "
+              "decisions only; evidence is in reconcile.json.")
+
+
 def resolve_loop_config(args):
     """Per-target loop settings from the scenarios file's "loop" block, with
     CLI flags as per-run overrides — the single resolution path shared by
@@ -3999,6 +4341,33 @@ def main():
     sp.add_argument("--loop-repo", default=None,
                     help="the repo holding the integration branches "
                          "(default: the most recent run's recorded loop_repo)")
+    sp = sub.add_parser(
+        "dispose",
+        help="deterministic disposition + port engine: classify every "
+             "unresolved unit per hunk; --apply acts on the deterministic "
+             "ones (reconcile staging branch); the rest fail closed",
+        description=(
+            "The reconcile pass's deterministic engine (spec-tanuki-loop "
+            "\"Reconcile substrate\" transition note, #210/#211). "
+            "\"Deterministic\" means REQUIRES NO OWNER SEMANTIC DECISION, "
+            "evidenced per hunk: reverse-apply (landed), forward-apply "
+            "(applicable), postimage containment (landed by another route). "
+            "Whole-clean units cherry-pick; entangled units are split and "
+            "only applicable hunks land, with dropped hunks named. A hunk "
+            "no check can evidence FAILS CLOSED — the unit escalates as "
+            "conflicting/needs-owner with its evidence, never guessed. "
+            "Applies onto tanuki-loop/<target>/reconcile only; it never "
+            "merges, never pushes, never deletes a branch, and owns no "
+            "gate — those are the orchestration's (#213)."))
+    sp.add_argument("--apply", action="store_true",
+                    help="perform the deterministic actions (default: "
+                         "dry-run classification + evidence only)")
+    sp.add_argument("--branch", default=None,
+                    help="restrict to one unresolved branch (evidence "
+                         "filter for advanced use — never required)")
+    sp.add_argument("--base", default=None)
+    sp.add_argument("--json", action="store_true")
+    sp.add_argument("--loop-repo", default=None)
 
     args = p.parse_args()
     {"init": cmd_init, "doctor": cmd_doctor,
@@ -4010,7 +4379,7 @@ def main():
      "gate-pr": cmd_gate_pr, "issue-get": cmd_issue_get,
      "issue-put": cmd_issue_put, "policy": cmd_policy, "finish": cmd_finish,
      "dashboard": cmd_dashboard, "status": cmd_status,
-     "unresolved": cmd_unresolved}[args.cmd](args)
+     "unresolved": cmd_unresolved, "dispose": cmd_dispose}[args.cmd](args)
 
 
 if __name__ == "__main__":

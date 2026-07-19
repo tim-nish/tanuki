@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+# Fixture for `tanuki-loop dispose` — the deterministic disposition + port
+# engine (story 1.38, #211; contract #210).
+#
+# The load-bearing rules: "deterministic" = requires no owner semantic
+# decision, evidenced PER HUNK; entangled commits are split and only
+# applicable hunks land, with dropped hunks named; anything a check cannot
+# evidence FAILS CLOSED to the gate; the engine applies only onto the
+# reconcile staging branch — it never merges, never pushes, never deletes.
+# Regression anchors: F72 (entangled commit, one hunk landed by another
+# route), F10 (one applicable hunk buried in a multi-finding commit).
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
+export TANUKI_ROOT="$root"
+L=("$here/tanuki-loop" --target t)
+jget() { python3 -c "import json,sys;print(json.load(sys.stdin)$1)"; }
+
+repo="$root/repo"; git init -q "$repo"
+git -C "$repo" checkout -qb main
+git -C "$repo" config user.email a@b.c; git -C "$repo" config user.name t
+printf 'a1\na2\na3\na4\na5\n' > "$repo/app.py"
+printf 'v1\nv2\nv3\n' > "$repo/validator.py"
+printf 'd1\nd2\nd3\n' > "$repo/doc.md"
+git -C "$repo" add -A; git -C "$repo" commit -qm base
+"${L[@]}" init --loop-repo "$repo" --cap 2 >/dev/null
+
+b=tanuki-loop/t/20260101-aaa
+git -C "$repo" branch "$b" main
+git -C "$repo" checkout -q "$b"
+
+# u1: cleanly applicable, whole commit one verdict -> cherry-pick
+printf 'a1\nNEW2\na3\na4\na5\n' > "$repo/app.py"
+git -C "$repo" commit -qam "fix: app line 2 (F1)"
+u1="$(git -C "$repo" rev-parse --short HEAD)"
+
+# u2: entangled (F10/F72 shape): validator hunk genuinely missing from main,
+# doc hunk will be landed on main by an identical independent commit
+printf 'v1\nVNEW\nv3\n' > "$repo/validator.py"
+printf 'd1\nDOCFIX\nd3\n' > "$repo/doc.md"
+git -C "$repo" add -A; git -C "$repo" commit -qm "feat: validator + doc (F10 F77)"
+u2="$(git -C "$repo" rev-parse --short HEAD)"
+
+# u3: genuine conflict: branch edits a5 one way, main will edit it another
+printf 'a1\nNEW2\na3\na4\nBRANCH5\n' > "$repo/app.py"
+git -C "$repo" commit -qam "fix: app line 5 (F3)"
+u3="$(git -C "$repo" rev-parse --short HEAD)"
+
+git -C "$repo" checkout -q main
+# land u2's doc hunk independently (identical change -> reverse-apply)
+printf 'd1\nDOCFIX\nd3\n' > "$repo/doc.md"
+git -C "$repo" commit -qam "docs: independent identical doc fix"
+# and edit a5 differently -> u3 conflicts
+printf 'a1\na2\na3\na4\nMAIN5\n' > "$repo/app.py"
+git -C "$repo" commit -qam "main edits a5 differently"
+
+# --- dry run: classification + evidence only, nothing applied ----------------
+o="$("${L[@]}" dispose --json)"
+[ "$(echo "$o" | jget '["applied"]')" = "False" ] || fail "dry-run must not apply"
+d1="$(echo "$o" | python3 -c "
+import json,sys
+u={x['sha']:x for x in json.load(sys.stdin)['units']}
+print(u['$u1']['disposition'], u['$u1']['action'])")"
+[ "$d1" = "still-applicable cherry-pick" ] \
+  || fail "u1 must be still-applicable/cherry-pick: $d1"
+pass "clean unit -> still-applicable, cherry-pick"
+
+d2="$(echo "$o" | python3 -c "
+import json,sys
+u={x['sha']:x for x in json.load(sys.stdin)['units']}
+r=u['$u2']; print(r['disposition'], r['action'],
+                 r['dropped_hunks'][0]['file'], r['dropped_hunks'][0]['why'])")"
+[ "$d2" = "still-applicable port doc.md landed" ] \
+  || fail "u2 must port with the landed doc hunk dropped BY NAME: $d2"
+pass "entangled unit -> port; dropped hunk named with its evidence (F10/F72)"
+
+d3="$(echo "$o" | python3 -c "
+import json,sys
+u={x['sha']:x for x in json.load(sys.stdin)['units']}
+print(u['$u3']['disposition'], u['$u3']['action'])")"
+[ "$d3" = "conflicting escalate" ] \
+  || fail "u3 must escalate as conflicting, never applied: $d3"
+pass "genuine conflict -> escalates to the gate (fail closed)"
+
+git -C "$repo" rev-parse --verify -q tanuki-loop/t/reconcile >/dev/null \
+  && fail "dry-run must not create the staging branch"
+pass "dry-run creates no staging branch"
+
+# --- apply: deterministic units land on the staging branch, only them --------
+o="$("${L[@]}" dispose --apply --json)"
+git -C "$repo" rev-parse --verify -q tanuki-loop/t/reconcile >/dev/null \
+  || fail "--apply must create the staging branch"
+n="$(git -C "$repo" rev-list --count main..tanuki-loop/t/reconcile)"
+[ "$n" = "2" ] || fail "exactly u1 (cherry-pick) + u2 (port) must land, got $n"
+git -C "$repo" show tanuki-loop/t/reconcile:validator.py | grep -q VNEW \
+  || fail "the applicable validator hunk must be ported"
+git -C "$repo" show tanuki-loop/t/reconcile:app.py | grep -q BRANCH5 \
+  && fail "the conflicting unit must NOT be applied"
+git -C "$repo" log tanuki-loop/t/reconcile --format=%B | grep -q "dropped: doc.md" \
+  || fail "the port commit must name its dropped hunks"
+pass "--apply: cherry-pick + port land on staging; conflict stays out"
+
+[ -f "$root/t/reconcile.json" ] || fail "evidence must persist to reconcile.json"
+python3 - "$root/t/reconcile.json" <<EOF
+import json,sys
+d=json.load(open(sys.argv[1]))
+u=d["units"]["$u3"]
+assert u["action"]=="escalate", u
+assert any(h["status"]=="conflicting" for h in u["hunks"]), u
+EOF
+pass "escalation evidence persisted per hunk (auditable, re-derivable)"
+
+# --- idempotency: a re-run applies nothing twice -----------------------------
+o="$("${L[@]}" dispose --apply --json)"
+n2="$(git -C "$repo" rev-list --count main..tanuki-loop/t/reconcile)"
+[ "$n2" = "2" ] || fail "re-run must not duplicate applications ($n2)"
+echo "$o" | python3 -c "
+import json,sys
+u={x['sha']:x for x in json.load(sys.stdin)['units']}
+assert u['$u1']['disposition']=='already-applied', u['$u1']
+" || fail "re-run must classify applied units as already-applied"
+pass "idempotent: re-running --apply is a no-op for applied units"
+
+# --- already-landed drop + superseded labeling -------------------------------
+b2=tanuki-loop/t/20260102-bbb
+git -C "$repo" checkout -q main
+printf 'z1\n' > "$repo/late.py"; git -C "$repo" add -A
+git -C "$repo" commit -qm "main gains late.py"
+git -C "$repo" branch "$b2" 'main^'
+git -C "$repo" checkout -q "$b2"
+printf 'z1\n' > "$repo/late.py"; git -C "$repo" add -A
+git -C "$repo" commit -qm "identical change, cites F9"
+u4="$(git -C "$repo" rev-parse --short HEAD)"
+git -C "$repo" checkout -q main
+python3 - "$root/t/ledger.json" <<'EOF'
+import json,sys
+json.dump({"findings":[{"id":"F9","status":"accepted",
+                        "tombstone":{"by":"test"}}]}, open(sys.argv[1],"w"))
+EOF
+o="$("${L[@]}" dispose --branch "$b2" --json)"
+d4="$(echo "$o" | python3 -c "
+import json,sys
+u={x['sha']:x for x in json.load(sys.stdin)['units']}
+print(u['$u4']['disposition'], u['$u4']['action'])")"
+[ "$d4" = "superseded drop" ] \
+  || fail "landed hunks + accepted-and-tombstoned citation -> superseded: $d4"
+pass "already-present unit citing a tombstoned finding -> superseded, dropped"
+
+# --- fail closed: an opaque (binary) unit escalates as needs-owner -----------
+b3=tanuki-loop/t/20260103-ccc
+git -C "$repo" branch "$b3" main
+git -C "$repo" checkout -q "$b3"
+printf '\x00\x01\x02' > "$repo/blob.bin"; git -C "$repo" add -A
+git -C "$repo" commit -qm "binary blob"
+u5="$(git -C "$repo" rev-parse --short HEAD)"
+git -C "$repo" checkout -q main
+o="$("${L[@]}" dispose --branch "$b3" --json)"
+d5="$(echo "$o" | python3 -c "
+import json,sys
+u={x['sha']:x for x in json.load(sys.stdin)['units']}
+print(u['$u5']['disposition'], u['$u5']['action'])")"
+[ "$d5" = "needs-owner escalate" ] \
+  || fail "no computable evidence must fail closed to needs-owner: $d5"
+pass "fail closed: opaque unit -> needs-owner, never guessed"
+
+echo "ALL PASS"
