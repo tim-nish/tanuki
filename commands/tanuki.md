@@ -49,7 +49,10 @@ Argument handling ($ARGUMENTS):
   *Alias:* `<target> --brief` — reprints the latest brief, then continues
   into the same pass (one code path, not a second behavior).
 - `<target> status`: run `tanuki-ledger --target <target> status` and show
-  it. No driving. *Alias:* `--status`.
+  it, then `tanuki-scheduler --target <target> status` and render any
+  non-empty `advisories` (uncovered plugin surface / unexplored pool empty,
+  each pointing at `generate`) as one line each — advisory generation-trigger
+  signals, #168. No driving. *Alias:* `--status`.
 - `<target> history [scenario]`: cross-run scenario monitoring — run
   `tanuki-scheduler --target <target> history [--scenario <id>]` and show
   it. Repo-wide: per-scenario
@@ -156,9 +159,12 @@ fixed order above — nothing view-specific). Then:
 the spec's list first; an unenumerated view is the defect this surface
 exists to fix. Each view names its substrate — run it, render its output:
 
-- **`status`** — ledger counts + the derived next step.
+- **`status`** — ledger counts + the derived next step, plus the scheduler's
+  advisory generation-trigger signals when non-empty.
   Substrate: `tanuki-ledger --target <t> status` and `next` (the
-  short-command-surface D2 derivation; never recomputed here).
+  short-command-surface D2 derivation; never recomputed here), and
+  `tanuki-scheduler --target <t> status` for `advisories` (#168 —
+  rendered verbatim, one line per signal).
 - **`live`** — the loop dashboard **of an actively running loop**: health
   verdict, latest drive, this run, scheduler decisions, convergence,
   why-stopped/NEXT.

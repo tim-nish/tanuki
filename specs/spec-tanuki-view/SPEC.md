@@ -98,9 +98,13 @@ The surface lists exactly these views; each names its substrate command, and
 adding a view means amending this list (an unenumerated view is the defect
 D1 exists to fix):
 
-- **`status`** — ledger counts + the derived `next` step.
+- **`status`** — ledger counts + the derived `next` step, plus the
+  scheduler's advisory generation-trigger signals when non-empty (AMENDED
+  2026-07-19, #168).
   Substrate: `tanuki-ledger status` / `next` (short-command-surface D2's
-  enumerated-state derivation; not recomputed here).
+  enumerated-state derivation; not recomputed here), and `tanuki-scheduler
+  status` `advisories` (feature-drift / unexplored-pool-empty, rendered
+  verbatim, one line per signal — read-only, no re-derivation).
 - **`live`** — the loop dashboard **of an actively running loop**: health,
   latest drive, this run, scheduler decisions, convergence, why-stopped/NEXT.
   Substrate: `tanuki-loop dashboard --live` (`--follow` remains available).

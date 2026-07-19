@@ -93,6 +93,18 @@ never automatic: a drift signal *informs*, and the operator invokes generation
 through the first-class `generate` entry (see `commands/tanuki.md`) — an
 unattended loop never grows the matrix, and no tool mutates it.
 
+**Surfacing (AMENDED 2026-07-19, #168).** An advisory trigger whose signal
+appears only where the operator must remember to look is operationally dead.
+The two computable triggers therefore render wherever the operator already
+looks, always read-only, always pointing at the `generate` invocation:
+feature-drift and pool-empty emit as `advisories` in `tanuki-scheduler
+status`, as advisory lines in `history` (pool emptiness is printed, never
+silent), in the status view, and — the moment that matters most — attached to
+the loop's convergence report (`record-cycle`), so a run cannot converge on a
+false quiet without the gap being named. The triggers themselves remain
+operator-invoked; surfacing changes where they are *seen*, never who fires
+them.
+
 On any trigger the orchestrating
 session generates charter candidates from: the plugin's README, `skills/*/
 SKILL.md`, and commands (external axes × intra-command decision points), the

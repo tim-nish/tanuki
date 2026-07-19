@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Fixture for the convergence advisory (issue #168 / spec-tanuki-scenario-
+# lifecycle §3 "Surfacing"): when a loop run converges, record-cycle attaches
+# the scheduler's advisory generation-trigger signals (feature-drift uncovered
+# surfaces, unexplored-pool-empty) so a false quiet is named, never silent.
+# The arithmetic is OWNED by tanuki-scheduler (`status` -> `advisories`);
+# tanuki-loop's generate_advisory() only reads and phrases it, and any failure
+# degrades to None — an advisory must never break record-cycle.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+
+# --- a target plugin with one covered and one uncovered skill ------------------
+plugin="$tmp/work/demo-plugin"
+mkdir -p "$plugin/skills/alpha" "$plugin/skills/beta"
+echo "# alpha" > "$plugin/skills/alpha/SKILL.md"
+echo "# beta"  > "$plugin/skills/beta/SKILL.md"
+canon="$TANUKI_ROOT/scenarios/demo.scenarios.json"
+mkdir -p "$(dirname "$canon")"
+cat > "$canon" <<EOF
+{"target":"demo","plugin":"$plugin",
+ "scenarios":[{"id":"s1","charter":"covers the alpha skill","prompt":"p"}]}
+EOF
+# First sync -> s1 active -> the unexplored pool is empty.
+"$here/tanuki-scheduler" --target demo sync --scenarios "$canon" > /dev/null
+
+python3 - "$here/tanuki-loop" <<'PY' || fail "generate_advisory contract"
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("tl", sys.argv[1])
+spec = importlib.util.spec_from_loader("tl", loader)
+tl = importlib.util.module_from_spec(spec); loader.exec_module(tl)
+
+# Both signals fire: the beta skill is uncovered and the pool is empty; the
+# advisory names each and points at the generate invocation.
+adv = tl.generate_advisory("demo")
+assert adv is not None, "both trigger signals present -> advisory expected"
+assert any("beta" in n for n in adv["notes"]), adv
+assert any("unexplored pool empty" in n for n in adv["notes"]), adv
+assert adv["generate"] == "/tanuki demo generate", adv
+
+# Nothing to say -> None (a fresh target: no drift computable, no state).
+assert tl.generate_advisory("ghost") is None, \
+    "a target with no signals must yield no advisory"
+PY
+pass "advisory names drift + empty pool and points at generate; quiet target -> None"
+
+# --- advisory failure degrades to None, never an exception ---------------------
+python3 - "$here/tanuki-loop" <<'PY' || fail "advisory degrade"
+import importlib.machinery, importlib.util, os, sys
+loader = importlib.machinery.SourceFileLoader("tl", sys.argv[1])
+spec = importlib.util.spec_from_loader("tl", loader)
+tl = importlib.util.module_from_spec(spec); loader.exec_module(tl)
+# A path-like target is rejected by the scheduler's slug validation (exit 2);
+# the advisory must swallow that and degrade to None.
+assert tl.generate_advisory("../not-a-slug") is None
+PY
+pass "sibling failure degrades to None — an advisory can never break record-cycle"
+
+echo "all checks passed"

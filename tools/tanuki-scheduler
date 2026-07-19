@@ -65,7 +65,11 @@ Subcommands (JSON out):
                                    untaken alternative). A fully-explored point
                                    yields none. Read-only — event files only,
                                    no ledger, no state or matrix mutation.
-  status                           machine-readable scheduler state
+  status                           machine-readable scheduler state, plus
+                                   `advisories` — the read-only generation-
+                                   trigger signals (feature-drift uncovered
+                                   surfaces, unexplored-pool-empty) and the
+                                   generate invocation they point at (#168)
 
 Config (~/.tanuki/config.json, all optional): demote_after 2 ·
 regression_every 3 · exploration_quota 1 · low_yield_threshold 0 ·
@@ -729,8 +733,13 @@ def cmd_history(args):
         if recent_actionable:
             cover["productive"].append(sid)
     drift = feature_drift(args.target)
+    # Pool-empty is a named generation trigger (spec §3) — render its firing
+    # condition, don't leave emptiness silent (issue #168). Zero scenarios is
+    # onboarding, not an empty pool.
+    pool_empty = bool(rows) and not cover["unexplored"]
     data = {"scenarios": rows, "coverage": cover,
             "feature_drift": drift,
+            "unexplored_pool_empty": pool_empty,
             "selection_history": sched.get("plans", [])[-args.plans:]}
     if args.json:
         out(data)
@@ -744,6 +753,9 @@ def cmd_history(args):
               f"  cum-rec {r['cumulative_recurrence']}")
     if cover["unexplored"]:
         print(f"  unexplored: {', '.join(cover['unexplored'])}")
+    elif pool_empty:
+        print(f"  unexplored pool empty — run `{drift['generate']}` "
+              "to widen the matrix")
     if cover["long_unrun"]:
         print(f"  long-unrun: {', '.join(cover['long_unrun'])}")
     if cover["productive"]:
@@ -764,9 +776,21 @@ def cmd_status(args):
     by_state = {}
     for sid, st in sched["scenarios"].items():
         by_state.setdefault(st["state"], []).append(sid)
+    # Advisory generation-trigger signals (issue #168): the same read-only
+    # feature-drift arithmetic history renders, plus the pool-empty condition
+    # — a named generation trigger that previously surfaced nowhere. status is
+    # the cheap machine surface, so consumers (the loop's convergence report,
+    # the status view) read the signals here instead of re-deriving them.
+    # A target with no scenarios at all is onboarding, not an empty pool.
+    drift = feature_drift(args.target)
     out({"runs_recorded": len(sched["runs_recorded"]),
          "by_state": {k: sorted(v) for k, v in sorted(by_state.items())},
-         "scenarios": sched["scenarios"]})
+         "scenarios": sched["scenarios"],
+         "advisories": {"feature_drift": drift["uncovered"],
+                        "unexplored_pool_empty":
+                            bool(sched["scenarios"])
+                            and not by_state.get("unexplored"),
+                        "generate": drift["generate"]}})
 
 
 def slug_target(value):
