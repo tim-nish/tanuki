@@ -748,8 +748,14 @@ def drift_note(target, repo):
         return None
     worst = max(r["behind"] for r in rows)
     n = len(rows)
-    staleness = (f"the most stale is {worst} commit(s) behind the base"
-                 if worst else "none has fallen behind the base yet")
+    # F188/F157: "behind the base" is jargon to a cold reader — gloss it
+    # inline as "the base gained commits the branch never picked up".
+    staleness = (f"the most stale is {worst} commit(s) behind the base "
+                 f"(the base branch has since gained {worst} commit(s) this "
+                 f"branch never picked up, so its work is drifting from "
+                 f"current code)"
+                 if worst else "none has fallen behind the base yet (the base "
+                 "branch has not advanced since these were cut)")
     return (f"note: {n} unresolved loop branch(es) — integration branches "
             f"holding work that never merged; {staleness}. "
             f"Run the `/tanuki-loop {target} reconcile` slash command "
@@ -2467,6 +2473,10 @@ def cmd_doctor(args):
     # top-level report field; the sanctioned-placeholder design stands
     # (`ready` is unaffected).
     noop_warning = None
+    # F176: a slug collision (an existing canonical file from another session)
+    # is surfaced to the TOP-LEVEL warning, not just the nested
+    # scenarios_file.existing_file field a skimming operator misses.
+    collision_warning = None
     if cfg["test_cmd"] is not None and noop_test_cmd(cfg["test_cmd"]):
         noop_warning = (f"test_cmd looks like a no-op ({cfg['test_cmd']!r}) — "
                         "this headless run would have NO regression gate; "
@@ -2477,6 +2487,15 @@ def cmd_doctor(args):
         loop_check["set_via_flag"] = {k: flag_for[k] for k in missing}
         loop_check["scenarios_loop_shape"] = {
             "loop": {k: "<value>" for k in required}}
+        # F223: this is the placeholder SHAPE (required keys). A second,
+        # filled-in copy-pasteable block lives in `doctor --help` ("sandbox
+        # recipe"); tie the two together so a first-timer knows they are the
+        # same block and where the ready-to-use version is, rather than
+        # reconciling two disconnected skeletons.
+        loop_check["scenarios_loop_shape_note"] = (
+            "placeholders mark the required keys; for a filled-in, "
+            "copy-pasteable sandbox block with concrete values see the "
+            "'sandbox recipe' in `doctor --help`")
         if "test_cmd" in missing:
             # Nothing said what a good test_cmd validates, so a first-timer
             # could not tell whether a trivial "true" was acceptable or a
@@ -2550,6 +2569,18 @@ def cmd_doctor(args):
                                        "read as JSON — likely damaged or "
                                        "mid-write by another session")
             loop_check["scenarios_file"]["existing_file"] = _existing
+            # F176: promote the collision to the top-level warning when the
+            # existing file declares a DIFFERENT target — the strongest signal
+            # it belongs to another session's slug and must not be trusted.
+            _ex_target = _existing.get("target")
+            if _ex_target is not None and _ex_target != args.target:
+                collision_warning = (
+                    f"a canonical scenarios file already exists at {_canon} "
+                    f"but declares target={_ex_target!r}, not {args.target!r} "
+                    f"— likely another session's config under a colliding "
+                    f"slug (the scenarios dir is machine-wide); inspect "
+                    f"scenarios_file.existing_file before trusting or "
+                    f"overwriting it")
     checks.append(loop_check)
 
     # 2. Base freshness — the same measurement init fails closed on (issue #2).
@@ -2821,9 +2852,13 @@ def cmd_doctor(args):
     # Always present, explicitly null when clean (the status convention,
     # F102/F106): absence and "nothing to warn about" must not be
     # indistinguishable (#140).
+    # F176: combine the no-op test_cmd warning with a slug-collision warning
+    # so both reach the top-level field an operator skims; null when neither
+    # applies (the F102/F106 absence-vs-null convention).
+    _warn = "; ".join(w for w in (noop_warning, collision_warning) if w) or None
     report = {"phase": args.phase, "target": args.target, "base": base,
               "base_sha": base_sha, "ready": not failed,
-              "warning": noop_warning, "checks": checks}
+              "warning": _warn, "checks": checks}
     if failed:
         tail = ""
         if derived:
@@ -3426,9 +3461,19 @@ def _gate_progress(state, reachable):
     }
     order = ("final-tests", "merge", "gate-check", "gate-push",
              "issues", "cleanup")
-    done = [s for s in order if evidence[s]]
+    # last_completed_step is the end of the contiguous completed PREFIX, not
+    # the globally-last step that happens to carry evidence (F224): an
+    # overnight `finish --reason cap` sets state["finished"], which maps to
+    # the `cleanup` step, so a naive done[-1] reads "cleanup" at the very
+    # first gate-check while merge/gate-push/issues are still pending. The
+    # gate is a sequence — report how far down it we have contiguously gotten.
+    prefix = []
+    for s in order:
+        if not evidence[s]:
+            break
+        prefix.append(s)
     progress = {
-        "last_completed_step": done[-1] if done else None,
+        "last_completed_step": prefix[-1] if prefix else None,
         "next_step": next((s for s in order if not evidence[s]), None),
     }
     if not reachable:
