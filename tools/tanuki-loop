@@ -166,9 +166,18 @@ run, F93):
                              uncommitted edits). Both are edits to the loop's
                              OWN worktree; a commit on the base branch does NOT
                              trip it (base is out of scope after init —
-                             spec-host-snapshot). Fires on the NEXT iter-start,
-                             not at the moment of the edit; clear it with
-                             `recover --restore|--adopt`, never `rollback`.
+                             spec-host-snapshot). DETECTION IS DEFERRED (F41):
+                             it is NOT checked when the worktree is touched and
+                             NOT checked by iter-verify — only at the NEXT
+                             iter-start's HEAD-vs-head_expected comparison. Two
+                             corollaries: (1) an edit made after the run's last
+                             iteration is never seen (no next iter-start to
+                             catch it — the morning-gate diff is the backstop),
+                             and (2) a foreign commit landing DURING an open
+                             iteration is absorbed into head_expected when
+                             iter-verify records the current HEAD, so it never
+                             trips the breaker at all. Clear a tripped breaker
+                             with `recover --restore|--adopt`, never `rollback`.
   sequencing violation       iter-start on an unclosed iteration, or record-cycle
                              with an iteration still open.
   test failure               test, when the configured test_cmd exits non-zero.
@@ -3086,6 +3095,16 @@ def cmd_iter_verify(args):
                # artifacts" must not look identical to a reader following the
                # docs (the fixed-skeleton rule, applied to JSON).
                "build_artifacts_committed": arts or None,
+               # F41: iter-verify records this HEAD as head_expected but does
+               # NOT check for external modification — that runs only at the
+               # next iter-start. State the deferred-detection rule here so an
+               # operator reading iter-verify's output alone knows a foreign
+               # commit inside this window is absorbed silently, not flagged.
+               "external_modification_check": (
+                   "deferred to the next iter-start (HEAD vs head_expected); "
+                   "not evaluated here — a commit made in this worktree during "
+                   "the iteration is folded into head_expected and never trips "
+                   "the breaker"),
                "warning": None}
     if arts:
         # Only declared (--allow-artifact) paths reach this point — an
