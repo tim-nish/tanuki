@@ -145,6 +145,25 @@ pass "push failure: exit 3, local integration branch intact"
 echo "$pf" | jget '["recovery"]' | grep -q "hand-create the PR" \
   || fail "failure payload must carry the documented recovery"
 pass "push failure payload: refs + cause + recovery (F192)"
+
+# --- F230: the recovery advice is cause-specific ------------------------------
+# A missing base ref on the forge cannot be fixed by hand-creating a PR against
+# it — the recovery must say to restore/push the base first; every other cause
+# keeps the generic hand-create path.
+python3 - "$here/tanuki-loop" <<'PY' || fail "gate-pr recovery must be cause-aware (F230)"
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("tl", sys.argv[1])
+spec = importlib.util.spec_from_loader("tl", loader)
+tl = importlib.util.module_from_spec(spec); loader.exec_module(tl)
+miss = tl._gate_pr_recovery("intg", "feat", "base ref not found on forge")
+assert "does not exist on the forge" in miss and "push/restore" in miss, miss
+assert "hand-create the PR `intg -> feat`" not in miss, miss
+for c in (None, "push failure", "other"):
+    gen = tl._gate_pr_recovery("intg", "feat", c)
+    assert "hand-create the PR `intg -> feat`" in gen, (c, gen)
+print("ok")
+PY
+pass "F230: gate-pr recovery is cause-specific (missing base ref vs generic)"
 git -C "$repo" remote set-url origin "$bare"
 
 # --- happy path: push + ONE Draft PR ------------------------------------------
