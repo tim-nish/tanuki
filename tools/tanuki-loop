@@ -51,6 +51,8 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
          {"target": "<slug>", "plugin": "<path>",
           "loop": {"test_cmd": "<shell cmd>", "iterations": N,
                    "wall_time_s": N, "token_budget": N, "attempt_cap": N}}
+       This "loop" block is NOT auto-loaded from the canonical path — pass the
+       file with --scenarios <file> (init and doctor read it only from there).
        `doctor --help` carries the fullest scenarios-file documentation
        (the canonical path formula and per-key CLI equivalents) — read it
        before writing one.
