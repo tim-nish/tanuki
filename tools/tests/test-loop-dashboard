@@ -118,9 +118,13 @@ pass "issue #63: a nonzero rolled-back count is stated and still consumes the ca
 out5="$("${L[@]}" dashboard)"
 grep -q "no iteration has started" <<<"$out5" \
   && fail "post-iteration empty state still claims no iteration started (F46)"
-grep -qE "latest drive: .*iteration\(s\) ran and none recorded a drive" <<<"$out5" \
-  || fail "post-iteration empty state must say iterations ran without a drive: $(grep 'latest drive' <<<"$out5")"
-pass "issue #65: after an iteration ran, the empty state states that accurately"
+# This hand-run persisted no scheduler plan, so the accurate state is the
+# manual-run provenance member (F166 / issue #236) — it still says iterations
+# RAN, which is the point (the exact wording is asserted in
+# test-loop-empty-states). It must not be the no-iteration state.
+grep -qE "latest drive: .*iteration\(s\) ran outside the scheduler" <<<"$out5" \
+  || fail "post-iteration empty state must say iterations ran (manual run): $(grep 'latest drive' <<<"$out5")"
+pass "issue #65/#236: after an iteration ran, the empty state states that accurately"
 
 # A drive recorded by an EARLIER iteration is still the latest drive — keying
 # on the current iteration alone reported "none yet" while one sat on disk.
