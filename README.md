@@ -136,10 +136,11 @@ machinery those two drive.
 
 After onboarding with `/tanuki init`, the flow branches into the two modes.
 They deliberately end differently, because they answer different questions:
-`/tanuki` **finds** problems and hands you proposals — its endpoint is a filed
-GitHub issue for you to act on — while `/tanuki-loop` **fixes** problems
-overnight and hands you a batch — the morning gate ends at a merge (that is
-the spec's own endpoint, not a simplification). What the two share is the
+`/tanuki` **finds** problems and hands you proposals — its endpoint is a
+recorded disposition for each one (accept / dismiss / defer) — while
+`/tanuki-loop` **fixes** problems overnight and hands you a batch — the
+morning gate ends at a merge (that is the spec's own endpoint, not a
+simplification). What the two share is the
 human gate `/tanuki decide`: it decides the attended run's proposals, and the
 loop's deferred judgment items are handed back to that same attended sitting.
 
@@ -150,7 +151,7 @@ flowchart TD
     init --> loop["/tanuki-loop"]
 
     tanuki --> decide{{"/tanuki decide"}}
-    decide --> issue(["GitHub issue filed"])
+    decide --> disposition(["disposition recorded"])
 
     loop --> gate{{"morning gate"}}
     gate --> merge(["you merge"])
@@ -162,9 +163,12 @@ flowchart TD
 
 - **`/tanuki init`** — one-time onboarding; writes the scenario file both
   modes run from.
-- **`/tanuki decide`** — the human gate for judgment, on both paths: accepting
-  a proposal files its GitHub issue; the loop's deferred spec/judgment items
-  arrive here too, because the loop never decides those on its own.
+- **`/tanuki decide`** — the human gate for judgment, on both paths: each
+  proposal ends with a recorded disposition — accept, dismiss, or defer. For
+  an accepted finding you may *optionally* file the prepared GitHub issue
+  (its own explicit confirmation; nothing is ever auto-filed). The loop's
+  deferred spec/judgment items arrive here too, because the loop never
+  decides those on its own.
 - **morning gate** — the loop's human gate: you review the integration branch
   diff, run the final tests, and merge. The fixing already happened overnight
   on the loop's own branch — this gate reviews and lands, it does not
