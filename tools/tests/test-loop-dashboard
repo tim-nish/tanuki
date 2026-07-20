@@ -79,8 +79,10 @@ pass "issue #63: iterations line states the rolled-back count (zero case)"
 "${L[@]}" iter-start >/dev/null
 echo v1 > "$("${L[@]}" status | python3 -c 'import json,sys;print(json.load(sys.stdin)["worktree"])')/f"
 out2="$("${L[@]}" dashboard)"
-grep -q "status→accepted = ledger status transitions this run, not patch commits" <<<"$out2" \
+grep -q "status→accepted = a finding's recorded status changed this run — never a patch/commit count" <<<"$out2" \
   || fail "delta counter inline definition missing (F6)"
+grep -q "the ledger is the target's persistent findings record" <<<"$out2" \
+  || fail "'ledger' must be defined before the counters use it (F188)"
 grep -qE "this run: .*fixed" <<<"$out2" \
   && fail "the retired 'fixed' label must not render in the delta line"
 pass "delta counters carry inline definitions; 'fixed' label retired (F6)"
