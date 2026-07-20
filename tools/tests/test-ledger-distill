@@ -153,6 +153,22 @@ grep -q "promotion bar" "$tmp/err" || fail "the bar must be named"
   || fail "a hostile slug must sanitize, not fail the whole emit"
 [ -f "$tmp/staging/escape.md" ] || fail "sanitized slug must land in staging"
 [ ! -e "$tmp/escape.md" ] || fail "the allowlist must hold against ../"
+
+# --- F229: empty-candidates hint distinguishes "already contributed" ----------
+# F1 and F3 (the only bar-clearers) are both contributed now, so --list is
+# empty — but NOT because nothing cleared the bar. The next hint must say the
+# bar-clearers were already contributed, not tell the operator to re-drive
+# "until one recurs to the bar".
+"${L[@]}" distill --list | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["candidates"] == [], r["candidates"]
+nxt = r.get("next", "")
+assert "already contributed" in nxt, nxt
+assert "recurs to the bar" not in nxt, nxt
+' || fail "empty-because-contributed must not emit the re-drive-to-bar hint (F229)"
+pass "F229: empty-candidates hint names 'already contributed', not re-drive"
+
 touch "$tmp/staging/dupe.md"
 python3 -c '
 import json, os
