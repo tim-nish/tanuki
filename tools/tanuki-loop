@@ -434,6 +434,32 @@ def ledger_finding_ids(target):
     return [fd["id"] for fd in ledger_findings(target)]
 
 
+def ledger_reuse_note(target):
+    """F164 / issue #237: the loop's init path shares the machine-wide target
+    namespace (~/.tanuki/<target>, F94), so a slug that collides with an
+    unrelated session silently inherits its ledger findings/events. tanuki-ledger
+    init states this reuse; the loop's init path did not, so a fresh target was
+    silently assumed. Return a one-line note (its size) or None when the
+    namespace has no ledger yet. Read-only; follows the announce_new_target rule
+    — states, never blocks."""
+    path = os.path.join(TANUKI_ROOT, target, "ledger.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            led = json.load(f)
+    except (OSError, ValueError):
+        return None
+    nf = len(led.get("findings", []) or [])
+    ne = len(led.get("events", {}) or {})
+    if not nf and not ne:
+        return None
+    return (f"reusing the existing ledger for target '{target}' "
+            f"({ne} event record(s), {nf} finding(s)) — ~/.tanuki is shared "
+            f"machine-wide (F94). If you expected a fresh target, stop and pick "
+            f"an unused slug; this run will draw on the inherited findings")
+
+
 def plan_record(state, iter_n):
     """The persisted scheduler plan for this loop iteration's drive run
     (<run>-iterN), or None for runs/schedulers that predate persisted plans."""
@@ -2189,6 +2215,12 @@ def cmd_init(args):
     rc, _ = git(repo, "rev-parse", "--git-dir")
     if rc != 0:
         die(bad_loop_repo_message(args.loop_repo, repo))
+    # F164 / #237: the loop's init path silently reused a colliding slug's
+    # ledger with no signal. State it up front (stderr, before the run is
+    # cut) — mirrors tanuki-ledger init; announce_new_target rule (never blocks).
+    ledger_reuse = ledger_reuse_note(args.target)
+    if ledger_reuse:
+        print(f"note: {ledger_reuse}", file=sys.stderr)
     # Per-target loop config from the scenarios file's "loop" block — so a
     # run needs no repo-specific flags typed each time. CLI flags override.
     cfg = resolve_loop_config(args)
@@ -2353,6 +2385,8 @@ def cmd_init(args):
                  + (f" — {base_note}" if base_note else ""))
     if base_warning:
         audit(state, f"init WARNING: {base_warning}")
+    if ledger_reuse:
+        audit(state, f"init note: {ledger_reuse}")
     if host:
         audit(state, f"host fixture pinned @ {host_base_sha[:12]} from {host} "
                      f"-> {host_fixture_path}"
@@ -2376,6 +2410,7 @@ def cmd_init(args):
     out({"run": run, "integration_branch": integration, "worktree": worktree,
          "base": base, "base_sha": base_sha, "base_upstream": upstream,
          "base_behind": n_behind, "warning": base_warning,
+         "ledger_reuse": ledger_reuse,
          "branch_cleanup": cleaned,
          "host_fixture_path": host_fixture_path, "host_base_sha": host_base_sha,
          "host_freshness": host_note,
