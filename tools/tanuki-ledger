@@ -1350,8 +1350,15 @@ def render_next(state, target, ledger):
             f"(or the /tanuki {target} slash command in Claude Code, which "
             f"drives both). " + compaction_hint(awaiting)),
         "watching-only": (
-            "promote chronic/high-confidence open findings with "
-            "'promote --min-recurrence N', then decide them with the "
+            # F123: name BOTH thresholds and the preview, not just
+            # --min-recurrence — the default bar is an OR of the two, so a
+            # hint that omits --min-scenarios still walks the operator into a
+            # no-op on a finding that qualifies only on breadth.
+            "promote chronic/high-confidence open findings with 'promote' "
+            "(default bar: recurrence >= min_recurrence OR seen in "
+            ">= min_scenarios scenarios; widen either per call with "
+            "--min-recurrence N / --min-scenarios M, or preview the effect "
+            "first with --dry-run), then decide them with the "
             f"/tanuki {target} decide slash command in Claude Code "
             "(not a tanuki-ledger subcommand)"),
         "all-decided": (
@@ -1568,9 +1575,13 @@ def cmd_distill(args, ledger):
     block = load_contribute_back(args.target)
     if args.check:
         if block is None:
-            print("error: contribute_back is not configured (set "
-                  "{path, schema} under defaults in the scenarios file or "
-                  "~/.tanuki/config.json)", file=sys.stderr)
+            # F196: show the SAME literal shape --list's unconfigured notice
+            # shows — a terse "{path, schema}" here forced a second --list run
+            # just to learn the key names.
+            print('error: contribute_back is not configured — to enable, set '
+                  'contribute_back {"path": <staging dir>, "schema": '
+                  '<template file>} under the "defaults" block in the '
+                  'scenarios file or ~/.tanuki/config.json', file=sys.stderr)
             sys.exit(2)
         try:
             p, t = cb_validate(block)
@@ -1594,6 +1605,14 @@ def cmd_distill(args, ledger):
               f"{cfg['min_recurrence']} OR scenarios >= "
               f"{cfg['min_scenarios']}), alive, not yet contributed",
               file=sys.stderr)
+        # F197: name the stage that PRECEDES distill — a fresh finding starts
+        # below the bar and only reaches this list by recurring (each repeated
+        # observation is one `upsert-finding --match <id>` / re-driven run), so
+        # a first caller seeing zero candidates knows why and what raises it.
+        print("note: a finding reaches this list only after it recurs to the "
+              "bar above — recurrence grows one step per observation "
+              "(upsert-finding --match <id>, or a re-driven run that re-hits "
+              "it); a freshly seen finding starts below it", file=sys.stderr)
         # F206: promote takes per-call --min-recurrence/--min-scenarios
         # overrides, so a finding promoted under a lowered bar can still be
         # absent HERE — distill's bar is config-fixed by design. Say so in the
@@ -1614,9 +1633,19 @@ def cmd_distill(args, ledger):
                       '<template file>} in ~/.tanuki/config.json or the '
                       'scenarios file\'s "defaults" block')
             print(f"note: {notice}", file=sys.stderr)
+        # F213: match --check's explicit next-pointer — when configured but
+        # nothing qualifies, say what to do, not only why the list is empty.
+        next_hint = None
+        if block is not None and not cands:
+            next_hint = ("nothing to distill yet — re-drive the target (or "
+                         "bump an existing finding with `upsert-finding "
+                         "--match <id>`) until one recurs to the bar above, "
+                         "then re-run `distill --list`")
+            print(f"next: {next_hint}", file=sys.stderr)
         print(json.dumps(
             {"configured": block is not None,
              **({"notice": notice} if notice else {}),
+             **({"next": next_hint} if next_hint else {}),
              "min_recurrence": cfg["min_recurrence"],
              "min_scenarios": cfg["min_scenarios"],
              "candidates": [{"id": f["id"], "title": f["title"],
