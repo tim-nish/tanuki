@@ -5178,7 +5178,10 @@ def main():
     sp.add_argument("--scenarios", default=None,
                     help="path to the target's scenarios file; its \"loop\" "
                          "block supplies the repo-specific settings (never "
-                         "auto-loaded — pass it explicitly)")
+                         "auto-loaded — pass it explicitly). NOT required: the "
+                         "same ceilings can come from the flags below instead, "
+                         "and a flag overrides the file's value for that key "
+                         "(F28)")
     sp.add_argument("--cap", type=int, default=None,
                     help="iteration-count ceiling — a safety limit, not the "
                          "success condition; sets loop.iterations (F86)")
@@ -5230,9 +5233,12 @@ def main():
             "writing any state. Exit code 0 means ready; exit code 3 "
             "means not ready (the JSON carries a \"breaker\" reason "
             "and \"exit_code\": 3).\n\n"
-            "The ceilings come from the scenarios file's \"loop\" block, whose "
-            "shape is (F35 — stated here so a cold operator need not fail a "
-            "run to learn the format):\n"
+            "The ceilings come from the scenarios file's \"loop\" block OR, "
+            "equivalently, the doctor/init flags — neither is mandatory (F28): "
+            "the file and the flags are interchangeable ways to supply the "
+            "same ceilings (see the flag<->key mapping below). The \"loop\" "
+            "block's shape is (F35 — stated here so a cold operator need not "
+            "fail a run to learn the format):\n"
             "  {\"loop\": {\"test_cmd\": \"<the repo's suite>\",\n"
             "            \"iterations\": 5,         # same knob as --cap\n"
             "            \"wall_time_s\": 21600,\n"
@@ -5249,7 +5255,11 @@ def main():
             "Flag <-> config-key mapping — one knob, two names (F86): "
             "--cap sets loop.iterations; --wall-time sets loop.wall_time_s; "
             "--test-cmd sets loop.test_cmd; --token-budget sets "
-            "loop.token_budget; --attempt-cap sets loop.attempt_cap."),
+            "loop.token_budget; --attempt-cap sets loop.attempt_cap. "
+            "The two surfaces are NOT independent: a flag overrides the file's "
+            "value for that key, and doctor reports a ceiling missing only when "
+            "NEITHER the \"loop\" block nor a flag sets it — so a bare "
+            "--cap/--test-cmd/--base run with no scenarios file is valid (F28)."),
         epilog=(
             "sandbox recipe (F185) — a permissive toy/sandbox \"loop\" block, "
             "copy-pasteable into the scenarios file for a throwaway run:\n"
@@ -5268,8 +5278,12 @@ def main():
     sp.add_argument("--scenarios", default=None,
                     help="path to the target's scenarios file; its \"loop\" "
                          "block supplies the ceilings. NOT defaulted to the "
-                         "canonical path — pass it explicitly or the "
-                         "loop-config check reports the ceilings missing")
+                         "canonical path and NOT required — pass it explicitly, "
+                         "or supply the same ceilings via "
+                         "--cap/--wall-time/--test-cmd/--token-budget/"
+                         "--attempt-cap; the loop-config check reports a "
+                         "ceiling missing only when neither the file nor a "
+                         "flag sets it (F28)")
     sp.add_argument("--cap", type=int, default=None,
                     help="iteration-count ceiling to validate; sets "
                          "loop.iterations (F86)")
