@@ -65,6 +65,29 @@ assert {c["id"] for c in r["candidates"]} == {"F1", "F3"}, r["candidates"]
 "${L[@]}" distill --id F1 2>/dev/null && fail "emit must refuse when unconfigured" || true
 pass "unconfigured: check/emit refuse loudly; --list still enumerates (F1, F3)"
 
+# --- issue #241 / F198: a GLOBAL-scope block is IGNORED and flagged ------------
+# A perfectly VALID contribute_back at machine-wide scope (~/.tanuki/config.json)
+# must not resolve — it would route this target's lessons into another target's
+# hub — and the doctor substrate must flag it as a likely leftover.
+python3 -c '
+import json, os
+p = os.environ["TANUKI_ROOT"] + "/config.json"
+json.dump({"contribute_back": {"path": "'"$tmp/staging"'",
+                               "schema": "'"$template"'"}}, open(p, "w"))
+'
+"${L[@]}" distill --list | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["configured"] is False, "global-scope block must NOT count as configured: %r" % r
+assert r.get("global_ignored") is True, "an ignored global block must be flagged: %r" % r
+' || fail "global contribute_back must be ignored for resolution and flagged (#241)"
+"${L[@]}" distill --check 2>"$tmp/err" && fail "global-only config must still fail --check (#241)" || true
+grep -q "IGNORED" "$tmp/err" || fail "--check must flag the ignored global block: $(cat "$tmp/err")"
+grep -q "per-target" "$tmp/err" || fail "--check must name the per-target location: $(cat "$tmp/err")"
+"${L[@]}" distill --id F1 2>/dev/null && fail "emit must refuse under a global-only block (#241)" || true
+rm -f "$TANUKI_ROOT/config.json"
+pass "issue #241: a global-scope contribute_back is ignored for resolution and flagged"
+
 # --- doctor check names each defect --------------------------------------------
 add_cb() { python3 -c '
 import json, os

@@ -1491,21 +1491,36 @@ def load_policy_source(target):
 
 
 def load_contribute_back(target):
-    """The optional contribute_back block (spec-den-distill §2), sibling of
-    policy_source with the same precedence: ~/.tanuki/config.json < the
-    target scenarios file's "defaults" block. None when unset — the feature
-    then does not exist (zero behavior change anywhere)."""
-    block = None
-    path = os.path.join(TANUKI_ROOT, "config.json")
-    if os.path.exists(path):
-        with open(path, encoding="utf-8") as f:
-            block = json.load(f).get("contribute_back", block)
+    """The optional contribute_back block (spec-den-distill §2). Resolved
+    PER-TARGET ONLY (issue #241 / F198): the target scenarios file's
+    "defaults" block. Unlike policy_source, the machine-wide
+    ~/.tanuki/config.json tier does NOT participate — the staging `path` names
+    one target's knowledge hub, so a global block would silently route every
+    target's lessons into it. None when unset — the feature then does not
+    exist (zero behavior change anywhere). A mis-scoped global block is
+    surfaced separately by global_contribute_back() (the distill --check
+    doctor substrate flags it)."""
     spath = os.path.join(TANUKI_ROOT, "scenarios", f"{target}.scenarios.json")
     if os.path.exists(spath):
         with open(spath, encoding="utf-8") as f:
-            block = json.load(f).get("defaults", {}).get("contribute_back",
-                                                         block)
-    return block
+            return json.load(f).get("defaults", {}).get("contribute_back")
+    return None
+
+
+def global_contribute_back():
+    """A contribute_back block found at machine-wide scope
+    (~/.tanuki/config.json) — IGNORED for resolution (issue #241 / F198,
+    load_contribute_back never reads it) and surfaced by distill --check /
+    --list as a likely leftover from another target's session. None when
+    absent."""
+    path = os.path.join(TANUKI_ROOT, "config.json")
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f).get("contribute_back")
+        except (OSError, ValueError):
+            return None
+    return None
 
 
 def cb_validate(block):
@@ -1573,15 +1588,29 @@ def cmd_distill(args, ledger):
     item; /tanuki-loop never calls it (spec-den-distill §1)."""
     cfg = load_config()
     block = load_contribute_back(args.target)
+    # issue #241 / F198: a contribute_back block at machine-wide scope is
+    # ignored for resolution; the --check/--list doctor substrate flags it as
+    # a likely leftover so the operator is never misled into thinking it took.
+    global_cb = global_contribute_back()
+    global_ignored_note = (
+        "a contribute_back block exists in ~/.tanuki/config.json but is "
+        "IGNORED — contribute_back is resolved per-target only (issue #241); "
+        "it is likely a leftover from another target's session. Move it into "
+        "this target's scenarios-file \"defaults\" block to use it here."
+    ) if global_cb is not None else None
     if args.check:
         if block is None:
-            # F196: show the SAME literal shape --list's unconfigured notice
-            # shows — a terse "{path, schema}" here forced a second --list run
-            # just to learn the key names.
-            print('error: contribute_back is not configured — to enable, set '
-                  'contribute_back {"path": <staging dir>, "schema": '
-                  '<template file>} under the "defaults" block in the '
-                  'scenarios file or ~/.tanuki/config.json', file=sys.stderr)
+            # F196: show the literal shape. issue #241: name the PER-TARGET
+            # location only — the machine-wide config.json is no longer read.
+            msg = ('error: contribute_back is not configured for this target '
+                   '— to enable, set contribute_back {"path": <staging dir>, '
+                   '"schema": <template file>} under the "defaults" block of '
+                   "this target's scenarios file (per-target only; the "
+                   'machine-wide ~/.tanuki/config.json is NOT read, issue '
+                   '#241)')
+            if global_ignored_note:
+                msg += ". NOTE: " + global_ignored_note
+            print(msg, file=sys.stderr)
             sys.exit(2)
         try:
             p, t = cb_validate(block)
@@ -1593,8 +1622,12 @@ def cmd_distill(args, ledger):
         # a piping caller).
         nxt = "run distill --list to see candidates"
         print(f"next: {nxt}", file=sys.stderr)
-        print(json.dumps({"ok": True, "path": p, "schema": t, "next": nxt},
-                         indent=2))
+        if global_ignored_note:
+            print(f"note: {global_ignored_note}", file=sys.stderr)
+        print(json.dumps(
+            {"ok": True, "path": p, "schema": t, "next": nxt,
+             **({"global_ignored": True} if global_cb is not None else {})},
+            indent=2))
         return
     cands = distill_candidates(ledger, cfg)
     if args.list:
@@ -1627,12 +1660,18 @@ def cmd_distill(args, ledger):
         # piping stdout, and configured:false without the how-to is a dead end.
         notice = None
         if block is None:
-            notice = ('contribute_back is not configured — candidates are '
-                      'listed but nothing can be emitted; to enable, set '
-                      'contribute_back {"path": <staging dir>, "schema": '
-                      '<template file>} in ~/.tanuki/config.json or the '
-                      'scenarios file\'s "defaults" block')
+            # issue #241: per-target location only — the machine-wide
+            # config.json is no longer read.
+            notice = ('contribute_back is not configured for this target — '
+                      'candidates are listed but nothing can be emitted; to '
+                      'enable, set contribute_back {"path": <staging dir>, '
+                      '"schema": <template file>} under the "defaults" block '
+                      "of this target's scenarios file (per-target only; the "
+                      "machine-wide ~/.tanuki/config.json is NOT read)")
             print(f"note: {notice}", file=sys.stderr)
+        # issue #241 / F198: flag an ignored global-scope block on --list too.
+        if global_ignored_note:
+            print(f"note: {global_ignored_note}", file=sys.stderr)
         # F213: match --check's explicit next-pointer — when configured but
         # nothing qualifies, say what to do, not only why the list is empty.
         next_hint = None
@@ -1646,6 +1685,7 @@ def cmd_distill(args, ledger):
             {"configured": block is not None,
              **({"notice": notice} if notice else {}),
              **({"next": next_hint} if next_hint else {}),
+             **({"global_ignored": True} if global_cb is not None else {}),
              "min_recurrence": cfg["min_recurrence"],
              "min_scenarios": cfg["min_scenarios"],
              "candidates": [{"id": f["id"], "title": f["title"],
@@ -1660,9 +1700,14 @@ def cmd_distill(args, ledger):
               file=sys.stderr)
         sys.exit(2)
     if block is None:
-        print("error: contribute_back is not configured — nothing can be "
-              "emitted (candidates remain visible via --list)",
-              file=sys.stderr)
+        msg = ("error: contribute_back is not configured for this target — "
+               "nothing can be emitted (candidates remain visible via "
+               "--list). Set it per-target under the scenarios file's "
+               '"defaults" block (issue #241: the machine-wide '
+               "~/.tanuki/config.json is not read)")
+        if global_ignored_note:
+            msg += ". NOTE: " + global_ignored_note
+        print(msg, file=sys.stderr)
         sys.exit(2)
     try:
         staging, template_path = cb_validate(block)
