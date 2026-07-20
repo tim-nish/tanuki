@@ -46,6 +46,9 @@ run:commits-not-recorded
 run:no-iteration-started
 scheduler:manual-run-no-plan
 scheduler:never-synced-fresh
+settlement:n-a-hostless
+settlement:pending-active
+settlement:undelivered-closed
 unresolved:no-loop-repo
 unresolved:none"
 [ "$members" = "$covered" ] || fail "EMPTY_STATES membership changed — add a case below.
@@ -203,6 +206,69 @@ for sec in "latest drive" "this run:" "scheduler decisions" "convergence" "NEXT:
     && fail "live must not render the closed run's '$sec' section: $out_l2"
 done
 pass "live:no-active-run — expected; one historical line, no closed-run sections"
+
+# --- status delivered/settlement empty-states (story 1.46 / issue #240) -------
+# `status` rendered `delivered`/`settlement` as a bare null with nothing to
+# settle, conflating a hostless (direct-merge gate — no forge) target with a
+# hosted (PR gate) run still awaiting delivery. Each null now resolves to one
+# enumerated member; the discriminator is the GATE, and the hosted verdict
+# flips with the run's state — the whole point.
+
+# settlement:n-a-hostless — a fresh direct-merge (default) target that merged
+# no work: hostless (no forge), EXPECTED, and both fields carry the member.
+"$loop" --target th init --loop-repo "$repo" --cap 5 >/dev/null
+sh="$("$loop" --target th status)"
+[ "$(jget '["settlement"]["state"]' <<<"$sh")" = "settlement:n-a-hostless" ] \
+  || fail "direct-merge/no-work settlement must be typed n-a-hostless: $(jget '["settlement"]' <<<"$sh")"
+[ "$(jget '["settlement"]["expected"]' <<<"$sh")" = "True" ] \
+  || fail "a hostless target's absent settlement is EXPECTED, not a gap: $sh"
+[ "$(jget '["delivered"]["state"]' <<<"$sh")" = "settlement:n-a-hostless" ] \
+  || fail "delivered must carry the same member as settlement: $(jget '["delivered"]' <<<"$sh")"
+grep -q "n/a" <<<"$(jget '["settlement"]["reason"]' <<<"$sh")" \
+  || fail "the hostless reason must read as n/a: $sh"
+pass "settlement:n-a-hostless — expected, both fields typed, reads n/a"
+
+# settlement:pending-active — a HOSTED (PR gate) run, still active, no delivery
+# yet: EXPECTED (it may still deliver), distinct from the hostless N/A case.
+"$loop" --target thp init --loop-repo "$repo" --cap 5 >/dev/null
+runp="$(cat "$TANUKI_ROOT/thp/loop/current")"
+python3 - "$TANUKI_ROOT/thp/loop/$runp/state.json" <<'EOF'
+import json, sys
+p = sys.argv[1]; s = json.load(open(p))
+s["gate_mode"] = "pr"   # hosted (forge), undelivered
+json.dump(s, open(p, "w"))
+EOF
+shp="$("$loop" --target thp status)"
+[ "$(jget '["settlement"]["state"]' <<<"$shp")" = "settlement:pending-active" ] \
+  || fail "hosted+active+undelivered must be pending-active: $(jget '["settlement"]' <<<"$shp")"
+[ "$(jget '["settlement"]["expected"]' <<<"$shp")" = "True" ] \
+  || fail "an active hosted run's absent delivery is EXPECTED: $shp"
+pass "settlement:pending-active — expected, distinct from the hostless N/A"
+
+# settlement:undelivered-closed — the SAME hosted target but the run has
+# closed without delivering: now a GAP (a delivery was expected but did not
+# take). Same absent field, opposite verdict — that is "expected vs gap".
+"$loop" --target thc init --loop-repo "$repo" --cap 5 >/dev/null
+runc="$(cat "$TANUKI_ROOT/thc/loop/current")"
+python3 - "$TANUKI_ROOT/thc/loop/$runc/state.json" <<'EOF'
+import json, sys
+p = sys.argv[1]; s = json.load(open(p))
+s["gate_mode"] = "pr"
+s["finished"] = {"reason": "cap", "at": "2026-01-01 00:00:00"}   # closed, undelivered
+json.dump(s, open(p, "w"))
+EOF
+shc="$("$loop" --target thc status)"
+[ "$(jget '["settlement"]["state"]' <<<"$shc")" = "settlement:undelivered-closed" ] \
+  || fail "hosted+closed+undelivered must be undelivered-closed: $(jget '["settlement"]' <<<"$shc")"
+[ "$(jget '["settlement"]["expected"]' <<<"$shc")" = "False" ] \
+  || fail "a closed hosted run that never delivered is a GAP: $shc"
+pass "settlement:undelivered-closed — GAP; one absent field, verdict flips with run state"
+
+# A real settlement is left untouched — the guard only fires on a null.
+sr="$("${L[@]}" status)"
+[ "$(jget '["settlement"].get("state") is None' <<<"$sr")" = "True" ] \
+  || fail "a derived settlement must not be rewritten as an empty-state: $(jget '["settlement"]' <<<"$sr")"
+pass "a derived (non-null) settlement is untouched"
 
 # --- an unenumerated state is a bug, not an invented string -------------------
 python3 - "$loop" <<'EOF'
