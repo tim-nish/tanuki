@@ -1676,10 +1676,29 @@ def cmd_distill(args, ledger):
         # nothing qualifies, say what to do, not only why the list is empty.
         next_hint = None
         if block is not None and not cands:
-            next_hint = ("nothing to distill yet — re-drive the target (or "
-                         "bump an existing finding with `upsert-finding "
-                         "--match <id>`) until one recurs to the bar above, "
-                         "then re-run `distill --list`")
+            # F229: zero candidates has two distinct causes — nothing ever
+            # cleared the bar, OR every bar-clearer was already contributed
+            # (distill_candidates excludes `contributed`). The re-drive hint
+            # only fits the first; for the second it misleads, since re-driving
+            # a consumed finding just bumps its recurrence and re-emits nothing.
+            contributed_bar_clearers = [
+                f for f in ledger["findings"]
+                if not f.get("tombstone") and f.get("status") != "dismissed"
+                and f.get("contributed")
+                and (f.get("recurrence", 1) >= cfg["min_recurrence"]
+                     or len(f.get("scenarios", [])) >= cfg["min_scenarios"])]
+            if contributed_bar_clearers:
+                next_hint = (
+                    f"nothing new to distill — {len(contributed_bar_clearers)} "
+                    "bar-clearing finding(s) were already contributed and are "
+                    "never re-emitted; re-drive the target to surface NEW "
+                    "findings (re-driving a contributed one only bumps its "
+                    "recurrence), then re-run `distill --list`")
+            else:
+                next_hint = ("nothing to distill yet — re-drive the target (or "
+                             "bump an existing finding with `upsert-finding "
+                             "--match <id>`) until one recurs to the bar above, "
+                             "then re-run `distill --list`")
             print(f"next: {next_hint}", file=sys.stderr)
         print(json.dumps(
             {"configured": block is not None,
