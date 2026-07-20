@@ -123,6 +123,86 @@ so nothing in your fingers breaks.
 Every run ends with a **delta report** — which known problems recurred and
 what's new — so you never need to remember previous runs.
 
+## Two command families, and the basic sequence
+
+Tanuki has two user-facing command families. Everything else is internal
+machinery those two drive.
+
+- **`/tanuki`** — the **attended** pipeline you run and watch: drive a run,
+  read the brief, decide each proposal. You are in the loop for every run.
+- **`/tanuki-loop`** — the **unattended** overnight loop: it repeats the whole
+  cycle on its own integration branch and hands you one batch to review in the
+  morning. The human gate is *relocated* here, not removed — only you merge.
+
+The basic sequence: onboard once with `init`, then run `/tanuki` as often as
+you like, deciding proposals as they come. When you trust it, hand the wheel
+to `/tanuki-loop` overnight and review the batch in the morning.
+
+```mermaid
+flowchart TD
+    init["/tanuki init<br/>(one-time: propose scenarios)"] --> run["/tanuki<br/>(drive a run)"]
+    run --> decide["/tanuki &lt;t&gt; decide<br/>(the human gate)"]
+    decide -->|accept| issues["labeled GitHub issues"]
+    ingest["/tanuki &lt;t&gt; ingest &quot;…&quot;<br/>(friction you hit)"] --> decide
+    run -.->|any time, read-only| look["/tanuki &lt;t&gt; status · history · view"]
+
+    run ==>|"once you trust it"| loop["/tanuki-loop<br/>(unattended: drive→mine→fix→test→commit, repeatedly)"]
+    loop --> morning["morning gate<br/>(review the integration diff — you merge)"]
+    loop -.->|batch left unmerged| reconcile["/tanuki-loop &lt;t&gt; unresolved · reconcile"]
+
+    classDef gate fill:#fde68a,stroke:#b45309,color:#000;
+    class decide,morning gate;
+```
+
+The two families never overlap in what they write: `/tanuki` produces a brief
+and (on your accept) files issues; `/tanuki-loop` writes only to its own
+integration branch. Neither ever writes into the repo under test.
+
+## Command index
+
+Every shipped command, with a link to its definition. The **command file is
+the authority** — where a one-line description here and the command file
+disagree, the command file wins; this index points into it rather than
+restating it. Each tool also prints its complete option surface with `--help`.
+
+### `/tanuki` — attended pipeline ([`commands/tanuki.md`](commands/tanuki.md))
+
+| command | what it does |
+|---|---|
+| `/tanuki init` | one-time onboarding: read the plugin's docs, propose 4–6 scenarios for approval ([details](commands/tanuki.md#init-tanuki-init--the-normal-onboarding-flow)) |
+| `/tanuki [target]` | drive a run — shows the plan, drives after you approve, ends in decisions |
+| `/tanuki "<free text>"` | one-off ad-hoc scenario ("probe the present") ([details](commands/tanuki.md#ad-hoc-scenarios-free-text--probe-the-present)) |
+| `/tanuki <t> decide` | the human gate: decide what's pending and file the issues ([details](commands/tanuki.md#4-decide-the-human-gate--part-of-the-run-not-homework)) |
+| `/tanuki <t> ingest "<text>"` | log friction you hit yourself, in plain words ([details](commands/tanuki.md#ingest-mode-ingest-feedback-alias---ingest--human-feedback-is-one-more-event-source)) |
+| `/tanuki <t> status` | what's still waiting on your decision |
+| `/tanuki <t> history` | the long view: what's been explored |
+| `/tanuki <t> view [name]` | every read-only view, one picker ([details](commands/tanuki.md#views-tanuki-target-view-name--the-read-only-surface)) |
+| `/tanuki <t> mine <run-id>` | re-mine a crashed or interrupted run |
+
+Bare words (`init`, `decide`, `status`, `history`, `view`, `ingest`, `mine`)
+are modes that don't drive; a flag modifies a drive; the bare default *is*
+driving. The older `--brief`/`--status`/`--history`/`--ingest`/`--mine-only`
+spellings still work as aliases.
+
+### `/tanuki-loop` — unattended loop ([`commands/tanuki-loop.md`](commands/tanuki-loop.md))
+
+| command | what it does |
+|---|---|
+| `/tanuki-loop [target]` | run the overnight cycle until two quiet cycles or the iteration cap |
+| `/tanuki-loop <t> --iterations N` | cautious first run (the cap is a ceiling, not the goal) |
+| `/tanuki-loop <t> unresolved` | read-only: which integration branches never merged, and how stale ([details](commands/tanuki-loop.md#reconcile-tanuki-loop-target-reconcile-branch)) |
+| `/tanuki-loop <t> reconcile [branch…]` | classify unmerged work per change, then land it behind a gate ([details](commands/tanuki-loop.md#reconcile-tanuki-loop-target-reconcile-branch)) |
+
+The loop's internal steps — `doctor`, `iter-start`, `iter-verify`,
+`record-cycle`, `gate-check`/`gate-push`/`gate-pr`, `finish`, `dispose`,
+`reevaluate`, `site-record`, `dashboard` — are driven by `/tanuki-loop`, not
+typed by you (`doctor` and `dashboard` are the exceptions you may run by hand;
+see [Unattended overnight mode](#unattended-overnight-mode-tanuki-loop)). Their
+complete surface is `tools/tanuki-loop --help`.
+
+For the full documentation map — specs, development history, and what is
+authoritative today — see [`docs/README.md`](docs/README.md).
+
 ## Reporting friction you found yourself (`ingest`)
 
 You'll keep using your own plugin, and you'll keep hitting things. Instead of
