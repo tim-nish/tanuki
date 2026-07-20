@@ -71,6 +71,8 @@ echo "$w" | grep -q "harvested" || fail "warning must name the fixture: $w"
 pass "artifact drift: warning names fixture + commits, ready stays true"
 
 # --- an unrelated host commit does NOT warn ----------------------------------
+# One active run per target (issue #258): retire the prior run before re-pinning.
+"$loop" --target efs finish --reason aborted >/dev/null 2>&1 || true
 "$loop" --target efs init --loop-repo "$repo" --scenarios "$sc" >/dev/null 2>&1 \
   || fail "re-init failed"
 echo other > "$host/unrelated.md"

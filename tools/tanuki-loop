@@ -233,12 +233,57 @@ def loop_dir(target, run):
     return os.path.join(TANUKI_ROOT, target, "loop", run)
 
 
+def unfinished_runs(target, exclude=None):
+    """Runs for <target> that never reached `finish` AND whose loop worktree
+    still exists on disk — the genuinely LIVE runs that share this target's
+    machine-wide state (the single `current` pointer + the ledger). A finished
+    run, or one whose worktree is gone, can no longer cross-write and is not
+    counted (issue #258). Returns [(run_id, worktree), …] sorted by run id."""
+    base = os.path.join(TANUKI_ROOT, target, "loop")
+    if not os.path.isdir(base):
+        return []
+    live = []
+    for run in os.listdir(base):
+        if run in ("current", exclude):
+            continue
+        sp = os.path.join(base, run, "state.json")
+        if not os.path.isfile(sp):
+            continue
+        try:
+            with open(sp, encoding="utf-8") as f:
+                st = json.load(f)
+        except (ValueError, OSError):
+            continue
+        if st.get("finished"):
+            continue
+        wt = st.get("worktree")
+        if wt and os.path.isdir(wt):
+            live.append((run, wt))
+    return sorted(live)
+
+
 def current_run(target):
     p = os.path.join(TANUKI_ROOT, target, "loop", "current")
     if not os.path.exists(p):
         die("no active loop run; call `init` first")
     with open(p, encoding="utf-8") as f:
-        return f.read().strip()
+        run = f.read().strip()
+    # issue #258: `current` names ONE run, but a second `init` can move it out
+    # from under a still-live run — so a bare (no --run) subcommand would
+    # silently mutate whichever run `current` last named. When more than one
+    # live run exists for the target, refuse to guess: the caller must name the
+    # run with --run. A single live run (the common case) resolves unchanged,
+    # so the everyday single-run path still needs only --target.
+    live = unfinished_runs(target)
+    if len(live) > 1:
+        ids = ", ".join(r for r, _ in live)
+        out({"breaker": f"ambiguous — pass --run <id>: target '{target}' has "
+                        f"{len(live)} live runs ({ids}) sharing the machine-"
+                        f"wide `current` pointer, so a bare subcommand cannot "
+                        f"know which you mean (issue #258). `current` -> "
+                        f"{run}."})
+        sys.exit(3)
+    return run
 
 
 def load_state(target, run=None):
@@ -2255,6 +2300,27 @@ def cmd_init(args):
         out({"breaker": f"unknown gate mode '{cfg['gate']}' — one of: "
                         "merge, pr"})
         sys.exit(3)
+    # One active run per target (issue #258; spec-tanuki-loop Non-negotiables).
+    # A second init while another run for this target is unfinished AND its
+    # worktree still exists would steal the machine-wide `current` pointer, so
+    # the older run's bare subcommands then cross-write this run's state/audit
+    # and inflate its convergence with the other run's findings. Fail closed —
+    # the same idiom as the base-freshness guard below — unless
+    # --allow-concurrent is passed to run them in parallel deliberately.
+    live_before = unfinished_runs(args.target)
+    if live_before and not args.allow_concurrent:
+        ids = "; ".join(f"{r} (worktree {w})" for r, w in live_before)
+        out({"breaker": f"target '{args.target}' already has "
+                        f"{len(live_before)} unfinished run(s) with a live "
+                        f"worktree: {ids}. A second run shares the machine-wide "
+                        f"`current` pointer and ledger and would corrupt both "
+                        f"(issue #258). Finish or abort the other run "
+                        f"(`tanuki-loop --target {args.target} --run <id> "
+                        f"finish --reason aborted`) and remove its worktree, or "
+                        f"re-run init with --allow-concurrent to start "
+                        f"alongside it deliberately.",
+             "unfinished_runs": [r for r, _ in live_before]})
+        sys.exit(3)
     base, base_sha = resolve_base(repo, args.base)
     # Staleness guard (issue #2): never silently dogfood code older than the
     # remote. Best-effort fetch, then FAIL CLOSED if <base> is behind its
@@ -2406,6 +2472,15 @@ def cmd_init(args):
                  + (f" — {base_note}" if base_note else ""))
     if base_warning:
         audit(state, f"init WARNING: {base_warning}")
+    # issue #258: a deliberate concurrent start is recorded so the audit shows
+    # this run knowingly shares the `current` pointer with others — the reader
+    # then knows every bare subcommand here is ambiguous and must pin --run.
+    if live_before and args.allow_concurrent:
+        audit(state, "init WARNING: --allow-concurrent — starting alongside "
+                     f"{len(live_before)} other live run(s): "
+                     + ", ".join(r for r, _ in live_before)
+                     + " (issue #258; they share the machine-wide `current` "
+                       "pointer, so pin --run on every subcommand)")
     if ledger_reuse:
         audit(state, f"init note: {ledger_reuse}")
     if host:
@@ -2942,6 +3017,29 @@ def cmd_doctor(args):
                                  "needed; the morning gate merges locally "
                                  "and gate-push pushes the base"})
 
+    # issue #258: one active run per target. A live unfinished run for this
+    # target means a headless START would steal its `current` pointer (bare
+    # init) or need --allow-concurrent. This is ADVISORY in doctor, not
+    # fail-closed: doctor is read-only and is legitimately run against an
+    # already-init'd run (e.g. to inspect entry-fixture staleness, story 1.18),
+    # so it surfaces the conflict in the warning without flipping `ready`. The
+    # fail-closed ENFORCEMENT lives in `init`, the operation that would actually
+    # collide.
+    live_runs = unfinished_runs(args.target)
+    live_warning = None
+    if live_runs:
+        live_warning = (
+            f"{len(live_runs)} unfinished run(s) with a live worktree already "
+            f"share this target's machine-wide state "
+            f"({', '.join(r for r, _ in live_runs)}) — a bare `init` would "
+            "steal the `current` pointer from them; finish/abort them first, "
+            "or start with init --allow-concurrent (issue #258)")
+    checks.append({
+        "check": "no-live-run", "ok": True,
+        "detail": (live_warning if live_warning else
+                   "no other unfinished run for this target — a fresh run "
+                   "would own the `current` pointer alone")})
+
     failed = [c["check"] for c in checks if not c["ok"]]
     # Cause before consequence (F112). A derived check fails only because the
     # check it names failed; listing the two as peers reads as two unrelated
@@ -2957,7 +3055,8 @@ def cmd_doctor(args):
     # F176: combine the no-op test_cmd warning with a slug-collision warning
     # so both reach the top-level field an operator skims; null when neither
     # applies (the F102/F106 absence-vs-null convention).
-    _warn = "; ".join(w for w in (noop_warning, collision_warning) if w) or None
+    _warn = "; ".join(w for w in (noop_warning, collision_warning,
+                                  live_warning) if w) or None
     report = {"phase": args.phase, "target": args.target, "base": base,
               "base_sha": base_sha, "ready": not failed,
               "warning": _warn, "checks": checks}
@@ -5387,6 +5486,11 @@ def main():
     sp.add_argument("--allow-stale-base", action="store_true",
                     help="override the base-freshness fail-closed for a "
                          "deliberately un-pushed local base")
+    sp.add_argument("--allow-concurrent", action="store_true",
+                    help="override the one-active-run-per-target fail-closed "
+                         "(issue #258) to start alongside another live run for "
+                         "the same target; the two share the machine-wide "
+                         "`current` pointer, so pin --run on every subcommand")
 
     sp = sub.add_parser(
         "doctor",

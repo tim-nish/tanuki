@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# Issue #258 / story 1.51: one active run per target. A target's run state is
+# machine-wide and single-pointer (~/.tanuki/<target>/loop/current), so two
+# concurrent runs race on that pointer — a second `init` silently steals it and
+# the older run's bare subcommands cross-write the interloper's state. This
+# fixture pins the guard:
+#   (1) the common single-run path is untaxed (bare subcommand resolves);
+#   (2) a second `init` on a live run fails closed and does NOT steal `current`;
+#   (3) --allow-concurrent overrides deliberately and is audited;
+#   (4) with >1 live run, a bare current-resolving subcommand refuses
+#       "ambiguous — pass --run", while an explicit --run works;
+#   (5) doctor's no-live-run readiness check fails while a run is live and
+#       clears once the runs are finished.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+loop="$here/tanuki-loop"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+
+# A hostless toy repo with a base commit; --allow-stale-base skips freshness.
+repo="$tmp/repo"
+git init -q "$repo"
+git -C "$repo" config user.email t@e && git -C "$repo" config user.name t
+git -C "$repo" checkout -qb main
+echo v0 > "$repo/f" && git -C "$repo" add -A && git -C "$repo" commit -qm base
+
+L=("$loop" --target t)
+runid() { python3 -c 'import json,sys;print(json.load(sys.stdin)["run"])'; }
+
+# --- init run A --------------------------------------------------------------
+runA="$("${L[@]}" init --loop-repo "$repo" --cap 1 --test-cmd true \
+        --wall-time 60 --token-budget 1000 --attempt-cap 1 \
+        --allow-stale-base 2>/dev/null | runid)"
+[ -n "$runA" ] || fail "run A did not init"
+[ "$(cat "$TANUKI_ROOT/t/loop/current")" = "$runA" ] || fail "current != run A"
+
+# --- (1) single live run: a bare subcommand still resolves (untaxed) ---------
+"${L[@]}" status >/dev/null 2>&1 || fail "(1) bare status must work with one live run"
+pass "(1) single-run path untaxed — bare subcommand resolves via current"
+
+# --- (2) a second init fails closed and does NOT steal `current` -------------
+rc=0
+"${L[@]}" init --loop-repo "$repo" --cap 1 --test-cmd true --wall-time 60 \
+  --token-budget 1000 --attempt-cap 1 --allow-stale-base \
+  >"$tmp/b.txt" 2>/dev/null || rc=$?
+[ "$rc" = "3" ] || fail "(2) second init must be a breaker (exit 3), got $rc: $(cat "$tmp/b.txt")"
+grep -q '"breaker"' "$tmp/b.txt" || fail "(2) second init must use the breaker convention: $(cat "$tmp/b.txt")"
+grep -qi "unfinished run" "$tmp/b.txt" || fail "(2) breaker must name the unfinished run: $(cat "$tmp/b.txt")"
+grep -q "258" "$tmp/b.txt" || fail "(2) breaker should cite issue #258: $(cat "$tmp/b.txt")"
+[ "$(cat "$TANUKI_ROOT/t/loop/current")" = "$runA" ] \
+  || fail "(2) refused init must NOT repoint current away from run A"
+pass "(2) second init on a live run fails closed and leaves current at run A"
+
+# --- (3) --allow-concurrent overrides deliberately and is audited ------------
+runB="$("${L[@]}" init --loop-repo "$repo" --cap 1 --test-cmd true \
+        --wall-time 60 --token-budget 1000 --attempt-cap 1 \
+        --allow-stale-base --allow-concurrent 2>/dev/null | runid)"
+[ -n "$runB" ] && [ "$runB" != "$runA" ] || fail "(3) --allow-concurrent did not start a distinct run B"
+[ "$(cat "$TANUKI_ROOT/t/loop/current")" = "$runB" ] || fail "(3) current should now name run B"
+grep -q "allow-concurrent" "$TANUKI_ROOT/t/loop/$runB/audit.md" \
+  || fail "(3) the deliberate concurrent start must be audited"
+pass "(3) --allow-concurrent starts alongside run A and records the override"
+
+# --- (4) two live runs: bare subcommand is ambiguous; explicit --run works ---
+rc=0
+"${L[@]}" status >"$tmp/amb.txt" 2>/dev/null || rc=$?
+[ "$rc" = "3" ] || fail "(4) bare status with 2 live runs must refuse (exit 3), got $rc: $(cat "$tmp/amb.txt")"
+grep -qi "ambiguous — pass --run\|ambiguous -- pass --run\|ambiguous" "$tmp/amb.txt" \
+  || fail "(4) refusal must say 'ambiguous — pass --run': $(cat "$tmp/amb.txt")"
+"$loop" --target t --run "$runA" status >/dev/null 2>&1 \
+  || fail "(4) explicit --run A must resolve unambiguously"
+"$loop" --target t --run "$runB" status >/dev/null 2>&1 \
+  || fail "(4) explicit --run B must resolve unambiguously"
+pass "(4) ambiguous bare subcommand refused; --run <id> resolves either run"
+
+# --- (5) doctor SURFACES a live run (advisory: warns, does not fail ready) ----
+# doctor is read-only and is legitimately run against an already-init'd run
+# (story 1.18 entry-fixture staleness), so the live-run conflict is a warning,
+# never a ready=false — the fail-closed enforcement lives in init, not doctor.
+"${L[@]}" doctor --loop-repo "$repo" --cap 1 --test-cmd true --wall-time 60 \
+  --token-budget 1000 --attempt-cap 1 --allow-stale-base \
+  >"$tmp/doc1.txt" 2>/dev/null \
+  || fail "(5) doctor must stay ready (exit 0) with a live run — enforcement is init's job: $(cat "$tmp/doc1.txt")"
+python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d["ready"] is True else 1)' "$tmp/doc1.txt" \
+  || fail "(5) doctor ready must stay true with a live run (advisory only)"
+python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));w=d.get("warning") or "";sys.exit(0 if "258" in w and "current" in w else 1)' "$tmp/doc1.txt" \
+  || fail "(5) doctor must SURFACE the live run in its warning (issue #258): $(cat "$tmp/doc1.txt")"
+grep -q "no-live-run" "$tmp/doc1.txt" || fail "(5) doctor must include the no-live-run check: $(cat "$tmp/doc1.txt")"
+
+# finish both runs (explicit --run — bare would be ambiguous) -> warning clears
+"$loop" --target t --run "$runA" finish --reason aborted >/dev/null 2>&1 || true
+"$loop" --target t --run "$runB" finish --reason aborted >/dev/null 2>&1 || true
+"${L[@]}" doctor --loop-repo "$repo" --cap 1 --test-cmd true --wall-time 60 \
+  --token-budget 1000 --attempt-cap 1 --allow-stale-base \
+  >"$tmp/doc2.txt" 2>/dev/null || fail "(5) doctor should stay ready once runs are finished: $(cat "$tmp/doc2.txt")"
+python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));w=d.get("warning") or "";sys.exit(0 if "258" not in w else 1)' "$tmp/doc2.txt" \
+  || fail "(5) the live-run warning must clear after the runs finish"
+pass "(5) doctor surfaces a live run as an advisory warning and clears once finished"
+
+echo "ALL PASS: concurrent-run guard (issue #258 / story 1.51)"

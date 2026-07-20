@@ -40,9 +40,12 @@ between this story and the issue, the issue wins.
   omits `--run`, **then** it resolves via `current` exactly as today — the
   common single-run path is untaxed and still needs only `--target`.
 - **Given** a live unfinished run for a target, **when** `tanuki-loop doctor`
-  runs for that target, **then** its report includes a live-run check that
-  surfaces the conflict before a headless run starts (consistent with doctor's
-  other fail-closed readiness checks).
+  runs for that target, **then** its report includes a `no-live-run` check and
+  a top-level warning surfacing the conflict before a headless run starts. This
+  is **advisory** in doctor — doctor is read-only and is legitimately run
+  against an already-init'd run (e.g. entry-fixture staleness, story 1.18), so
+  it never flips `ready` to false; the fail-closed **enforcement** is `init`'s
+  job, the operation that would actually collide.
 - **Given** the guard lands, **when** the `tools/tests/test-*` suite runs,
   **then** a fixture asserts all three behaviors — second-`init` refused,
   `--allow-concurrent` proceeds and is audited, and an ambiguous bare
