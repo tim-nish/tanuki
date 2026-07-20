@@ -388,8 +388,17 @@ def cmd_sync(args):
                  **(gen or {})}
         view.setdefault("generations", []).append(entry)
     write_json(sched_path(args.target), sched)
+    # F225: state the consequence of first_sync in the OUTPUT, not only in the
+    # docstring — on the first sync every scenario enters 'active' (not
+    # 'unexplored'), which otherwise looks inexplicable in the next plan.
+    first_sync_note = (
+        "first sync of this target: every scenario entered 'active' "
+        "(immediately drivable), NOT 'unexplored' — the hand-written matrix "
+        "is taken as baseline coverage; only ids ADDED by later syncs enter "
+        "as 'unexplored'") if first else None
     out({"first_sync": first, "added": added,
          "total": len(view["scenarios"]),
+         **({"first_sync_note": first_sync_note} if first_sync_note else {}),
          **({"binding": binding} if binding else {}),
          **({"warning": warning} if warning else {}),
          **({"generation_recorded": entry} if entry else {})})
