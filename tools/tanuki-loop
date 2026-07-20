@@ -2226,16 +2226,23 @@ def cmd_init(args):
     # Per-target loop config from the scenarios file's "loop" block — so a
     # run needs no repo-specific flags typed each time. CLI flags override.
     cfg = resolve_loop_config(args)
+    # A missing/invalid config precondition is a refusal in the tool's own
+    # JSON convention (F227, sibling of the F37 recover fix), not a plain
+    # argparse-style error — a scripted/headless caller parses exit-3
+    # {"breaker": …} for every other refusal, so these must match.
     cap = cfg["cap"]
     if not cap:
-        die("no iteration cap: pass --cap or set loop.iterations in the "
-            "scenarios file")
+        out({"breaker": "no iteration cap: pass --cap or set loop.iterations "
+                        "in the scenarios file"})
+        sys.exit(3)
     test_cmd = cfg["test_cmd"]
     wall = cfg["wall_time_s"]
     tokens = cfg["token_budget"]
     attempt_cap = cfg["attempt_cap"] if cfg["attempt_cap"] is not None else 4
     if cfg["gate"] not in ("merge", "pr"):
-        die(f"unknown gate mode '{cfg['gate']}' — one of: merge, pr")
+        out({"breaker": f"unknown gate mode '{cfg['gate']}' — one of: "
+                        "merge, pr"})
+        sys.exit(3)
     base, base_sha = resolve_base(repo, args.base)
     # Staleness guard (issue #2): never silently dogfood code older than the
     # remote. Best-effort fetch, then FAIL CLOSED if <base> is behind its

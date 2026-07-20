@@ -8,9 +8,10 @@
 #   1. well-formed markers lift one-to-one: user_choice carries
 #      point/selected/alternatives, outcome carries disposition + free text,
 #      and both point at the actual raw line (raw.jsonl#L<n>);
-#   2. malformed markers are dropped and recorded — one {line, marker} detail
-#      per drop (raw-stream line, text truncated to 120) — never lifted,
-#      never fatal, never a silent miss (F177/F210);
+#   2. malformed markers are dropped and recorded — one {line, text_line,
+#      marker} detail per drop (raw.jsonl record number + physical text-line
+#      within that record, text truncated to 120) — never lifted, never fatal,
+#      never a silent miss (F177/F210);
 #   2b. markdown-decorated markers (bold-wrapped, emphasis, trailing
 #      punctuation, indented mid-paragraph) still lift (F177);
 #   3. a tool_error followed by a same-command success (or a marker naming the
@@ -130,6 +131,24 @@ assert dropped[0]["line"] == 4 and "TANUKI-CHOICE" in dropped[0]["marker"], \
 assert len(dropped[0]["marker"]) <= 120, "drop detail text must be truncated"
 print("ok: decorated markers lift; unparseable marker-like line is a "
       "counted drop with {line, marker} detail")
+
+# --- 2c: two malformed markers in ONE multi-line record stay distinguishable --
+# the drop 'line' is the raw.jsonl record number, so both share it; 'text_line'
+# is the physical line within that record and disambiguates them (F210).
+p = raw([
+    assistant(text("TANUKI-CHOICE point=orphan1\n"      # text_line 1 — no selected
+                   "prose in between\n"                 # text_line 2 — not a marker
+                   "TANUKI-CHOICE point=orphan2")),     # text_line 3 — no selected
+    RESULT,
+])
+events, dropped = td.normalize(p, "r1", "s7")
+os.unlink(p)
+assert len(dropped) == 2, dropped
+assert [d["line"] for d in dropped] == [1, 1], dropped          # one record
+assert [d["text_line"] for d in dropped] == [1, 3], dropped     # distinct lines
+assert all("orphan" in d["marker"] for d in dropped), dropped
+print("ok: two drops in one multi-line record share 'line', differ by "
+      "'text_line'")
 
 # --- 3: recovery binding ------------------------------------------------------
 p = raw([

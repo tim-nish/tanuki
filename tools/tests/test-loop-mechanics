@@ -126,8 +126,10 @@ st="$("${L[@]}" status)"
 "${L[@]}" init --loop-repo "$repo" --scenarios "$tmp/scen.json" --cap 3 >/dev/null
 [ "$("${L[@]}" status | jget '["cap"]')" = "3" ] || fail "CLI --cap should override loop block"
 rc=0; "${L[@]}" init --loop-repo "$repo" >/tmp/nocap.json 2>&1 || rc=$?
-[ "$rc" = "2" ] || fail "init without any cap source must be a usage error"
-pass "init --scenarios reads loop block (cap+test_cmd); CLI overrides; no-cap errors"
+[ "$rc" = "3" ] || fail "init without any cap source must be an exit-3 refusal (F227)"
+grep -q '"breaker": "no iteration cap' /tmp/nocap.json \
+  || fail "init no-cap refusal must use the {\"breaker\": …} convention (F227)"
+pass "init --scenarios reads loop block (cap+test_cmd); CLI overrides; no-cap is a breaker refusal"
 
 # --- policy + finish + breaker persistence + dashboard ------------------------
 "${L[@]}" policy --finding F2 --decision "defer to morning: spec altitude" >/dev/null
