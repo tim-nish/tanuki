@@ -10,8 +10,10 @@
 </p>
 
 **Tanuki automatically executes realistic user scenarios against your Claude
-Code plugin and turns the recurring usability problems it discovers into a
-ranked list of concrete improvement proposals.**
+Code plugin and turns the recurring usability problems it discovers into
+concrete outcomes: the attended pipeline ends in a ranked proposal brief with
+a recorded disposition for each item, and the unattended overnight loop ends
+in a reviewable implementation batch that only you merge.**
 
 Unit tests and linters verify the code you wrote: functions return the right
 values, links resolve, schemas parse. They cannot tell you that a first-time
@@ -23,61 +25,29 @@ waiting for user complaints. Tanuki automates the user.
 
 The central idea: **Claude acts as a simulated user, not as a code
 generator.** For each scenario, Tanuki launches a headless Claude session on
-a deliberately *cheap* model that plays a persona — "a new user follows the
-quickstart", "a user picks the option you never test", "a user whose config
-file is broken" — inside a disposable clone of your repo. The cheap model is
-the point: a frontier model quietly works around rough edges, while a weaker
-one trips over them, which is exactly the signal a plugin author needs. No
-existing test tool exercises your plugin this way, because the thing being
-tested is not the code — it's the experience of using it.
+a deliberately *less capable* model that plays a persona — "a new user
+follows the quickstart", "a user picks the option you never test", "a user
+whose config file is broken" — inside a disposable clone of your repo. The
+weaker model is the point: a stronger model quietly works around rough
+edges, while a weaker one trips over them, which is exactly the signal a
+plugin author needs. The thing being tested is not the code — it's the
+experience of using it.
 
 So if you've built a plugin that works when *you* use it — because you know
 exactly which buttons to press — Tanuki answers the questions you can't
 answer yourself: what happens to everyone else?
 
-**You stay in control.** Tanuki never merges anything, never files issues on
-its own, and never writes into the repo under test — the overnight loop's
-only write surface is its own integration branch, and only you merge it (see
-Unattended overnight mode). Its output is a brief of proposals; every
-decision after that is yours.
+**You stay in control.** The attended pipeline is proposals-only: it runs
+against disposable clones and does not modify the target repo — its output is
+a brief for your review, and filing an issue is an explicit, per-item choice.
+The overnight loop writes only to its own integration branch inside a
+dedicated worktree — never your default branch, never your working tree —
+until the attended morning gate, where only you merge (on a PR-protected
+target the close pushes that integration branch to open one Draft PR; see
+Unattended overnight mode). This is the spec's standing constraint
+([docs/tanuki-spec.md](docs/tanuki-spec.md)), not a habit.
 
 Full technical contract: [docs/tanuki-spec.md](docs/tanuki-spec.md).
-
-## How it works, in one paragraph
-
-Tanuki clones your plugin (and optionally a "host" repo it operates on) into
-a throwaway workspace and drives one simulated-user session per scenario.
-Each transcript is mechanically normalized into **Events** (tool errors,
-retries, user choices, friction notes). A mining pass turns events into
-**Findings** — deduplicated problems with a recurrence count, so a problem
-seen in three runs counts as chronic, not three separate complaints. Chronic
-findings get promoted into a **brief**: at most 10 ranked **Proposals**, each
-written as Problem → Proposed fix → Evidence. You then accept, dismiss, or
-defer each one in-session.
-
-```
-preflight (lint, code)          mechanical violations stop here — never
-        │                       rediscovered by dogfooding
-        ▼
-plan gate (you approve)         scenarios × estimated time, from run history
-        ▼
-DRIVER  tanuki-drive            per scenario: fresh clones of plugin+host →
-  (cheap model, e.g. Sonnet)    headless claude run under a charter →
-        │                       Events (normalized mechanically) →
-        ▼                       post-run pollution check
-MINER   extraction subagent     events → candidate findings (cheap model)
-        + frontier dedupe       candidates → ledger upserts: bump recurrence
-        │                       vs create (frontier judgment, never delegated)
-        ▼
-CONSOLIDATOR                    promotion by thresholds (code), then the
-  (frontier + code)             brief: ≤10 ranked proposals, watching list,
-        │                       lesson candidates
-        ▼
-DECISION PASS (in-session)      consolidate first (merge duplicates, surface
-                                contradictory fixes as ONE choice), then each
-                                item: accept / dismiss / defer — a run ends in
-                                decisions, not a report
-```
 
 ## Install
 
@@ -101,27 +71,31 @@ cd ~/work/my-plugin
 /tanuki               # run it — shows the plan first, drives after you approve
 ```
 
-That's the whole loop. After a run, useful entry points:
-
-```
-/tanuki my-plugin status                # what's still waiting on my decision?
-/tanuki my-plugin decide                # decide what's pending, and file the issues
-/tanuki my-plugin ingest "…"            # log friction YOU hit, in plain words
-/tanuki my-plugin history               # the long view: what's been explored
-/tanuki my-plugin view                  # every read-only view, one picker
-/tanuki my-plugin mine <run-id>         # re-mine a crashed or interrupted run
-/tanuki "try the export flow with a huge file"   # one-off ad-hoc scenario
-/tanuki-loop                            # unattended overnight mode (below)
-```
+That's the whole loop. Every mode you can run afterward is in the
+[Command index](#command-index) below.
 
 **One rule for the grammar:** a **bare word** is a mode that doesn't drive
-(`init`, `decide`, `status`, `history`, `view`, `ingest`, `mine`); flags
-modify a drive; the bare default *is* driving. The older spellings — `--brief`,
-`--status`, `--history`, `--ingest`, `--mine-only` — still work as aliases,
-so nothing in your fingers breaks.
+(`init`, `decide`, `status`, `history`, `view`, `ingest`, `mine`, `generate`,
+`configure`, `distill`); flags modify a drive; the bare default *is* driving.
+The older spellings — `--brief`, `--status`, `--history`, `--ingest`,
+`--mine-only` — still work as aliases, so nothing in your fingers breaks.
 
 Every run ends with a **delta report** — which known problems recurred and
 what's new — so you never need to remember previous runs.
+
+## How it works, in one paragraph
+
+Tanuki clones your plugin (and optionally a "host" repo it operates on) into
+a throwaway workspace and drives one simulated-user session per scenario.
+Each transcript is mechanically normalized into **Events** (tool errors,
+retries, user choices, friction notes). A mining pass turns events into
+**Findings** — deduplicated problems with a recurrence count, so a problem
+seen in three runs counts as chronic, not three separate complaints. Chronic
+findings get promoted into a **brief**: at most 10 ranked **Proposals**, each
+written as Problem → Proposed fix → Evidence. You then accept, dismiss, or
+defer each one in-session. (The stage-by-stage pipeline diagram is in
+[Pipeline internals](#pipeline-internals) below; the full contract is
+[docs/tanuki-spec.md](docs/tanuki-spec.md).)
 
 ## Two command families, and the basic sequence
 
@@ -134,29 +108,50 @@ machinery those two drive.
   cycle on its own integration branch and hands you one batch to review in the
   morning. The human gate is *relocated* here, not removed — only you merge.
 
-The basic sequence: onboard once with `init`, then run `/tanuki` as often as
-you like, deciding proposals as they come. When you trust it, hand the wheel
-to `/tanuki-loop` overnight and review the batch in the morning.
+After onboarding with `/tanuki init`, the flow branches into the two modes.
+They deliberately end differently, because they answer different questions:
+`/tanuki` **finds** problems and hands you proposals — its endpoint is a
+recorded disposition for each one (accept / dismiss / defer) — while
+`/tanuki-loop` **fixes** problems overnight and hands you a batch — the
+morning gate ends at a merge (that is the spec's own endpoint, not a
+simplification). What the two share is the
+human gate `/tanuki decide`: it decides the attended run's proposals, and
+**only** the loop's *deferred* judgment items return to it — everything the
+loop implemented overnight goes through the morning gate instead.
 
 ```mermaid
 flowchart TD
-    init["/tanuki init<br/>(one-time: propose scenarios)"] --> run["/tanuki<br/>(drive a run)"]
-    run --> decide["/tanuki &lt;t&gt; decide<br/>(the human gate)"]
-    decide -->|accept| issues["labeled GitHub issues"]
-    ingest["/tanuki &lt;t&gt; ingest &quot;…&quot;<br/>(friction you hit)"] --> decide
-    run -.->|any time, read-only| look["/tanuki &lt;t&gt; status · history · view"]
+    init["/tanuki init"]
+    init --> tanuki["/tanuki"]
+    init --> loop["/tanuki-loop"]
 
-    run ==>|"once you trust it"| loop["/tanuki-loop<br/>(unattended: drive→mine→fix→test→commit, repeatedly)"]
-    loop --> morning["morning gate<br/>(review the integration diff — you merge)"]
-    loop -.->|batch left unmerged| reconcile["/tanuki-loop &lt;t&gt; unresolved · reconcile"]
+    tanuki --> decide{{"/tanuki decide"}}
+    decide --> disposition(["disposition recorded"])
 
-    classDef gate fill:#fde68a,stroke:#b45309,color:#000;
-    class decide,morning gate;
+    loop --> gate{{"morning gate"}}
+    gate --> merge(["you merge"])
+    gate -.->|deferred judgments| decide
+
+    classDef gatecls fill:#fde68a,stroke:#b45309,color:#000;
+    class decide,gate gatecls;
 ```
 
-The two families never overlap in what they write: `/tanuki` produces a brief
-and (on your accept) files issues; `/tanuki-loop` writes only to its own
-integration branch. Neither ever writes into the repo under test.
+- **`/tanuki init`** — one-time onboarding; writes the scenario file both
+  modes run from.
+- **`/tanuki decide`** — the human gate for judgment, on both paths: each
+  proposal ends with a recorded disposition — accept, dismiss, or defer. For
+  an accepted finding you may *optionally* file the prepared GitHub issue
+  (its own explicit confirmation; nothing is ever auto-filed). The loop's
+  deferred spec/judgment items arrive here too, because the loop never
+  decides those on its own.
+- **morning gate** — the loop's human gate, in summary: you review the
+  integration branch diff, run the final tests, and merge; the fixing already
+  happened overnight on the loop's own branch, so this gate reviews and
+  lands — it does not implement. The complete step-by-step specification is
+  [commands/tanuki-loop.md §2](commands/tanuki-loop.md#2-morning-gate-attended--invariant-in-every-phase).
+
+Everything the loop writes stays on its own integration branch — never in the
+repo under test — until you merge.
 
 ## Command index
 
@@ -171,18 +166,23 @@ restating it. Each tool also prints its complete option surface with `--help`.
 |---|---|
 | `/tanuki init` | one-time onboarding: read the plugin's docs, propose 4–6 scenarios for approval ([details](commands/tanuki.md#init-tanuki-init--the-normal-onboarding-flow)) |
 | `/tanuki [target]` | drive a run — shows the plan, drives after you approve, ends in decisions |
+| `/tanuki <t> <scenario-id>[,…]` | drive only the named scenarios |
 | `/tanuki "<free text>"` | one-off ad-hoc scenario ("probe the present") ([details](commands/tanuki.md#ad-hoc-scenarios-free-text--probe-the-present)) |
-| `/tanuki <t> decide` | the human gate: decide what's pending and file the issues ([details](commands/tanuki.md#4-decide-the-human-gate--part-of-the-run-not-homework)) |
+| `/tanuki <t> decide` | the human gate: record a disposition for everything pending; filing each prepared issue is optional ([details](commands/tanuki.md#4-decide-the-human-gate--part-of-the-run-not-homework)) |
 | `/tanuki <t> ingest "<text>"` | log friction you hit yourself, in plain words ([details](commands/tanuki.md#ingest-mode-ingest-feedback-alias---ingest--human-feedback-is-one-more-event-source)) |
-| `/tanuki <t> status` | what's still waiting on your decision |
-| `/tanuki <t> history` | the long view: what's been explored |
-| `/tanuki <t> view [name]` | every read-only view, one picker ([details](commands/tanuki.md#views-tanuki-target-view-name--the-read-only-surface)) |
+| `/tanuki <t> status` | what's still waiting on your decision, plus generation-trigger advisories |
+| `/tanuki <t> history [scenario]` | the long view: what's been explored, per-scenario on request |
+| `/tanuki <t> view [name]` | the read-only view surface — picker, or jump to `status`, `live`, `history`, `trajectory` ([details](commands/tanuki.md#views-tanuki-target-view-name--the-read-only-surface)) |
 | `/tanuki <t> mine <run-id>` | re-mine a crashed or interrupted run |
+| `/tanuki <t> generate` | the regeneration pass: propose new charters at a plan gate (feature drift, empty pool, or on demand) — never automatic |
+| `/tanuki <t> configure` | guided configuration over declared inputs and the built-in catalog — the primary way to change settings |
+| `/tanuki <t> distill` | walk lesson candidates from the existing ledger into your configured knowledge hub |
 
-Bare words (`init`, `decide`, `status`, `history`, `view`, `ingest`, `mine`)
-are modes that don't drive; a flag modifies a drive; the bare default *is*
-driving. The older `--brief`/`--status`/`--history`/`--ingest`/`--mine-only`
-spellings still work as aliases.
+Bare words (`init`, `decide`, `status`, `history`, `view`, `ingest`, `mine`,
+`generate`, `configure`, `distill`) are modes that don't drive; a flag
+modifies a drive; the bare default *is* driving. The older
+`--brief`/`--status`/`--history`/`--ingest`/`--mine-only` spellings still
+work as aliases.
 
 ### `/tanuki-loop` — unattended loop ([`commands/tanuki-loop.md`](commands/tanuki-loop.md))
 
@@ -219,8 +219,8 @@ verbatim, then run through the same mining pass as an automated run: if it's
 semantically a problem Tanuki already knows, that finding's recurrence count
 goes up (your manual re-hit pushes it toward "chronic" like any other); if
 it's new, a new finding is created. Either way you get the same bumped-vs-new
-delta report. It's instant and costs nothing — use it the moment friction
-bites.
+delta report. Handing over the note takes seconds — use it the moment
+friction bites.
 
 ## The decision pass (the human gate) — `/tanuki <target> decide`
 
@@ -262,12 +262,16 @@ regression check: after you ship a fix, run Tanuki again — the finding's
 Once you trust the attended loop, `/tanuki-loop` runs the full cycle —
 **drive → mine → classify → implement → test → commit** — repeatedly on a
 dedicated integration branch in an isolated worktree, until two consecutive
-quiet cycles (nothing new found, nothing fixed) or an iteration cap.
+quiet cycles (nothing new found, nothing fixed, and the exploration quota
+met) or an iteration cap.
 
 The human gate is *relocated, not removed*: the loop prepares a batch
 overnight; in the morning you review the integration diff, the deferred
-decisions, and the audit trail, and only you merge to `main`. No phase of the
-loop ever merges, pushes, or files issues unattended. Full contract:
+decisions, and the audit trail, and only you merge to the base branch. No
+phase of the loop ever merges, writes to the base branch, or files issues
+unattended. The one unattended push is scoped and deliberate: on a
+PR-protected target (below), the overnight close pushes the loop's **own
+integration branch** — never the base — to open the Draft PR. Full contract:
 [spec-tanuki-loop](specs/spec-tanuki-loop/SPEC.md).
 
 If your default branch refuses direct pushes (required-check protection), set
@@ -345,6 +349,36 @@ subject line describes at most one of them. Clean, self-contained commits are
 cherry-picked; entangled ones are ported by hand; anything that contradicts a
 contract is reported for you to decide, never merged quietly.
 
+## Pipeline internals
+
+The attended run, stage by stage — each stage's full contract is in
+[docs/tanuki-spec.md](docs/tanuki-spec.md):
+
+```
+preflight (lint, code)          mechanical violations stop here — never
+        │                       rediscovered by dogfooding
+        ▼
+plan gate (you approve)         scenarios × estimated time, from run history
+        ▼
+DRIVER  tanuki-drive            per scenario: fresh clones of plugin+host →
+  (the simulated user,          headless claude run under a charter →
+   a smaller model)             Events (normalized mechanically) →
+        │                       post-run pollution check
+        ▼
+MINER   extraction subagent     events → candidate findings (smaller model)
+        + frontier dedupe       candidates → ledger upserts: bump recurrence
+        │                       vs create (frontier judgment, never delegated)
+        ▼
+CONSOLIDATOR                    promotion by thresholds (code), then the
+  (frontier + code)             brief: ≤10 ranked proposals, watching list,
+        │                       lesson candidates
+        ▼
+DECISION PASS (in-session)      consolidate first (merge duplicates, surface
+                                contradictory fixes as ONE choice), then each
+                                item: accept / dismiss / defer — a run ends in
+                                decisions, not a report
+```
+
 ## Vocabulary
 
 Three words carry the whole design; everything flows one way through them:
@@ -368,6 +402,7 @@ skips a step, including your own `ingest` feedback.
 | `tools/tanuki-drive` | the Driver: isolation, headless runs, event capture, live progress |
 | `tools/tanuki-ledger` | the Findings ledger: ingest, dedupe support, promotion, status |
 | `tools/tanuki-scheduler` | picks which scenarios each run should drive, adaptively |
+| `tools/tanuki-config` | typed configuration substrate behind `/tanuki <t> configure` (show / check / set, doctor hooks) |
 | `tools/tanuki-loop` | deterministic safety substrate for the unattended loop |
 | `tools/tests/` | test fixtures for the tools (`for t in tools/tests/test-*; do "$t"; done`) |
 | `templates/example.scenarios.json` | starting point for your scenario file |
@@ -391,17 +426,30 @@ repos**:
 | `~/.tanuki/<target>/ledger.json` | persistent findings (don't hand-edit; use `tanuki-ledger set-status`) |
 | `~/.tanuki/<target>/events/<run>/` | transcripts, normalized events, live `progress.json` |
 | `~/.tanuki/<target>/ws/<run>/` | the disposable clones — delete freely |
+| `~/.tanuki/<target>/loop/<run>/` | the overnight loop's run state — `state.json`, `audit.md`, the morning queue |
 
 ## Configuration
 
-Zero configuration is a supported state — every key has a sane default.
-When you want to tune: `~/.tanuki/config.json` (global) < a `"defaults"`
-block in the target's scenarios file < CLI flags.
+You don't need any configuration to start: beyond the scenario file
+`/tanuki init` writes, every key has a built-in default.
 
-Highlights: `driver_model` (default claude-sonnet-5 — the simulated user),
-`model_ceiling` (default sonnet — the most capable model Tanuki is allowed to
-launch; frontier-class models are always refused), `max_scenarios` (default
-6 — hard cap on parallel scenarios per run), `max_turns` (default 40 per
+When you want to change something, **`/tanuki <target> configure` is the
+primary path**: it shows the effective configuration with each value's source
+labeled, validates the new value against its declared type, previews exactly
+what will be written, and runs the field's doctor check (if it declares one)
+before persisting. Out of the box it edits the built-in catalog
+(`drive_model`, `drive_concurrency`); a target that declares an `inputs`
+block in its scenarios file adds its own typed fields to the same flow.
+
+Editing the JSON directly is the advanced path — the backing files stay the
+source of truth and hand-editing remains legal. Precedence:
+`~/.tanuki/config.json` (global) < a `"defaults"` block in the target's
+scenarios file < CLI flags.
+
+Key defaults: `driver_model` (claude-sonnet-5 — the simulated user),
+`model_ceiling` (sonnet — the most capable model Tanuki is allowed to launch;
+the ceiling is enforced, and frontier-class models are refused),
+`max_scenarios` (6 — cap on scenarios per run), `max_turns` (40 per
 scenario). The full table with all keys lives in
 [docs/tanuki-spec.md](docs/tanuki-spec.md#configuration), mirrored in
 [templates/config.example.json](templates/config.example.json).
@@ -424,7 +472,7 @@ scenario.
 
 ## Status
 
-Prototype (v0). Known limitations, spelled out in
+0.x prototype. Known limitations, spelled out in
 [the spec](docs/tanuki-spec.md#prototype-deviations-explicit-to-revisit-before-any-generalization):
 isolation is git-clone-plus-pollution-check, not a container, and the driver
 runs headless with permission prompts skipped inside its disposable clones —
