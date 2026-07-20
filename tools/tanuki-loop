@@ -5014,28 +5014,57 @@ def main():
                    help="target namespace slug (not a path; path-like values "
                         "are rejected); global option — must come before the "
                         "subcommand")
-    p.add_argument("--run", default=None)
+    p.add_argument("--run", default=None,
+                   help="explicit run id (default: the target's current "
+                        "active run)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser("init")
-    sp.add_argument("--loop-repo", required=True)
-    sp.add_argument("--scenarios", default=None)
-    sp.add_argument("--cap", type=int, default=None)
-    sp.add_argument("--base", default=None)
-    sp.add_argument("--worktree", default=None)
-    sp.add_argument("--phase", type=int, default=1)
-    sp.add_argument("--wall-time", type=int, default=None)
-    sp.add_argument("--token-budget", type=int, default=None)
-    sp.add_argument("--policy", default=None)
-    sp.add_argument("--attempt-cap", type=int, default=None)
-    sp.add_argument("--test-cmd", default=None)
+    sp.add_argument("--loop-repo", required=True,
+                    help="the plugin/loop repo where the integration branch "
+                         "and dedicated worktree are created and findings are "
+                         "fixed")
+    sp.add_argument("--scenarios", default=None,
+                    help="path to the target's scenarios file; its \"loop\" "
+                         "block supplies the repo-specific settings (never "
+                         "auto-loaded — pass it explicitly)")
+    sp.add_argument("--cap", type=int, default=None,
+                    help="iteration-count ceiling — a safety limit, not the "
+                         "success condition; sets loop.iterations (F86)")
+    sp.add_argument("--base", default=None,
+                    help="base ref to dogfood and snapshot at init (default: "
+                         "the loop repo's current branch); never silently "
+                         "moved to the upstream tip")
+    sp.add_argument("--worktree", default=None,
+                    help="explicit path for the dedicated worktree (default: "
+                         "an auto-named path outside the loop repo)")
+    sp.add_argument("--phase", type=int, default=1,
+                    help="supervision level 1|2|3 (default 1) — same loop "
+                         "throughout; 2/3 run headless")
+    sp.add_argument("--wall-time", type=int, default=None,
+                    help="wall-clock ceiling in seconds (breaker); sets "
+                         "loop.wall_time_s (F86)")
+    sp.add_argument("--token-budget", type=int, default=None,
+                    help="token ceiling the harness trips (stored, not "
+                         "enforced here); sets loop.token_budget (F86)")
+    sp.add_argument("--policy", default=None,
+                    help="path to a policy.json answering actionable findings "
+                         "up front (needed for an unattended Phase 2/3 run)")
+    sp.add_argument("--attempt-cap", type=int, default=None,
+                    help="max attempts per finding before it is deferred; "
+                         "sets loop.attempt_cap (F86)")
+    sp.add_argument("--test-cmd", default=None,
+                    help="the repo's regression suite, run as the test "
+                         "breaker; sets loop.test_cmd (F86)")
     sp.add_argument("--gate", choices=("merge", "pr"), default=None,
                     help="how the morning gate lands the batch: 'merge' "
                          "(default) = local merge + gate-push; 'pr' = the "
                          "base refuses direct pushes, so the close delivers "
                          "a Draft PR via gate-pr (spec-tanuki-loop "
                          "\"PR-protected targets\")")
-    sp.add_argument("--allow-stale-base", action="store_true")
+    sp.add_argument("--allow-stale-base", action="store_true",
+                    help="override the base-freshness fail-closed for a "
+                         "deliberately un-pushed local base")
 
     sp = sub.add_parser(
         "doctor",
@@ -5082,27 +5111,47 @@ def main():
             "design, but the run then has no regression gate; use the repo's "
             "real suite for anything beyond a sandbox)"),
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    sp.add_argument("--loop-repo", required=True)
+    sp.add_argument("--loop-repo", required=True,
+                    help="the plugin/loop repo to validate readiness for "
+                         "(same repo init would use)")
     sp.add_argument("--scenarios", default=None,
                     help="path to the target's scenarios file; its \"loop\" "
                          "block supplies the ceilings. NOT defaulted to the "
                          "canonical path — pass it explicitly or the "
                          "loop-config check reports the ceilings missing")
-    sp.add_argument("--cap", type=int, default=None)
-    sp.add_argument("--base", default=None)
-    sp.add_argument("--phase", type=int, default=2, choices=(2, 3))
-    sp.add_argument("--wall-time", type=int, default=None)
-    sp.add_argument("--token-budget", type=int, default=None)
-    sp.add_argument("--policy", default=None)
-    sp.add_argument("--attempt-cap", type=int, default=None)
-    sp.add_argument("--test-cmd", default=None)
+    sp.add_argument("--cap", type=int, default=None,
+                    help="iteration-count ceiling to validate; sets "
+                         "loop.iterations (F86)")
+    sp.add_argument("--base", default=None,
+                    help="base ref whose freshness and baseline test are "
+                         "checked (default: the loop repo's current branch)")
+    sp.add_argument("--phase", type=int, default=2, choices=(2, 3),
+                    help="the headless phase (2 or 3) to validate readiness "
+                         "for")
+    sp.add_argument("--wall-time", type=int, default=None,
+                    help="wall-clock ceiling in seconds to validate; sets "
+                         "loop.wall_time_s (F86)")
+    sp.add_argument("--token-budget", type=int, default=None,
+                    help="token ceiling to validate; sets loop.token_budget "
+                         "(F86)")
+    sp.add_argument("--policy", default=None,
+                    help="path to a policy.json whose coverage of actionable "
+                         "findings is reported (informational, never fatal)")
+    sp.add_argument("--attempt-cap", type=int, default=None,
+                    help="per-finding attempt ceiling to validate; sets "
+                         "loop.attempt_cap (F86)")
+    sp.add_argument("--test-cmd", default=None,
+                    help="the regression suite whose baseline pass on the "
+                         "base tip is checked; sets loop.test_cmd (F86)")
     sp.add_argument("--gate", choices=("merge", "pr"), default=None,
                     help="how the morning gate lands the batch: 'merge' "
                          "(default) = local merge + gate-push; 'pr' = the "
                          "base refuses direct pushes, so the close delivers "
                          "a Draft PR via gate-pr (spec-tanuki-loop "
                          "\"PR-protected targets\")")
-    sp.add_argument("--allow-stale-base", action="store_true")
+    sp.add_argument("--allow-stale-base", action="store_true",
+                    help="validate even when the base is behind its upstream "
+                         "(the freshness check becomes a note, not a stop)")
 
     # F93: the breaker precedence lives in cmd_iter_start's docstring but was
     # invisible from --help until a description surfaced it here.
@@ -5135,7 +5184,9 @@ def main():
             "iterations later. A legitimate binary is declared deliberately "
             "with --allow-artifact (per path, repeatable, audited) — the "
             "guard never stands down silently."))
-    sp.add_argument("--no-patch", action="store_true")
+    sp.add_argument("--no-patch", action="store_true",
+                    help="allow a no-op iteration (HEAD == start SHA) instead "
+                         "of tripping the 'patch expected' invariant")
     sp.add_argument("--allow-artifact", action="append", metavar="PATH",
                     help="declare a committed path (or directory prefix) as a "
                          "legitimate binary: check (e) passes for declared "
@@ -5170,7 +5221,9 @@ def main():
                         "head_expected (adopted range audited; requires a "
                         "clean tree)")
     sub.add_parser("test")
-    sp = sub.add_parser("attempt"); sp.add_argument("--finding", required=True)
+    sp = sub.add_parser("attempt")
+    sp.add_argument("--finding", required=True,
+                    help="ledger finding id this attempt targets")
     sp = sub.add_parser(
         "record-cycle",
         description=("Record the closed iteration's convergence accounting. "
@@ -5189,8 +5242,13 @@ def main():
                     help="bare flag, the pair of --patched; advisory only")
     sp.set_defaults(patched=None)
     sp = sub.add_parser("defer")
-    sp.add_argument("--finding", required=True); sp.add_argument("--reason", required=True)
-    sp = sub.add_parser("log"); sp.add_argument("--audit", required=True)
+    sp.add_argument("--finding", required=True,
+                    help="ledger finding id to defer to the morning queue")
+    sp.add_argument("--reason", required=True,
+                    help="why the finding is deferred (recorded in queue.md)")
+    sp = sub.add_parser("log")
+    sp.add_argument("--audit", required=True,
+                    help="free-text line to append to the run's audit trail")
     sub.add_parser("gate-check")
     sp = sub.add_parser(
         "gate-push",
@@ -5236,11 +5294,20 @@ def main():
                     help="file whose contents become the PR body (default: a "
                          "mechanical summary naming the run, the audit trail, "
                          "and the intended merge-commit method)")
-    sp = sub.add_parser("issue-get"); sp.add_argument("--key", required=True)
+    sp = sub.add_parser("issue-get")
+    sp.add_argument("--key", required=True,
+                    help="problem key to look up a previously recorded issue "
+                         "number for (idempotent materialization)")
     sp = sub.add_parser("issue-put")
-    sp.add_argument("--key", required=True); sp.add_argument("--issue", required=True)
+    sp.add_argument("--key", required=True,
+                    help="problem key to bind an issue number to")
+    sp.add_argument("--issue", required=True,
+                    help="the issue number to record for this problem key")
     sp = sub.add_parser("policy")
-    sp.add_argument("--finding", required=True); sp.add_argument("--decision", required=True)
+    sp.add_argument("--finding", required=True,
+                    help="ledger finding id the policy decision applies to")
+    sp.add_argument("--decision", required=True,
+                    help="the recorded policy decision for the finding")
     sp = sub.add_parser(
         "finish",
         help="mark the run terminal and delete merged integration branches — "
@@ -5263,7 +5330,9 @@ def main():
                          "command — settlement is derived; if invoked anyway "
                          "it refuses unless the delivery verifiably landed")
     sp = sub.add_parser("dashboard")
-    sp.add_argument("--follow", type=int, default=None)
+    sp.add_argument("--follow", type=int, default=None,
+                    help="re-render every N seconds (live follow) instead of "
+                         "printing once")
     sp.add_argument("--live", action="store_true",
                     help="render only while the run is ACTIVE; a closed run "
                          "degrades to the typed empty state plus one "
@@ -5289,7 +5358,9 @@ def main():
             "commands/tanuki-loop.md). "
             "`cherry_picks_cleanly` is a fact "
             "about git and is NOT a synonym for applicable."))
-    sp.add_argument("--json", action="store_true")
+    sp.add_argument("--json", action="store_true",
+                    help="emit machine-readable JSON instead of the human "
+                         "table")
     sp.add_argument("--loop-repo", default=None,
                     help="the repo holding the integration branches "
                          "(default: the most recent run's recorded loop_repo)")
@@ -5317,9 +5388,15 @@ def main():
     sp.add_argument("--branch", default=None,
                     help="restrict to one unresolved branch (evidence "
                          "filter for advanced use — never required)")
-    sp.add_argument("--base", default=None)
-    sp.add_argument("--json", action="store_true")
-    sp.add_argument("--loop-repo", default=None)
+    sp.add_argument("--base", default=None,
+                    help="base ref to evidence dispositions against (default: "
+                         "the run's recorded base)")
+    sp.add_argument("--json", action="store_true",
+                    help="emit machine-readable JSON instead of the human "
+                         "report")
+    sp.add_argument("--loop-repo", default=None,
+                    help="the repo holding the unresolved branches (default: "
+                         "the most recent run's recorded loop_repo)")
     sp = sub.add_parser(
         "site-record",
         help="record one manifestation site of a finding with the probe "
@@ -5334,10 +5411,14 @@ def main():
             "--contains/--absent; behavior: --run, rc 0 = closed), so "
             "`reevaluate` can re-derive the verdict forever after. "
             "Re-recording a site invalidates any earlier verdict."))
-    sp.add_argument("--finding", required=True)
+    sp.add_argument("--finding", required=True,
+                    help="ledger finding id this manifestation site belongs "
+                         "to")
     sp.add_argument("--site", required=True,
                     help="site name (e.g. the seam: cmd_journal)")
-    sp.add_argument("--file", default=None)
+    sp.add_argument("--file", default=None,
+                    help="the file the content probe (--contains/--absent) "
+                         "reads")
     sp.add_argument("--contains", default=None,
                     help="closed when FILE contains this string")
     sp.add_argument("--absent", default=None,
@@ -5363,9 +5444,15 @@ def main():
                     help="restrict to one finding (default: all findings "
                          "with recorded sites plus all findings cited by "
                          "unresolved branches)")
-    sp.add_argument("--base", default=None)
-    sp.add_argument("--json", action="store_true")
-    sp.add_argument("--loop-repo", default=None)
+    sp.add_argument("--base", default=None,
+                    help="base ref to evaluate probes against (default: the "
+                         "run's recorded base)")
+    sp.add_argument("--json", action="store_true",
+                    help="emit machine-readable JSON instead of the human "
+                         "report")
+    sp.add_argument("--loop-repo", default=None,
+                    help="the repo holding the integration branches (default: "
+                         "the most recent run's recorded loop_repo)")
     sp = sub.add_parser(
         "reconcile",
         help="the single terminal reconcile invocation: fixpoint of "
@@ -5395,9 +5482,15 @@ def main():
     sp.add_argument("--branch", default=None,
                     help="advanced filter to one unresolved branch — "
                          "never required")
-    sp.add_argument("--base", default=None)
-    sp.add_argument("--json", action="store_true")
-    sp.add_argument("--loop-repo", default=None)
+    sp.add_argument("--base", default=None,
+                    help="base ref to reconcile onto (default: the run's "
+                         "recorded base)")
+    sp.add_argument("--json", action="store_true",
+                    help="emit machine-readable JSON instead of the human "
+                         "report")
+    sp.add_argument("--loop-repo", default=None,
+                    help="the repo holding the unresolved branches (default: "
+                         "the most recent run's recorded loop_repo)")
 
     args = p.parse_args()
     {"init": cmd_init, "doctor": cmd_doctor,
