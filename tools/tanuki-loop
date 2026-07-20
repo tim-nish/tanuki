@@ -617,7 +617,10 @@ def cleanup_merged_integration_branches(repo, base, target):
             _p = checked_out[b]
             skipped_reasons[b] = (
                 "checked out in a worktree — remove it first: "
-                "`git worktree remove %s`, then re-run `tanuki-loop --target "
+                "`git worktree remove %s` (if it refuses over regenerable "
+                "output like `__pycache__`/`*.pyc`, add `--force` or "
+                "`git clean -fd` in the worktree then retry — that residue is "
+                "not work product, F111), then re-run `tanuki-loop --target "
                 "%s finish --reason <reason>` (or the next `init` will collect "
                 "it)" % (_p or "<path>", target))
         elif git(repo, "merge-base", "--is-ancestor", b, base)[0] == 0:
