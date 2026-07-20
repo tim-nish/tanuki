@@ -3812,14 +3812,35 @@ def cmd_gate_push(args):
     out({"pushed": True, "remote": remote, "ref": upstream, "base_sha": head})
 
 
-def _gate_pr_recovery(integ, base, cause=None):
+def _gate_pr_recovery(integ, base, cause=None, repo=None):
     """The documented recovery for a gate-pr failure (F192): the command is
     idempotent, so the operator can finish the delivery by hand and re-run.
     F230: the advice is cause-specific — when the base ref is missing on the
     forge, hand-creating a PR against it cannot work, so the base branch must
     be restored/pushed first; the generic hand-create path fits every other
-    cause."""
+    cause.
+    F128: when the base is a *remote-tracking* ref (e.g. `origin/main`), the
+    generic 'push the base' advice is actively wrong — `git push <remote>
+    origin/main` pushes the local remote-tracking ref to a same-named
+    non-branch ref on the server, so re-running gate-pr fails identically. Name
+    the real problem and point at the underlying local branch instead."""
+    remote_tracking_branch = None
+    if repo is not None and git(repo, "rev-parse", "--verify", "--quiet",
+                                f"refs/remotes/{base}")[0] == 0:
+        for r in git(repo, "remote")[1].split():
+            if base.startswith(r + "/"):
+                remote_tracking_branch = base[len(r) + 1:]
+                break
     if cause == "base ref not found on forge":
+        if remote_tracking_branch:
+            return (f"the base `{base}` is a remote-tracking ref, not a branch "
+                    "— GitHub rejects it as a PR base, and `git push <remote> "
+                    f"{base}` would only re-create the same non-branch ref and "
+                    "fail identically. Re-point the run at the local branch "
+                    f"`{remote_tracking_branch}` it tracks (re-`init` with "
+                    f"`--base {remote_tracking_branch}`), or hand-create the PR "
+                    f"`{integ} -> {remote_tracking_branch}` on the forge, then "
+                    "re-run gate-pr (idempotent)")
         return (f"the base ref `{base}` does not exist on the forge, so a PR "
                 f"`{integ} -> {base}` cannot be created against it — push/"
                 f"restore the base branch first (`git push <remote> {base}`, "
@@ -3933,7 +3954,7 @@ def cmd_gate_pr(args):
         out({"created": False, "pushed": False,
              "base": base, "integration_branch": integ,
              "cause": "push failure",
-             "recovery": _gate_pr_recovery(integ, base, "push failure"),
+             "recovery": _gate_pr_recovery(integ, base, "push failure", repo),
              "hint": f"push of '{integ}' to '{remote}' failed (not forced; "
                      "the local branch is intact): " + err})
         sys.exit(3)
@@ -3989,7 +4010,7 @@ def cmd_gate_pr(args):
             out({"created": False, "pushed": True,
                  "base": base, "integration_branch": integ,
                  "cause": _cause,
-                 "recovery": _gate_pr_recovery(integ, base, _cause),
+                 "recovery": _gate_pr_recovery(integ, base, _cause, repo),
                  "hint": "the branch is pushed but `gh pr create` failed — "
                          "local state is intact and gate-pr is idempotent; "
                          "fix the cause and re-run: " + o})
