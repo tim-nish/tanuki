@@ -23,6 +23,11 @@ git init -q "$repo" && git -C "$repo" config user.email t@e && git -C "$repo" co
 git -C "$repo" checkout -qb main && echo v0 > "$repo/f" && git -C "$repo" add -A && git -C "$repo" commit -qm base
 
 L=("$loop" --target t)
+# One active run per target (issue #258): init now fails closed while a prior
+# run for the target is unfinished. These sub-tests each want a fresh run, so
+# retire the current one before re-initing — exactly what real usage does at
+# the morning gate. A single live run means the bare `finish` resolves.
+retire() { "${L[@]}" finish --reason aborted >/dev/null 2>&1 || true; }
 wt="$("${L[@]}" init --loop-repo "$repo" --cap 8 | jget '["worktree"]')"
 [ -d "$wt" ] || fail "worktree not created at $wt"
 gwt() { git -C "$wt" "$@"; }
@@ -108,8 +113,10 @@ pass "record-cycle computes new-actionable from the ledger and patched from SHAs
 pass "convergence needs two consecutive quiet cycles; deferred findings don't block it"
 
 # --- deterministic test runner ------------------------------------------------
+retire
 "${L[@]}" init --loop-repo "$repo" --cap 1 --test-cmd "test -f f" >/dev/null
 "${L[@]}" test | jget '["ok"]' | grep -q True || fail "configured passing test_cmd should pass"
+retire
 "${L[@]}" init --loop-repo "$repo" --cap 1 --test-cmd "false" >/dev/null
 rc=0; "${L[@]}" test >/tmp/tc.json 2>&1 || rc=$?
 [ "$rc" = "3" ] && grep -q "test failure" /tmp/tc.json || fail "failing test_cmd must be a breaker"
@@ -119,10 +126,12 @@ pass "test subcommand: passes on ok test_cmd, breaker on failure"
 cat > "$tmp/scen.json" <<'EOF'
 {"loop": {"test_cmd": "test -f f", "iterations": 7, "wall_time_s": 1234}}
 EOF
+retire
 "${L[@]}" init --loop-repo "$repo" --scenarios "$tmp/scen.json" >/dev/null
 st="$("${L[@]}" status)"
 [ "$(echo "$st" | jget '["cap"]')" = "7" ] || fail "cap not taken from loop block"
 "${L[@]}" test | jget '["ok"]' | grep -q True || fail "test_cmd not taken from loop block"
+retire
 "${L[@]}" init --loop-repo "$repo" --scenarios "$tmp/scen.json" --cap 3 >/dev/null
 [ "$("${L[@]}" status | jget '["cap"]')" = "3" ] || fail "CLI --cap should override loop block"
 rc=0; "${L[@]}" init --loop-repo "$repo" >/tmp/nocap.json 2>&1 || rc=$?
@@ -225,6 +234,7 @@ pass "staleness guard: --allow-stale-base overrides, records the gap, keeps the 
 
 # Once fast-forwarded, the base is current and init succeeds cleanly.
 git -C "$repo2" merge -q --ff-only origin/main
+"${Lb[@]}" finish --reason aborted >/dev/null 2>&1 || true   # retire the prior tb run (#258)
 out2b="$("${Lb[@]}" init --loop-repo "$repo2" --cap 2)"
 [ "$(echo "$out2b" | jget '["base_behind"]')" = "0" ] \
   || fail "an up-to-date base must init with base_behind=0: $out2b"
@@ -261,6 +271,7 @@ pass "issue #64: cap breaker states the cause (n/cap, verified/rolled back) + ne
 
 # The issue's exact scenario: both iterations consumed, one verified and one
 # ROLLED BACK — the case where the breakdown carries real information.
+retire   # the prior cap-1 run is still open (cap breaker, never finished) (#258)
 "${L[@]}" init --loop-repo "$repo" --cap 2 >/dev/null
 wt3="$("${L[@]}" status | jget '["worktree"]')"
 "${L[@]}" iter-start >/dev/null
@@ -280,6 +291,7 @@ pass "issue #64: rolled-back work is visible in the cap breakdown (1 verified, 1
 # bracket reports sequencing even when the cap is also exhausted.
 grep -qi "sequencing" /tmp/cap2.json \
   && fail "cap breaker must not read as a sequencing violation: $(cat /tmp/cap2.json)"
+retire   # the prior cap-2 run is still open (cap breaker, never finished) (#258)
 "${L[@]}" init --loop-repo "$repo" --cap 1 >/dev/null
 "${L[@]}" iter-start >/dev/null
 rc=0; "${L[@]}" iter-start >/tmp/seq.json 2>&1 || rc=$?
