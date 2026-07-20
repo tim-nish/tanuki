@@ -82,7 +82,11 @@ live in the scenarios file's `"loop"` block, stored once, never retyped:
    test output, a Phase 1 run may still want `doctor` for its
    test-cmd-artifacts check alone (F211): it predicts the gate's
    `git worktree remove` refusal (morning-gate step 7) before the run starts
-   rather than at its last step.
+   rather than at its last step. The check now covers both directions
+   (F111/#242): untracked residue test_cmd sheds (`artifacts`), and build
+   output regenerated over a file already **tracked** on the base
+   (`tracked_artifacts`) — the base-committed case that surfaced as an
+   unexplained refusal; each is named with its remedy.
 3. **Isolation + state — `tanuki-loop init`.** Run `${CLAUDE_PLUGIN_ROOT}/tools/tanuki-loop
    --target <target> init --loop-repo <plugin-repo> --scenarios
    <scenarios-file> --phase <P> [overrides: --cap/--test-cmd/--wall-time/
