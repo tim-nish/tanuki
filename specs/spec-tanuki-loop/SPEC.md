@@ -142,9 +142,10 @@ GitHub artifacts exist only *after* the morning approval (see "Morning gate").
 This honors the "ledger-only overnight" decision: the ledger is authoritative
 during the run; the outward-facing record is written once, describing what
 actually landed. One scoped exception: on a PR-protected target the run's
-close delivers a **Draft PR** (see "PR-protected targets") — review material
-awaiting the approval, not a record asserting its outcome; issues and the
-merge itself still exist only after the operator ratifies.
+close delivers a **ready-for-review PR** (see "PR-protected targets"; a Draft
+is available opt-in) — a proposal awaiting the approval, not a record
+asserting its outcome; issues and the merge itself still exist only after the
+operator ratifies.
 
 ## Deterministic substrate (`tools/tanuki-loop`) vs. judgment
 
@@ -683,11 +684,19 @@ there the local-merge + `gate-push` sequence above cannot run at all. For such
 a target the scenarios `loop` block sets `"gate": "pr"` (default `"merge"` —
 everything above unchanged), and the gate reshapes around the forge:
 
-**Delivery is the loop's boundary (owner ruling 2026-07-17).** After a
-successful unattended run closes (`finish --reason cap|converged`) and the
-final tests pass on the integration HEAD, `tanuki-loop gate-pr` pushes the
-**integration branch** (never the base, never forced) and opens **one Draft
-PR** `integration → base`. **The loop ends when that Draft PR opens.** The
+**Delivery is the loop's boundary (owner ruling 2026-07-17; ready-by-default
+amendment 2026-07-20).** After a successful unattended run closes (`finish
+--reason cap|converged`) and the final tests pass on the integration HEAD,
+`tanuki-loop gate-pr` pushes the **integration branch** (never the base, never
+forced) and opens **one PR** `integration → base`, **marked ready for review**
+once that final integration-HEAD test has passed. **The loop ends when that PR
+opens.** (Ready-for-review is the default because a required status check and
+review-request automation treat a Draft as inert — the delivered PR could not
+actually receive the review it was delivered for until a human un-drafted it,
+so a Draft-terminal loop delivered a request no one was asked to act on. An
+operator who wants "review material, not a request" opts back into a Draft via
+`gate_pr_draft: true` in the scenarios `loop` block or `gate-pr --draft`; the
+2026-07-17 ruling's Draft default is preserved there, now as an opt-in.) The
 run is recorded as **delivered** — PR number, integration-tip SHA, base SHA —
 and that is the loop's terminal fact. The loop does not poll, merge, comment,
 or wait for the PR outcome; whether the PR is ultimately accepted is not the
@@ -695,10 +704,15 @@ loop's to know, and **no human runs a machine-level closing command** to tell
 it. The Human Gate is **PR approval + merge on the forge**; the loop **never
 auto-merges** — `gate-pr` contains no merge call, and no phase adds one.
 
-Because the Draft PR is review material rather than a decision, opening it
-does not violate "no outward-facing artifacts overnight": that rule's target
-was always *records that assert conclusions* (issues stating what landed,
-merges into `main`). A draft marked as awaiting review asserts nothing.
+Because the PR — ready or draft — is a **proposal awaiting review, not a
+decision**, opening it does not violate "no outward-facing artifacts
+overnight": that rule's target was always *records that assert conclusions*
+(issues stating what landed, merges into `main`). A PR requesting review
+asserts a proposal, never a conclusion; the conclusion — the merge into the
+base — is the Human Gate and never happens overnight. (This supersedes the
+2026-07-17 framing that leaned on "a draft asserts nothing": the honest line
+is not draft-vs-ready but request-vs-conclusion — both draft and ready PRs are
+requests, and neither lands anything overnight.)
 
 **Settlement is derived, never declared.** Later **read-only** operations
 (`status`, `init`'s cleanup backstop, `unresolved`) derive the outcome from
@@ -843,8 +857,9 @@ and removing supervision is the only change between phases. The morning
   materialized** (`gate-push`, never force over a diverged remote); deferred
   judgment waits for the morning, never auto-decided. On a PR-protected
   target (`gate: "pr"`) the approval takes the form of **PR approval + merge
-  on the forge**: the loop ends at delivering one Draft PR (`gate-pr` —
-  review material, not ratification; owner ruling 2026-07-17), it **never
+  on the forge**: the loop ends at delivering one ready-for-review PR
+  (`gate-pr` — a review request, not ratification; owner ruling 2026-07-17,
+  ready-by-default amendment 2026-07-20; Draft available opt-in), it **never
   auto-merges**, and settlement (landed / pending / declined / unknown) is
   **derived** by read-only surfaces from the forge and the current base — no
   human closing command restates the forge's decision. Reconcile's terminal
