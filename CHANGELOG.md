@@ -6,6 +6,82 @@ All notable changes to Tanuki are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-20
+
+### Added
+- **Reconcile substrate — one terminal invocation** (stories 1.38–1.40,
+  spec-tanuki-loop #210): `tanuki-loop dispose` (deterministic disposition +
+  port engine — per-hunk evidence: reverse-apply / forward-apply / postimage
+  containment; anything unevidenced fails closed), `site-record` +
+  `reevaluate` (per-site finding closure with stored deterministic probes —
+  resolved/superseded only when closed at every known site), and
+  `reconcile` — fixpoint of dispose + reevaluate, verification, ONE gate of
+  genuine owner decisions, then merge → push → state → cleanup as a
+  persisted, resumable, idempotent transaction.
+- **Charter probe coverage** (stories 1.24–1.26): charters may declare a
+  `probe` block (one `required` evidence predicate plus named checkpoints,
+  fail-closed validation, authored at the plan gate); `tanuki-drive`
+  evaluates the predicates into an independent probe axis in the manifest;
+  report, run summary, and dashboard render the probe axis next to status.
+- **Declared-input configuration** (stories 1.27–1.28, 1.37): a typed
+  `inputs` block in the scenarios file; `tanuki-config` substrate
+  (show / check / set, dry-run preview, per-field doctor hooks); the
+  `/tanuki <target> configure` mode; and a built-in input catalog
+  (`drive_model`, `drive_concurrency`) so configure works with no `inputs`
+  block. Config gains an `int` type with optional min/max bounds (#205).
+- **Host bindings & per-host scheduling** (stories 1.29–1.33): declared
+  bindings with placeholder resolution in prompts and `host_setup`;
+  scheduler state keyed `(scenario_id, host_binding_id)`; host-coupling
+  detection (portable / bound / host-coupled); plan-time compatibility check
+  with `compat_skipped`; and a one-shot per-run override (consume-once,
+  off-host tagging).
+- **Den distill — contribute-back** (stories 1.34–1.36, spec-den-distill):
+  `contribute_back` config with doctor validation and staging-directory-only
+  writes; lesson candidates join the decision pass (accept emits, verbatim
+  receipts); the `/tanuki <target> distill` mode walks the existing ledger
+  without a new run.
+- **Generation surfacing** (#168, #170, #171, #174): `tanuki-scheduler
+  candidates` enumerates the full deterministic generation pool
+  (trajectory-observed unexplored branches + uncovered findings); the
+  generate pass persists its membership record at the gate; `status`
+  surfaces generation-trigger advisories.
+- **Loop hardening**: committed build artifacts are check (e) of the
+  five-part integration invariant — an immediate-stop breaker at the
+  offending commit, with per-path `--allow-artifact` overrides (story 1.23,
+  #159); concurrent drives with per-scenario progress and summed budget
+  accounting (stories 1.21–1.22); `covers` tags with cheapest-cover verify
+  selection and covering-absence compaction with a repin guard (stories
+  1.19–1.20); estimate/entry-fixture visibility at the plan gate (#204).
+
+### Changed
+- `ingest` note run ids gain a time suffix (`manual-<YYYYMMDD>-<HHMMSS>`) so
+  same-day notes stay distinct runs (F184; operator-approved contract
+  change).
+- Morning-gate documentation: re-run/crash-retry outputs
+  (`previously_finished`, `branch_deleted`/`note`) documented at the steps
+  that produce them (#217); the external-modification breaker's deferred
+  detection (next iter-start, never on touch or at iter-verify) stated in
+  --help and iter-verify output (#219).
+- Dashboard: the two "new finding" counts are labeled with their scopes —
+  run-delta vs last cycle's snapshot (#220); every `tanuki-loop` subcommand
+  argument now carries a `help=` description (#221).
+- Docs information architecture: `docs/README.md` maps normative (user docs,
+  specs) vs non-normative (development history, archived planning) material;
+  the story registry is marked as history (#229). README rebuilt around the
+  two command families: basic-sequence Mermaid diagram, complete linked
+  command index, configure as the primary configuration path, and
+  write/push boundaries stated per the spec (#228).
+
+### Fixed
+- `recover --restore` reports discarded uncommitted edits accurately: the
+  `git()` helper preserves porcelain leading columns (no truncated first
+  filename) and discarded edits are listed separately from external commits
+  (F168/F186, #218; regression-tested).
+- Ledger, scheduler, and loop fixes from the overnight dogfooding runs —
+  including doctor readiness distinctions, gate-push divergence handling,
+  and settlement derivation edge cases (see the audit trail of merged loop
+  batches #190, #222 for the itemized list).
+
 ## [0.2.0] — 2026-07-18
 
 ### Removed
@@ -189,6 +265,7 @@ First public release — Tanuki packaged as a Claude Code plugin.
 - Deterministic tools (zero runtime dependencies): `tanuki-drive`,
   `tanuki-ledger`, `tanuki-scheduler`, `tanuki-loop`, `tanuki-preflight`.
 
-[Unreleased]: https://github.com/tim-nish/tanuki/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/tim-nish/tanuki/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/tim-nish/tanuki/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/tim-nish/tanuki/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/tim-nish/tanuki/releases/tag/v0.1.0
