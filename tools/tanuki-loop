@@ -804,7 +804,11 @@ def drift_note(target, repo):
                  f"current code)"
                  if worst else "none has fallen behind the base yet (the base "
                  "branch has not advanced since these were cut)")
-    return (f"note: {n} unresolved loop branch(es) — integration branches "
+    # F157 (recurrence): a cold reader could not tell whether this banner
+    # belongs to the run rendered below or to wider state — name the scope.
+    return (f"note: {n} unresolved loop branch(es) — a target-wide backlog "
+            f"check across ALL of this target's past runs, independent of "
+            f"the run shown below: integration branches "
             f"holding work that never merged; {staleness}. "
             f"Run the `/tanuki-loop {target} reconcile` slash command "
             f"(a Claude Code slash command, run in a Claude Code session — "
@@ -3574,6 +3578,14 @@ def _gate_progress(state, reachable):
         "last_completed_step": prefix[-1] if prefix else None,
         "next_step": next((s for s in order if not evidence[s]), None),
     }
+    # F234: this derivation cannot know whether issue tooling exists for the
+    # target, and the doc's steps 5-6 are skipped entirely on a trackerless
+    # target — say so instead of nudging every operator toward `issues`.
+    if progress["next_step"] == "issues":
+        progress["next_step_note"] = (
+            "the issues step applies only where forge/tracker tooling is "
+            "configured for this target — a hostless/trackerless target "
+            "skips it (morning-gate steps 5-6) and proceeds to cleanup")
     if not reachable:
         progress["blocker"] = ("integration tip not reachable from the base "
                                "— the merge has not landed (see hint)")
@@ -3711,6 +3723,11 @@ def _gate_pr_recovery(integ, base, cause=None):
                 f"restore the base branch first (`git push <remote> {base}`, "
                 "or point the run at a base that exists), then re-run gate-pr "
                 "(idempotent)")
+    if cause == "no GitHub remote":
+        return ("no configured git remote points to a GitHub host, so `gh` "
+                "cannot create the PR anywhere — add a GitHub remote "
+                "(`git remote add <name> <github-url>`) or run from a "
+                "checkout that has one, then re-run gate-pr (idempotent)")
     return (f"hand-create the PR `{integ} -> {base}` on the forge, then "
             "re-run gate-pr — it is idempotent and will adopt the existing "
             "PR")
@@ -3724,6 +3741,10 @@ def _classify_gate_pr_failure(err):
                            ("not found", "does not exist", "invalid",
                             "no such", "unknown", "must be a branch")):
         return "base ref not found on forge"
+    # F235: gh's "none of the git remotes ... point to a known GitHub host"
+    # was falling through to "other" while the hint text named the cause.
+    if "github host" in e or ("remote" in e and "github" in e):
+        return "no GitHub remote"
     return "other"
 
 
@@ -4729,12 +4750,15 @@ def cmd_dashboard(args):
             # F6: define the counters inline. Every label is a ledger fact,
             # never a commit count — 'fixed' was retired because 'fixed 0'
             # beside a produced patch read as a contradiction.
-            lines.append("    (status→accepted = ledger status transitions "
-                         "this run, not patch commits; recurred = a known "
-                         "finding observed again this run — its recurrence "
-                         "count bumped; deferred/frozen = morning-queue "
-                         "entries in queue.md awaiting your ruling, not "
-                         "ledger findings)")
+            # F188 (recurrence): "ledger" itself is jargon to a cold reader
+            # — define it once before using it to define the counters.
+            lines.append("    (the ledger is the target's persistent findings "
+                         "record; status→accepted = a finding's recorded "
+                         "status changed this run — never a patch/commit "
+                         "count; recurred = a known finding observed again "
+                         "this run — its recurrence count bumped; "
+                         "deferred/frozen = morning-queue entries in queue.md "
+                         "awaiting your ruling, not ledger findings)")
             if deltas["legacy"]:
                 lines.append("    (run predates status snapshots — "
                              "status→accepted/recurred not computable)")
@@ -5436,7 +5460,7 @@ def main():
                          "checked (default: the loop repo's current branch)")
     sp.add_argument("--phase", type=int, default=2, choices=(2, 3),
                     help="the headless phase (2 or 3) to validate readiness "
-                         "for")
+                         "for (default: 2)")
     sp.add_argument("--wall-time", type=int, default=None,
                     help="wall-clock ceiling in seconds to validate; sets "
                          "loop.wall_time_s (F86)")
