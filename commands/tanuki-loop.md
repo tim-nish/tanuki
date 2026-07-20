@@ -335,6 +335,12 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
    (F187, F194).
 3. **Verify** with `tanuki-loop gate-check` (integration HEAD reachable from
    base).
+   **On a re-run or crash-retry after the branch was already deleted** (a
+   later step, or a prior gate pass, removed the integration branch — see
+   step 7), `gate-check` does not error: it reports `branch_deleted: true`
+   with a `note` explaining that a deleted branch is the *success* state at
+   this point, not a missing one (F108). Treat that output as a pass and
+   continue — the merge already landed on the base.
 4. **Push the base branch** with `tanuki-loop gate-push` — the first
    outward-facing step, run **before** any issue is materialized. Until the
    merge commit exists on the remote, the commit links step 5 stamps onto
