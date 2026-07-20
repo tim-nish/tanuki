@@ -170,8 +170,18 @@ one-line reason:
 ```
 
 - `expected: true` — emptiness is normal for this target's state (a fresh
-  target has never synced; no run has driven yet). `expected: false` — a
-  **gap**: the substrate should exist and does not.
+  target has never synced; no run has driven yet) **or for the run's
+  provenance**: a run that drove *outside* the scheduler — a manual, toy, or
+  ad-hoc run with no persisted plan — legitimately has no `latest drive` /
+  `scheduler decisions` substrate, so its empty sections resolve to a
+  distinct enumerated member whose `reason` names that provenance (e.g. "this
+  run drove outside the scheduler — no plan was persisted"). `expected:
+  false` — a **gap**: the substrate should exist and does not — a *scheduled*
+  run that should have driven and did not. Provenance is derived from
+  persisted artifacts (the presence/absence of a plan record for the run),
+  never guessed; run-provenance is the single input that flips these two
+  otherwise-identical empty sections between expected and gap (issue #236 /
+  F166).
 - **One test fixture per enumerated state**, so a new state or a regression
   fails visibly rather than being re-reported by a later dogfood run.
 - Any command the reason names must be explained where it is named — an

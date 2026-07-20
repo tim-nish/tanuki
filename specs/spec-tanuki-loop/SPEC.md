@@ -313,6 +313,15 @@ cold reader unable to distinguish "no data yet" from "missing data").
    target — run tanuki-scheduler sync first`, `this run: no ledger movement
    yet`. This generalizes point 4's "degrade … with an explicit note — never
    silently" from the plan record to **every** section.
+   **Run provenance flips expected-vs-gap (issue #236 / F166).** An empty
+   `latest drive` / `scheduler decisions` section is a **gap** only for a
+   *scheduled* run that should have driven and did not; for a run that drove
+   *outside* the scheduler — a manual, toy, or ad-hoc run with no persisted
+   plan — the same emptiness is **expected**, and the section's reason names
+   that provenance rather than reading as a defect. Provenance is derived
+   from the presence/absence of a persisted plan record for the run, never
+   guessed. This mirrors `specs/spec-tanuki-view/SPEC.md` D3's typed
+   `expected: true|false` enumeration; the two surfaces share one rule.
 3. **Counters carry their definitions inline, and their labels are the
    substrate's facts.** Any number whose meaning is not derivable from the
    line it appears on states its definition next to its first use — e.g.
