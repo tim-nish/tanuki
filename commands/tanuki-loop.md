@@ -431,10 +431,21 @@ availability up front) and the gate reshapes:
 - **Overnight close delivers the review material.** After the run finishes
   (`cap`/`converged`) and `tanuki-loop test` passes on the integration HEAD,
   run `tanuki-loop gate-pr`: it pushes the **integration branch** (never
-  forced) and opens **one Draft PR** `integration → base`. That Draft PR *is*
-  the morning-gate presentation — diff, grouped commits, run summary — moved
-  onto the forge. It is delivery, **not ratification**; the loop never
+  forced) and opens **one ready-for-review PR** `integration → base`. That PR
+  *is* the morning-gate presentation — diff, grouped commits, run summary —
+  moved onto the forge. It is delivery, **not ratification**; the loop never
   merges, in any phase.
+- **Draft/ready lifecycle (ready-by-default amendment 2026-07-20).** The PR is
+  opened **ready for review by default**, because a Draft is inert to required
+  status checks and review-request automation — a Draft-delivered PR could not
+  receive the review it was delivered for until you un-drafted it by hand. To
+  keep the pre-2026-07-20 "review material, not a request" framing, opt back
+  into a **Draft** with `gate-pr --draft` (per run) or `"gate_pr_draft": true`
+  in the scenarios `loop` block (per target). Whichever you choose, the PR is a
+  *proposal awaiting review, never a conclusion*; the conclusion (the merge) is
+  the Human Gate and never happens here. Re-running `gate-pr` reconciles an
+  existing PR's draft status to the intended one (idempotently, via
+  `gh pr ready` / `gh pr ready --undo`) — it never opens a second PR.
 - **The Human Gate is PR approval + merge.** Review the PR as you would the
   step-1 diff; the intended merge method is **"Create a merge commit"**, so
   the loop's intent-scoped commit groups stay visible in the base's history —
@@ -669,8 +680,9 @@ Per-hunk verdicts (closed set):
   (`gate-push`, refusing a diverged remote rather than force-pushing) — a
   local-only merge leaves dangling issue links and a diverged remote. On a
   PR-protected target (`"gate": "pr"`) the approval takes the form of PR
-  approval + merge on the forge: the loop ends at delivering one Draft PR
-  (`gate-pr` — review material, never ratification; owner ruling 2026-07-17),
+  approval + merge on the forge: the loop ends at delivering one ready-for-review
+  PR (`gate-pr` — a review request, never ratification; owner ruling 2026-07-17,
+  ready-by-default amendment 2026-07-20; Draft available opt-in),
   it never auto-merges, and settlement is derived by read-only surfaces from
   the forge and the current base — no human closing command. Phases
   differ only in supervision and cap — one code path, Phase-3-ready from the
