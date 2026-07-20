@@ -144,4 +144,39 @@ jcheck base-freshness < /tmp/doc4.json | grep -q "fail closed" \
   || fail "--allow-stale-base must make a stale base acceptable, as in init"
 pass "base freshness: stale base fails; --allow-stale-base mirrors init's override"
 
+# --- test-cmd-artifacts: base-committed tracked artifact (#242 / F111) --------
+# A regenerable file committed to the base (a *.pyc) that test_cmd rewrites is
+# TRACKED, so it shows as MODIFIED (not untracked) and makes the gate's
+# `git worktree remove` refuse at the last step. doctor must predict it, name
+# the path, and stay non-fatal (ok:true, ready unaffected).
+artrepo="$tmp/artrepo"
+git init -q "$artrepo" && git -C "$artrepo" config user.email t@e \
+  && git -C "$artrepo" config user.name t && git -C "$artrepo" checkout -qb main
+mkdir -p "$artrepo/pkg/__pycache__"
+printf 'v0\n' > "$artrepo/pkg/__pycache__/m.pyc"      # committed build artifact
+echo real > "$artrepo/f" && git -C "$artrepo" add -A && git -C "$artrepo" commit -qm base
+DA=("$loop" --target da doctor --loop-repo "$artrepo" --cap 2 --wall-time 3600 \
+    --token-budget 1000 --attempt-cap 2 \
+    --test-cmd 'printf regen > pkg/__pycache__/m.pyc')
+docart="$("${DA[@]}")"
+echo "$docart" | jcheck test-cmd-artifacts | jget '["ok"]' | grep -q True \
+  || fail "the artifact check is informational (ok:true), never fatal (#242)"
+echo "$docart" | jcheck test-cmd-artifacts | grep -q "pkg/__pycache__/m.pyc" \
+  || fail "a base-committed tracked artifact must be named: $(echo "$docart" | jcheck test-cmd-artifacts)"
+echo "$docart" | jcheck test-cmd-artifacts | grep -q "worktree remove" \
+  || fail "the tracked-artifact detail must name the gate's worktree-remove refusal"
+echo "$docart" | jget '["ready"]' | grep -q True \
+  || fail "a base-committed artifact must not block readiness (#242: not a breaker)"
+[ "$(git -C "$artrepo" worktree list | wc -l)" = "1" ] \
+  || fail "the artifact check leaked its throwaway worktree"
+pass "test-cmd-artifacts: base-committed tracked artifact predicted, named, non-fatal (#242)"
+
+# --- test-cmd-artifacts: untracked residue still reported distinctly ----------
+DB=("$loop" --target db doctor --loop-repo "$repo" --cap 2 --wall-time 3600 \
+    --token-budget 1000 --attempt-cap 2 \
+    --test-cmd 'mkdir -p __pycache__ && printf x > __pycache__/z.pyc')
+echo "$("${DB[@]}")" | jcheck test-cmd-artifacts | grep -q "untracked artifact" \
+  || fail "untracked shed residue must still be reported as before"
+pass "test-cmd-artifacts: untracked residue path still reported"
+
 echo "ALL PASS"

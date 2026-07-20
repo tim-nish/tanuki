@@ -34,9 +34,11 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
        state written. Checks: required loop config (test_cmd, wall_time_s,
        token_budget, attempt_cap, iterations), base freshness (same guard
        init fails closed on), test_cmd on the base tip (throwaway detached
-       worktree, removed afterward), test-cmd-artifacts (what test_cmd sheds
-       into a pristine checkout — informational; unignored artifacts trip
-       iter-verify's clean-worktree breaker mid-run), policy coverage (which
+       worktree, removed afterward), test-cmd-artifacts (build output test_cmd
+       sheds untracked into a pristine checkout OR regenerates over a base-
+       committed tracked file — informational; the untracked case trips
+       iter-verify's clean-worktree breaker mid-run, the tracked case makes the
+       gate's `git worktree remove` refuse, F111/#242), policy coverage (which
        actionable findings have no policy answer and would DEFER —
        informational), and host cloneability (throwaway clone, removed
        afterward; fatal for hosted targets, a passing note for hostless —
@@ -2689,18 +2691,47 @@ def cmd_doctor(args):
                 # now, while it is one .gitignore line. Informational, never
                 # fatal: the run is still correct, just noisier.
                 rc_s, dirty = git(wt, "status", "--porcelain", "--untracked-files=all")
-                shed = sorted({ln[3:].split("/")[0] for ln in dirty.splitlines()
-                               if ln.startswith("?? ")}) if rc_s == 0 else []
+                _lines = dirty.splitlines() if rc_s == 0 else []
+                shed = sorted({ln[3:].split("/")[0] for ln in _lines
+                               if ln.startswith("?? ")})
+                # F111 / #242: regenerable output COMMITTED to the base before
+                # the run is TRACKED, so test_cmd regenerating it shows as a
+                # modification (` M`), not an untracked `??`. `git worktree
+                # remove` then refuses at the last gate step (morning-gate step
+                # 7) over a file that has nothing to do with the loop's work.
+                # The untracked branch above never saw it. Predict it here too,
+                # name the paths, and state the remedy.
+                tracked = sorted({ln[3:] for ln in _lines
+                                  if not ln.startswith("?? ")
+                                  and is_build_artifact(ln[3:])})
+                if tracked:
+                    detail = (
+                        "test_cmd modifies build artifact(s) TRACKED on the "
+                        "base (committed before the run): %s. Regenerated in "
+                        "every worktree, so `git worktree remove` refuses at "
+                        "the last gate step (morning-gate step 7) over files "
+                        "unrelated to the loop's work — not a breaker: use "
+                        "`git worktree remove --force`, and for the durable fix "
+                        "stop tracking them on the base (`git rm -r --cached "
+                        "<path>` + .gitignore), which also clears the gate-push "
+                        "artifact refusal for every later run"
+                        % ", ".join(tracked)
+                        + ("; test_cmd also sheds untracked artifact(s): %s "
+                           "(.gitignore them too)" % ", ".join(shed)
+                           if shed else ""))
+                elif shed:
+                    detail = ("test_cmd leaves untracked artifact(s) in a "
+                              "pristine checkout: %s — .gitignore them, or "
+                              "iter-verify's clean-worktree breaker will fire "
+                              "mid-run after a commit, far from this cause"
+                              % ", ".join(shed))
+                else:
+                    detail = "test_cmd leaves no untracked or tracked artifacts"
                 checks.append({
                     "check": "test-cmd-artifacts", "ok": True,
                     "artifacts": shed,
-                    "detail": ("test_cmd leaves no untracked artifacts"
-                               if not shed else
-                               "test_cmd leaves untracked artifact(s) in a "
-                               "pristine checkout: %s — .gitignore them, or "
-                               "iter-verify's clean-worktree breaker will fire "
-                               "mid-run after a commit, far from this cause"
-                               % ", ".join(shed)),
+                    "tracked_artifacts": tracked or None,
+                    "detail": detail,
                 })
             finally:
                 git(repo, "worktree", "remove", "--force", wt)
