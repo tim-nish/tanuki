@@ -32,9 +32,9 @@ grep -q '"results": \[\]' "$root/demo/events/manual-20260101/manifest.json" \
 pass "ingest writes a minimal manual manifest"
 
 # --- ingest-note also writes a manifest ---------------------------------------
+# F184: the note's run id is time-stamped (manual-<YYYYMMDD>-<HHMMSS>).
 "${LG[@]}" ingest-note --text "a manual observation" >/dev/null
-noteday="manual-$(date +%Y%m%d)"
-[ -f "$root/demo/events/$noteday/manifest.json" ] \
+ls "$root/demo/events/manual-$(date +%Y%m%d)"-*/manifest.json >/dev/null 2>&1 \
   || fail "ingest-note did not write a run manifest"
 pass "ingest-note writes a manifest"
 

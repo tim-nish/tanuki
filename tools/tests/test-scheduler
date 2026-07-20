@@ -175,7 +175,9 @@ assert r6["actionable"] == 1 and r6["findings"] == ["F2"], r6
 kinds = [(t["run"], t["to"]) for t in d["transitions"]]
 assert ("r002", "regression") in kinds and ("r006", "active") in kinds, kinds
 reasons = " ".join(t["reason"] for t in d["transitions"])
-assert "consecutive low-yield" in reasons and "actionable finding" in reasons
+# F203: the demotion reason counts driven executions, not scheduling rounds
+assert "consecutive driven low-yield executions" in reasons \
+    and "actionable finding" in reasons
 PY
 pass "history (--scenario): exact per-execution yield, transition log with reasons"
 
@@ -216,5 +218,173 @@ grep -q "canonical location: $TANUKI_ROOT/scenarios/demo.scenarios.json" /tmp/mi
 grep -q "templates/tanuki/ is NOT read" /tmp/miss.txt \
   || fail "missing-config error should warn the undocumented path is not read"
 pass "loader fails closed on a missing scenarios config, naming the canonical path"
+
+# --- F201/F202/F205: plan JSON clarity ----------------------------------------
+# tiebreak named on a cap cut among equal last_planned; verify reason names a
+# regression-pool pick; regression_pool lists proximity for every pool member.
+P=("$sched" --target p)
+cat > "$tmp/p.json" <<'EOF'
+{"scenarios":[{"id":"x","charter":"c","prompt":"p"},
+              {"id":"y","charter":"c","prompt":"p"},
+              {"id":"z","charter":"c","prompt":"p"}]}
+EOF
+"${P[@]}" sync --scenarios "$tmp/p.json" >/dev/null      # first sync: all active
+"${P[@]}" plan --scenarios "$tmp/p.json" --max 2 --dry-run | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+tb = {t["group"]: t["rule"] for t in r.get("tiebreak", [])}
+assert "active" in tb and "insertion order" in tb["active"], r.get("tiebreak")
+' || fail "a --max cut among equal last_planned must emit the tie-break rule"
+pass "F201: cap cut among equal last_planned names the applied tie-break"
+for q in q1 q2; do                                       # two quiet drives of x
+  mkdir -p "$TANUKI_ROOT/p/events/$q"
+  echo '{"results":[{"scenario":"x","events":2}]}' \
+    > "$TANUKI_ROOT/p/events/$q/manifest.json"
+  "${P[@]}" record-run --run "$q" >/dev/null
+done                                                     # -> x demoted
+"$ledger" --target p init >/dev/null
+"$ledger" --target p upsert-finding --title "x bug" --kind gap \
+  --evidence "q1/x#1" >/dev/null
+"$ledger" --target p set-status --id F1 --status accepted >/dev/null
+"${P[@]}" plan --scenarios "$tmp/p.json" --max 3 --dry-run | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+sel = {e["finding"]: e for e in r["verify_selection"]}
+assert sel["F1"]["scenario"] == "x", sel
+assert sel["F1"]["reason"].endswith("(from regression pool)"), sel
+pool = {e["scenario"]: e for e in r["regression_pool"]}
+assert pool["x"] == {"scenario": "x", "since_regression": 0,
+                     "runs_until_due": 3}, pool
+' || fail "pool-state verify reason / regression_pool proximity wrong"
+pass "F202/F205: verify reason names the pool pick; regression_pool shows proximity"
+
+# --- F222: the scenarios file's own target field is consulted (warn only) -----
+cat > "$tmp/other.json" <<'EOF'
+{"target": "somebody-else",
+ "scenarios": [{"id":"w1","charter":"c","prompt":"p"}]}
+EOF
+"$sched" --target w sync --scenarios "$tmp/other.json" >/tmp/f222.json 2>/tmp/f222.err
+grep -q "somebody-else" /tmp/f222.err && grep -q "'w'" /tmp/f222.err \
+  || fail "target mismatch must warn naming both values: $(cat /tmp/f222.err)"
+grep -q "CLI value wins" /tmp/f222.err || fail "F222 warning must state CLI wins"
+jget '["first_sync"]' < /tmp/f222.json | grep -q True \
+  || fail "F222 must warn, never block"
+"$sched" --target w plan --scenarios "$tmp/other.json" --dry-run \
+  >/dev/null 2>/tmp/f222p.err
+grep -q "somebody-else" /tmp/f222p.err || fail "plan must also warn on mismatch"
+pass "F222: file target vs --target mismatch warns (both named; CLI wins)"
+
+# --- F94: later sync into colliding pre-existing state warns ------------------
+C=("$sched" --target coll)
+cat > "$tmp/proj1.json" <<'EOF'
+{"scenarios": [{"id":"p1-a","charter":"c","prompt":"p"},
+               {"id":"p1-b","charter":"c","prompt":"p"}]}
+EOF
+"${C[@]}" sync --scenarios "$tmp/proj1.json" >/dev/null 2>&1
+cat > "$tmp/proj2.json" <<'EOF'
+{"scenarios": [{"id":"p2-x","charter":"c","prompt":"p"}]}
+EOF
+"${C[@]}" sync --scenarios "$tmp/proj2.json" >/tmp/f94.json 2>/tmp/f94.err
+grep -q "pre-existing scheduler state" /tmp/f94.err \
+  || fail "colliding sync must warn on stderr: $(cat /tmp/f94.err)"
+grep -q "p1-a, p1-b" /tmp/f94.err \
+  || fail "F94 warning must name the existing ids absent from this file"
+grep -q "proj1.json" /tmp/f94.err \
+  || fail "F94 warning must name the prior scenarios-file path"
+jget '["warning"]' < /tmp/f94.json | grep -q "pre-existing" \
+  || fail "F94 warning must also appear in the JSON"
+jget '["first_sync"]' < /tmp/f94.json | grep -q False \
+  || fail "F94 must never block the sync"
+# re-sync of the SAME file into matching state stays silent
+"$sched" --target quiet sync --scenarios "$tmp/proj1.json" >/dev/null 2>&1
+"$sched" --target quiet sync --scenarios "$tmp/proj1.json" >/dev/null 2>/tmp/f94q.err
+[ -s /tmp/f94q.err ] && fail "matching re-sync must not warn: $(cat /tmp/f94q.err)"
+pass "F94: sync collision (stale ids / different file) warns; clean re-sync silent"
+
+# --- F218: record-run with no manifest warns loudly, still records ------------
+r218="$("${S[@]}" record-run --run ghost-run 2>/tmp/f218.err)"
+echo "$r218" | jget '["ok"]' | grep -q True || fail "no-manifest record must stay ok:true"
+echo "$r218" | jget '["warning"]' \
+  | grep -q "no manifest found for run ghost-run" \
+  || fail "F218: JSON must carry the no-manifest warning: $r218"
+echo "$r218" | jget '["warning"]' | grep -q "cannot be re-recorded" \
+  || fail "F218 warning must say the record is permanent"
+grep -q "no manifest found for run ghost-run" /tmp/f218.err \
+  || fail "F218 warning must also hit stderr"
+"${S[@]}" record-run --run ghost-run 2>/tmp/f218b.err | jget '["already_recorded"]' \
+  | grep -q ghost-run || fail "no-manifest run must still be recorded"
+[ -s /tmp/f218b.err ] && fail "already-recorded no-op must not re-warn"
+pass "F218: manifest-less record-run keeps ok:true but warns in JSON and stderr"
+
+# --- F219: inline findings in a manifest result are named as ignored ----------
+mkdir -p "$TANUKI_ROOT/t/events/r008"
+echo '{"results":[{"scenario":"b","events":2,"findings":["inline attempt"]}]}' \
+  > "$TANUKI_ROOT/t/events/r008/manifest.json"
+"${S[@]}" record-run --run r008 >/dev/null 2>/tmp/f219.err
+grep -q "inline findings are ignored" /tmp/f219.err \
+  || fail "F219: yield-shaped result keys must warn: $(cat /tmp/f219.err)"
+grep -q "ledger evidence pointers" /tmp/f219.err \
+  || fail "F219 warning must point at the real yield source"
+"${S[@]}" record-run --help > /tmp/f219h.txt
+grep -q '"results"' /tmp/f219h.txt && grep -q "evidence pointer" /tmp/f219h.txt \
+  || fail "F219: record-run --help must document the consumed manifest shape"
+grep -qi "inline" /tmp/f219h.txt \
+  || fail "F219: --help must state inline findings are not read"
+pass "F219: manifest schema in --help; inline-findings attempt flagged on stderr"
+
+# --- F220: an empty plan explains itself ---------------------------------------
+E=("$sched" --target empt)
+cat > "$tmp/e.json" <<'EOF'
+{"scenarios": [{"id":"e1","charter":"c","prompt":"p"}]}
+EOF
+"${E[@]}" sync --scenarios "$tmp/e.json" >/dev/null
+for r in e001 e002; do                                   # two quiet drives -> regression
+  mkdir -p "$TANUKI_ROOT/empt/events/$r"
+  echo '{"results":[{"scenario":"e1","events":2}]}' \
+    > "$TANUKI_ROOT/empt/events/$r/manifest.json"
+  "${E[@]}" record-run --run "$r" >/dev/null
+done
+"${E[@]}" plan --scenarios "$tmp/e.json" --dry-run | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["plan"] == [], r["plan"]
+assert "all 1 scenarios resting in regression cooldown" in r["note"], r["note"]
+assert "nearest due in 3 runs" in r["note"] and "regression_pool" in r["note"], r["note"]
+' || fail "empty plan (regression cooldown) must carry an explanatory note"
+# persisted (non-dry-run) record carries the same note
+"${E[@]}" plan --scenarios "$tmp/e.json" --run e003 >/dev/null
+"${E[@]}" history --json | python3 -c '
+import json, sys
+p = json.load(sys.stdin)["selection_history"][-1]
+assert p["plan"] == [] and "regression cooldown" in p["note"], p
+' || fail "empty-plan note must persist in the selection history"
+pass "F220: empty plan names the cause (cooldown + nearest due) in a top-level note"
+
+# --- F221: history orders runs chronologically, not lexically -----------------
+K=("$sched" --target chron)
+cat > "$tmp/k.json" <<'EOF'
+{"scenarios": [{"id":"g","charter":"c","prompt":"p"}]}
+EOF
+"${K[@]}" sync --scenarios "$tmp/k.json" >/dev/null
+# lexically 'manual-…' sorts AFTER any dated id; chronologically it is older
+for r in manual-20260105-120000 20260401-zz; do
+  mkdir -p "$TANUKI_ROOT/chron/events/$r"
+  echo '{"results":[{"scenario":"g","events":2}]}' \
+    > "$TANUKI_ROOT/chron/events/$r/manifest.json"
+  "${K[@]}" record-run --run "$r" >/dev/null
+done
+"${K[@]}" history --scenario g --json | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+runs = [e["run"] for e in d["executions"]]
+assert runs == ["manual-20260105-120000", "20260401-zz"], runs
+assert d["last_execution"]["run"] == "20260401-zz", d["last_execution"]
+' || fail "history --scenario must sort executions by embedded date (F221)"
+"${K[@]}" history --json | python3 -c '
+import json, sys
+rows = {r["scenario"]: r for r in json.load(sys.stdin)["scenarios"]}
+assert rows["g"]["last_run"] == "20260401-zz", rows["g"]
+' || fail "repo-wide history last_run must be chronological (F221)"
+pass "F221: last_execution/last_run keyed on the embedded YYYYMMDD date"
 
 echo "all checks passed"

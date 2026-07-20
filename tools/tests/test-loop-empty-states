@@ -61,6 +61,10 @@ out="$("${L[@]}" dashboard)"
 # drive:no-iteration-started
 grep -q "latest drive: no iteration has started yet — expected" <<<"$out" \
   || fail "drive:no-iteration-started must read as expected: $(grep 'latest drive' <<<"$out")"
+# F166: every EXPECTED render carries the verdict tag in as many words, not
+# just a reason the reader must classify themselves.
+grep -q "latest drive: .*(expected for this run's state)" <<<"$out" \
+  || fail "expected states must carry the verdict tag (F166): $(grep 'latest drive' <<<"$out")"
 grep -q "A drive is one tanuki-drive pipeline run" <<<"$out" \
   || fail "the 'drive' term must stay defined for a cold reader (F46)"
 pass "drive:no-iteration-started — expected, term defined"
@@ -108,6 +112,9 @@ grep -q "GAP" <<<"$s3" \
   || fail "#66: no matrix AFTER runs is a gap, not 'expected': $s3"
 grep -q "cannot have chosen anything" <<<"$s3" \
   || fail "the gap reason must say why it matters: $s3"
+# F166: a GAP with a closing command names it inside the GAP tag itself.
+grep -qF "(GAP — \`/tanuki t init (attended slash command)\`)" <<<"$s3" \
+  || fail "a gap must name the command that closes it in the GAP tag (F166): $s3"
 pass "scheduler:never-synced-after-runs — GAP (the distinction #66 asked for)"
 
 # run:commits-not-recorded — a run predating story 1.10's subject capture: a

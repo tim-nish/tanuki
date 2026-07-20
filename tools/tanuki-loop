@@ -45,10 +45,13 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
        out of nowhere (F91).
        Not-ready follows the breaker convention ({"breaker": …} + exit 3)
        but persists nothing — there is no run state to write.
+       Minimal copy-pasteable scenarios-file skeleton (F132):
+         {"target": "<slug>", "plugin": "<path>",
+          "loop": {"test_cmd": "<shell cmd>", "iterations": N,
+                   "wall_time_s": N, "token_budget": N, "attempt_cap": N}}
        `doctor --help` carries the fullest scenarios-file documentation
-       (the exact "loop"-block JSON shape, the canonical path formula, and
-       per-key CLI equivalents) — read it before writing a scenarios file
-       (F132).
+       (the canonical path formula and per-key CLI equivalents) — read it
+       before writing one.
   iter-start                     cap / wall-time / external-modification breakers;
                                  records the iteration start SHA + ledger snapshot
   iter-verify [--no-patch] [--allow-artifact PATH]
@@ -145,7 +148,13 @@ rolled_back) before the next iter-start, and record-cycle refuses an open
 iteration — a skipped check is itself a breaker, never a silent pass.
 
 Breakers — what actually trips each one, and where (every breaker prints
-{"breaker": …, "hint": …} + exit 3; the hint names the remedy):
+{"breaker": …, "hint": …} + exit 3; the hint names the remedy).
+iter-start evaluates its breakers in a fixed PRECEDENCE — sequencing, then
+cap, then wall-time, then external modification — and the FIRST match wins:
+a tripped cap masks an external modification that would also have fired
+(deliberate — a capped run has no next iteration to protect — but it means
+a capped run's worktree is no longer guarded; re-init for a fresh guarded
+run, F93):
   iteration cap reached      iter-start, when len(iterations) >= cap. NOTE:
                              rolled-back iterations count toward the cap — a
                              rollback does not give the attempt back.
@@ -197,10 +206,13 @@ TANUKI_ROOT = os.environ.get("TANUKI_ROOT", os.path.expanduser("~/.tanuki"))
 
 
 def git(repo, *args):
-    """Run git in <repo>; return (returncode, stdout-stripped)."""
+    """Run git in <repo>; return (returncode, stdout minus trailing newlines).
+    ONLY trailing newlines are stripped (F186): a full strip() ate the first
+    `status --porcelain` line's leading status column (" M app.py" ->
+    "M app.py"), so every ln[3:] parser truncated the first filename."""
     r = subprocess.run(["git", "-C", repo, *args],
                        capture_output=True, text=True)
-    return r.returncode, (r.stdout or "").strip()
+    return r.returncode, (r.stdout or "").rstrip("\n")
 
 
 def loop_dir(target, run):
@@ -265,11 +277,26 @@ def open_scenarios(path, target):
     return open(p, encoding="utf-8")
 
 
-def breaker_hint(reason):
+def breaker_hint(reason, worktree=None):
     """The concrete next step for a breaker, so the {"breaker": …} JSON names
     its remedy instead of forcing the operator to read the source (F4, F53).
-    Matched on the reason text; None when no specific remedy applies."""
+    Matched on the reason text; None when no specific remedy applies.
+    `worktree` (when the caller has state) lets a hint name the loop worktree
+    path — F131: a commit landed in the base repo satisfies the operator but
+    never the loop, and the hint must say where to look."""
     r = reason.lower()
+    # Cap/wall-time first: the cap reason names the checks it shadowed
+    # ("external modification" among them, F93), and matching that phrase
+    # first would hand a capped run the recover hint.
+    if "iteration cap reached" in r or "wall-time" in r:
+        # F93 (attempt 3): the skipped-checks note rides the HINT too — some
+        # surfaces show only the hint, and the fact that later precedence
+        # checks never ran must survive every rendering of the stop.
+        return ("the run hit its ceiling — proceed to the morning gate; no "
+                "more iterations run. Later iter-start checks (external "
+                "modification among them) were not evaluated — a capped "
+                "run's worktree is no longer guarded; re-init for a fresh "
+                "guarded run (F93)")
     if "external modification" in r:
         return ("run `tanuki-loop --target <t> recover` and choose --restore "
                 "(discard the external change, reset to the last verified HEAD) "
@@ -293,20 +320,24 @@ def breaker_hint(reason):
             return ("close the open iteration with `iter-verify` (or "
                     "`rollback`) before recording the cycle")
         return "close the open iteration with `iter-verify` or `rollback` first"
-    if "iteration cap reached" in r or "wall-time" in r:
-        return "the run hit its ceiling — proceed to the morning gate; no more iterations run"
     if "test failure" in r:
         return "a test_cmd failed in the loop worktree — inspect it, then fix or `rollback`"
     if "worktree not clean after commit" in r:
         return ("test_cmd likely left untracked artifacts (e.g. __pycache__, "
                 ".pyc, coverage files) — add them to .gitignore or clean them; "
                 "the dirty paths are named in the breaker reason")
-    if "HEAD == start SHA but a patch was expected" in r:
+    if "head == start sha but a patch was expected" in r:
+        # (matched lowercase: `r` is reason.lower() — the original mixed-case
+        # match here never fired, handing this breaker the generic hint)
         # F131: the no-patch case has a concrete remedy — don't fall through to
         # the generic "inspect the worktree" hint the other invariant failures
-        # get. The iteration simply committed nothing.
+        # get. The iteration simply committed nothing — OR committed somewhere
+        # the loop never looks (F131 residual: a commit made in the base repo
+        # instead of the loop worktree reads exactly like this).
         return ("this iteration produced no commit — stage the work and "
-                "commit it; or re-run `iter-verify --no-patch` if no change was "
+                "commit it; if you committed, check it landed in the loop "
+                f"worktree {worktree or '<worktree>'}, not the base repo — "
+                "and use `iter-verify --no-patch` when no change was "
                 "expected this iteration; or `rollback` to undo the iteration")
     if "build artifacts committed" in r:
         # Check (e) has a concrete remedy — never the generic "inspect" hint
@@ -326,9 +357,23 @@ def breaker_hint(reason):
     return None
 
 
+def with_skipped_checks_note(reason):
+    """F93 (attempt 3): EVERY emission of the iteration-cap breaker carries
+    the skipped-checks note. iter-start writes it at the source, but a
+    last_breaker persisted by a pre-note build resurfaces BARE through the
+    surfaces that re-emit the stored reason (status, dashboard, _health,
+    run_verdict) — that is exactly how a driven session met a bare
+    'cap reached' after the source-site fix. Append on render when absent;
+    a reason that already states it passes through untouched."""
+    if "iteration cap reached" in reason and "not evaluated" not in reason:
+        return (reason + " — later checks (wall-time, external modification) "
+                "were not evaluated (F93)")
+    return reason
+
+
 def breaker(state, reason):
     # Persist machine-readably so a dashboard can answer "why did it stop?"
-    hint = breaker_hint(reason)
+    hint = breaker_hint(reason, worktree=state.get("worktree"))
     entry = {"reason": reason, "at": time.strftime("%Y-%m-%d %H:%M:%S")}
     if hint:
         entry["hint"] = hint
@@ -698,7 +743,9 @@ def drift_note(target, repo):
                  if worst else "none has fallen behind the base yet")
     return (f"note: {n} unresolved loop branch(es) — integration branches "
             f"holding work that never merged; {staleness}. "
-            f"`tanuki-loop --target {target} reconcile` reports what to do "
+            f"Run the `/tanuki-loop {target} reconcile` slash command "
+            f"(a Claude Code slash command, run in a Claude Code session — "
+            f"not a subcommand of this tool) to report what to do "
             f"with them.")
 
 
@@ -767,7 +814,9 @@ def cmd_unresolved(args):
     print("\n  These are SIGNALS, not verdicts: whether a change is already "
           "landed,\n  superseded, conflicting or still applicable is judgment "
           "— and a subject\n  line is a claim, not evidence. "
-          f"`tanuki-loop --target {args.target} reconcile` classifies them.")
+          f"The `/tanuki-loop {args.target} reconcile` slash command "
+          "(a Claude Code\n  slash command, run in a Claude Code session — "
+          "not a subcommand of this\n  tool) classifies them.")
 
 
 def write_unresolved_brief(target, payload):
@@ -780,10 +829,18 @@ def write_unresolved_brief(target, payload):
              f"_Generated by `tanuki-loop --target {target} unresolved`. "
              f"Signals only — the verdicts are the reconcile pass's._", ""]
     if not payload["branches"]:
-        lines += [payload["empty_state"]["reason"], ""]
+        # F166: the brief carries the same expected-vs-gap verdict the
+        # dashboard renders — a bare reason states the emptiness without
+        # saying whether it is normal.
+        es = payload["empty_state"]
+        tag = ("expected for this run's state" if es["expected"]
+               else "GAP" + (f" — `{es['next']}`" if es["next"] else ""))
+        lines += [f"{es['reason']} ({tag})", ""]
     else:
         lines += [f"**{len(payload['branches'])} branch(es) hold work that "
-                  f"never merged.** `tanuki-loop --target {target} reconcile` "
+                  f"never merged.** The `/tanuki-loop {target} reconcile` "
+                  f"slash command (a Claude Code slash command, run in a "
+                  f"Claude Code session — not a subcommand of this tool) "
                   f"reports what to do with each.", ""]
         for r in payload["branches"]:
             lines.append(f"## {r['branch']}")
@@ -2134,6 +2191,30 @@ def cmd_init(args):
         base_note = (f"{n_behind} commit(s) behind {upstream} — proceeding "
                      "under --allow-stale-base"
                      + (f"; {base_note}" if base_note else ""))
+    # F171: a transient/local-only branch (no upstream) or a non-default
+    # branch can be recorded as the loop base without a word — the operator
+    # only discovers it at gate time. Warn (never stop: the loop still
+    # dogfoods the ref the operator named) when the resolved base has no
+    # upstream or differs from the repo's default branch (origin/HEAD, when
+    # resolvable). The warning rides init's output AND state.json so a later
+    # reader of the run's init record sees it too.
+    warn_parts = []
+    if not upstream:
+        warn_parts.append(
+            f"base '{base}' has no upstream — it may be a transient/"
+            "local-only branch recorded as the loop base")
+    rc_d, dflt = git(repo, "symbolic-ref", "--short",
+                     "refs/remotes/origin/HEAD")
+    default_branch = dflt.split("/", 1)[-1] if rc_d == 0 and dflt else None
+    if default_branch and base != default_branch:
+        warn_parts.append(
+            f"base '{base}' is not the repo's default branch "
+            f"('{default_branch}' per origin/HEAD)")
+    base_warning = None
+    if warn_parts:
+        base_warning = ("; ".join(warn_parts)
+                        + " — the loop dogfoods the ref you named; this is "
+                          "a warning, not a stop (F171)")
     # Sweep merged integration branches from prior runs (issue #6) BEFORE
     # cutting this run's branch — the fresh branch starts at the base tip, so
     # doing this after would make it a deletion candidate. The next init for a
@@ -2214,6 +2295,10 @@ def cmd_init(args):
         # reader can see exactly what was dogfooded (issue #2).
         "base_tip": "local", "base_upstream": upstream,
         "base_behind": n_behind,
+        # F171: init's non-fatal base warning (no upstream / non-default
+        # branch), kept in the run's init record — None when the base looked
+        # ordinary.
+        "init_warning": base_warning,
         # Host fixture (spec-host-snapshot): the pinned clone every drive
         # sources from, and its HEAD. None for a hostless target. After init
         # the live host is out of scope — never read (except the finish drift
@@ -2234,6 +2319,8 @@ def cmd_init(args):
                  + (f", {n_behind} behind {upstream}" if n_behind else "")
                  + f") in worktree {worktree}; cap={cap} phase={args.phase}"
                  + (f" — {base_note}" if base_note else ""))
+    if base_warning:
+        audit(state, f"init WARNING: {base_warning}")
     if host:
         audit(state, f"host fixture pinned @ {host_base_sha[:12]} from {host} "
                      f"-> {host_fixture_path}"
@@ -2256,7 +2343,8 @@ def cmd_init(args):
     # base_upstream is the F100/F103 footgun.
     out({"run": run, "integration_branch": integration, "worktree": worktree,
          "base": base, "base_sha": base_sha, "base_upstream": upstream,
-         "base_behind": n_behind, "branch_cleanup": cleaned,
+         "base_behind": n_behind, "warning": base_warning,
+         "branch_cleanup": cleaned,
          "host_fixture_path": host_fixture_path, "host_base_sha": host_base_sha,
          "host_freshness": host_note,
          "entry_fixtures": pinned_fixtures or None,
@@ -2401,9 +2489,10 @@ def cmd_doctor(args):
         # loop block — existence is the signal that needs a manual ls today.
         _canon = os.path.join(
             TANUKI_ROOT, "scenarios", f"{args.target}.scenarios.json")
+        _canon_exists = os.path.isfile(_canon)
         loop_check["scenarios_file"] = {
             "canonical": _canon,
-            "canonical_file_exists": os.path.isfile(_canon),
+            "canonical_file_exists": _canon_exists,
             "note": ("put the \"loop\" block in this file; its name must match "
                      "--target. doctor/init do NOT auto-load it — pass it with "
                      "--scenarios. $TANUKI_ROOT (default ~/.tanuki) sets the "
@@ -2416,6 +2505,42 @@ def cmd_doctor(args):
                      "cross-session slug collision this canonical location "
                      "is prone to (F94)."),
         }
+        if _canon_exists:
+            # F176: canonical_file_exists alone gave the operator nothing to
+            # judge WHOSE file it is. Surface the three signals that judgment
+            # needs — the file's age (a days-old mtime suggests a leftover),
+            # its declared "target", and whether it carries a "loop" block at
+            # all — so deciding own-file vs. another session's leftover needs
+            # no manual stat/cat.
+            try:
+                _age_s = int(time.time() - os.path.getmtime(_canon))
+            except OSError:
+                _age_s = None
+            _existing = {"mtime_age_s": _age_s, "target": None,
+                         "has_loop_block": None}
+            try:
+                with open(_canon) as _f:
+                    _doc = json.load(_f)
+                if isinstance(_doc, dict):
+                    _existing["target"] = _doc.get("target")
+                    _existing["has_loop_block"] = isinstance(
+                        _doc.get("loop"), dict)
+                    _existing["detail"] = (
+                        "existing canonical file: mtime %s ago, target=%r, "
+                        "loop block %s — check these against your session "
+                        "before trusting or overwriting it" % (
+                            "%ds" % _age_s if _age_s is not None else "?",
+                            _existing["target"],
+                            "present" if _existing["has_loop_block"]
+                            else "ABSENT"))
+                else:
+                    _existing["detail"] = ("existing canonical file parses "
+                                           "but is not a JSON object")
+            except (OSError, ValueError):
+                _existing["detail"] = ("existing canonical file could not be "
+                                       "read as JSON — likely damaged or "
+                                       "mid-write by another session")
+            loop_check["scenarios_file"]["existing_file"] = _existing
     checks.append(loop_check)
 
     # 2. Base freshness — the same measurement init fails closed on (issue #2).
@@ -2446,14 +2571,16 @@ def cmd_doctor(args):
         # independent fault (F112): with no test_cmd there is nothing to run,
         # so fixing loop-config fixes this too. The breaker summary reads this
         # field and names only root causes, so the operator sees one problem to
-        # fix rather than two unrelated ones.
+        # fix rather than two unrelated ones. The detail REFERENCES the root
+        # cause rather than restating it (F112 residual): the relationship is
+        # already carried structurally by derived_from / root_causes /
+        # derived_failures, and a third prose copy is what the operator had
+        # to read three times.
         checks.append({"check": "baseline-test", "ok": False,
                        "derived_from": "loop-config",
-                       "detail": "no test_cmd to check — configure one first "
-                                 "(the loop's test breaker is the headless "
-                                 "run's only regression gate). This check "
-                                 "fails only because loop-config is "
-                                 "incomplete — fixing that fixes this."})
+                       "detail": "no test_cmd to check — a consequence of "
+                                 "the loop-config failure (see root_causes); "
+                                 "fixing that fixes this too"})
         # Report the artifact check even when it cannot run. A check that shows
         # up only in the ready report looks like it appeared from nowhere
         # between two runs (F91) — the fixed skeleton the dashboard already
@@ -2482,8 +2609,16 @@ def cmd_doctor(args):
                 checks.append({
                     "check": "baseline-test", "ok": r.returncode == 0,
                     "exit": r.returncode,
+                    # F125: a cold operator reads this line, not the JSON
+                    # warning key — a vacuous pass must say so where the pass
+                    # is reported.
                     "detail": (f"test_cmd passes on the base tip "
-                               f"({base_sha[:12]})" if r.returncode == 0 else
+                               f"({base_sha[:12]})"
+                               + (" — but test_cmd looks like a no-op "
+                                  "placeholder, so this pass is vacuous: it "
+                                  "cannot catch regressions"
+                                  if noop_warning else "")
+                               if r.returncode == 0 else
                                f"test_cmd FAILS on the base tip (exit "
                                f"{r.returncode}) — every iteration would trip "
                                "the test breaker on inherited state, not a "
@@ -2821,16 +2956,40 @@ def cmd_iter_start(args):
                      if i.get("phase") == "rolled_back")
         breaker(state, f"iteration cap reached: {n}/{state['cap']} consumed "
                        f"({verified} verified, {rolled} rolled back) — "
-                       f"rolled-back iterations count toward the cap")
+                       f"rolled-back iterations count toward the cap; later "
+                       f"checks (wall-time, external modification) were not "
+                       f"evaluated (F93)")
     if state["wall_limit_s"] and \
             time.time() - state["wall_start"] >= state["wall_limit_s"]:
         breaker(state, "wall-time limit exceeded")
     head = _worktree_head(state)
+    # F152: the breaker message states its own scope — it watches the LOOP
+    # WORKTREE's HEAD and dirty state only, never the base repo (base commits
+    # are out of scope after init — spec-host-snapshot).
     if head != state["head_expected"]:
         breaker(state, f"external modification of the integration worktree "
-                       f"(HEAD {head} != expected {state['head_expected']})")
+                       f"(HEAD {head} != expected {state['head_expected']}) — "
+                       f"this breaker watches the loop worktree's HEAD and "
+                       f"dirty state only, never the base repo")
     if not _clean(state):
-        breaker(state, "external modification: worktree not clean at iteration start")
+        breaker(state, "external modification: worktree not clean at "
+                       "iteration start — this breaker watches the loop "
+                       "worktree's HEAD and dirty state only, never the "
+                       "base repo")
+    # F191: the base ref is only ever needed again at the gate (gate-check/
+    # gate-pr/gate-push), so a base deleted or renamed mid-run used to stay
+    # silent until delivery. Warn here — never a breaker: the base is out of
+    # scope after init (spec-host-snapshot) and the run can proceed.
+    warning = None
+    rc_b, _ = git(state["loop_repo"], "rev-parse", "--verify",
+                  f"{state['base']}^{{commit}}")
+    if rc_b != 0:
+        warning = (f"recorded base ref '{state['base']}' no longer resolves "
+                   "in the loop repo — the run continues (the base is out of "
+                   "scope after init), but the gate (gate-check/gate-pr/"
+                   "gate-push) will need it; restore the branch before "
+                   "delivery (F191)")
+        audit(state, f"WARNING: {warning}")
     n = len(state["iterations"]) + 1
     state["iterations"].append({
         "n": n, "start": head, "end": None, "phase": "started", "removed": [],
@@ -2843,7 +3002,7 @@ def cmd_iter_start(args):
     })
     save_state(state)
     audit(state, f"iter {n}: start @ {head[:12]}")
-    out({"ok": True, "iteration": n, "start_sha": head})
+    out({"ok": True, "iteration": n, "start_sha": head, "warning": warning})
 
 
 def cmd_iter_verify(args):
@@ -3229,6 +3388,38 @@ def cmd_log(args):
     out({"ok": True})
 
 
+def _gate_progress(state, reachable):
+    """Where the morning gate stands, derived READ-ONLY from existing state
+    fields and the reachability fact gate-check just computed (F97) — no new
+    state, no new subcommand. Steps use the morning-gate vocabulary
+    (final-tests, merge, gate-check, gate-push, issues, cleanup); a step with
+    no derivable evidence is OMITTED from the completed set, never guessed —
+    so `next_step` is only the first step this state cannot prove done."""
+    evidence = {
+        "final-tests": bool((state.get("last_test") or {}).get("ok")),
+        # A reachable integration tip proves the merge landed, and proves
+        # this very gate-check passed — the same fact answers both steps.
+        "merge": reachable,
+        "gate-check": reachable,
+        "gate-push": bool(state.get("pushed")),
+        "issues": bool(state.get("materialized")),
+        "cleanup": bool(state.get("finished")),
+    }
+    order = ("final-tests", "merge", "gate-check", "gate-push",
+             "issues", "cleanup")
+    done = [s for s in order if evidence[s]]
+    progress = {
+        "last_completed_step": done[-1] if done else None,
+        "next_step": next((s for s in order if not evidence[s]), None),
+    }
+    if not reachable:
+        progress["blocker"] = ("integration tip not reachable from the base "
+                               "— the merge has not landed (see hint)")
+    else:
+        progress["blocker"] = None
+    return progress
+
+
 def cmd_gate_check(args):
     state = load_state(args.target, args.run)
     repo, base = state["loop_repo"], state["base"]
@@ -3267,9 +3458,11 @@ def cmd_gate_check(args):
                     % (base, state["integration_branch"], base))
         out({"reachable": False, "checked_ref": ref or None,
              "branch_deleted": branch_gone, "run_finished": bool(finished),
+             "gate_progress": _gate_progress(state, False),
              "hint": hint})
         sys.exit(3)
-    res = {"reachable": True, "integration_head": integ_head}
+    res = {"reachable": True, "integration_head": integ_head,
+           "gate_progress": _gate_progress(state, True)}
     if branch_gone and finished:
         res["branch_deleted"] = True
         res["note"] = ("integration branch already deleted by `finish` "
@@ -3343,6 +3536,25 @@ def cmd_gate_push(args):
     out({"pushed": True, "remote": remote, "ref": upstream, "base_sha": head})
 
 
+def _gate_pr_recovery(integ, base):
+    """The documented recovery for ANY gate-pr failure (F192): the command is
+    idempotent, so the operator can finish the delivery by hand and re-run."""
+    return (f"hand-create the PR `{integ} -> {base}` on the forge, then "
+            "re-run gate-pr — it is idempotent and will adopt the existing "
+            "PR")
+
+
+def _classify_gate_pr_failure(err):
+    """Best-effort cause classification from gh/git stderr (F192): the raw
+    text stays in the payload; this only names the likely bucket."""
+    e = (err or "").lower()
+    if "base" in e and any(t in e for t in
+                           ("not found", "does not exist", "invalid",
+                            "no such", "unknown", "must be a branch")):
+        return "base ref not found on forge"
+    return "other"
+
+
 def cmd_gate_pr(args):
     """Deliver a finished run's review material as ONE Draft PR
     (spec-tanuki-loop "PR-protected targets"). For a base branch that refuses
@@ -3407,7 +3619,13 @@ def cmd_gate_pr(args):
     if rc_p != 0:
         audit(state, f"gate-pr: push of '{integ}' to '{remote}' failed "
                      f"(not forced): {err}")
+        # F192: a failure names what was attempted (base + integration
+        # branch), the likely cause, and the documented recovery — never just
+        # the raw stderr.
         out({"created": False, "pushed": False,
+             "base": base, "integration_branch": integ,
+             "cause": "push failure",
+             "recovery": _gate_pr_recovery(integ, base),
              "hint": f"push of '{integ}' to '{remote}' failed (not forced; "
                      "the local branch is intact): " + err})
         sys.exit(3)
@@ -3452,7 +3670,13 @@ def cmd_gate_pr(args):
                      "--head", integ, "--title", title, "--body", body)
         if rc_c != 0:
             audit(state, f"gate-pr: `gh pr create` failed: {o}")
+            # F192: name the attempted refs, classify the cause from the gh
+            # stderr (best-effort), and state the recovery — the generic gh
+            # text alone left the operator without a next action.
             out({"created": False, "pushed": True,
+                 "base": base, "integration_branch": integ,
+                 "cause": _classify_gate_pr_failure(o),
+                 "recovery": _gate_pr_recovery(integ, base),
                  "hint": "the branch is pushed but `gh pr create` failed — "
                          "local state is intact and gate-pr is idempotent; "
                          "fix the cause and re-run: " + o})
@@ -3461,14 +3685,49 @@ def cmd_gate_pr(args):
         tail = url.rstrip("/").rsplit("/", 1)[-1]
         pr = {"number": int(tail) if tail.isdigit() else None, "url": url}
         created = True
-    pr.update({"head_sha": head, "base": base, "draft": True,
+    # F193: a REUSED PR's base is the forge's fact, not local state's — the
+    # PR may have been re-targeted since delivery. Read baseRefName from the
+    # forge; fall back to state's base (with a note) only when the read fails.
+    pr_base, base_note, warning = base, None, None
+    if not created:
+        ref = str(pr.get("number") or pr.get("url") or "")
+        forge_base = None
+        rc_v, o = gh(repo, "pr", "view", ref, "--json",
+                     "baseRefName,headRefName")
+        if rc_v == 0 and o:
+            try:
+                forge_base = (json.loads(o) or {}).get("baseRefName")
+            except ValueError:
+                forge_base = None
+        if forge_base:
+            pr_base = forge_base
+            if forge_base != base:
+                warning = (f"the forge PR's base is '{forge_base}', not "
+                           f"state's recorded base '{base}' — recording the "
+                           "forge's value (the PR was re-targeted, or the "
+                           "base moved); review before merging (F193)")
+                audit(state, f"gate-pr WARNING: {warning}")
+        else:
+            base_note = (f"forge read of the PR's baseRefName failed — "
+                         f"falling back to state's recorded base '{base}' "
+                         "(F193)")
+    pr.update({"head_sha": head, "base": pr_base, "draft": True,
                "at": time.strftime("%Y-%m-%d %H:%M:%S")})
+    if base_note:
+        pr["base_note"] = base_note
     state["gate_pr"] = pr
     # The DELIVERY record — the loop's terminal fact (owner ruling 2026-07-17):
     # PR number, integration-tip SHA, and the base SHA at delivery. The loop
     # ends here; whether the PR merges is derived later (derive_settlement) by
     # whichever surface needs it, never restated by a human closing command.
-    rc_b, base_sha_now = git(repo, "rev-parse", base)
+    rc_b, base_sha_now = git(repo, "rev-parse", pr_base)
+    if rc_b != 0:
+        # F191: never write a null base_sha silently — name the missing ref.
+        w = (f"base ref '{pr_base}' does not resolve in the loop repo — "
+             "delivered.base_sha recorded as null; restore the branch so "
+             "settlement can be derived (F191)")
+        warning = f"{warning}; {w}" if warning else w
+        audit(state, f"gate-pr WARNING: {w}")
     state["delivered"] = {"pr": pr.get("number"), "url": pr.get("url"),
                           "head_sha": head,
                           "base_sha": base_sha_now if rc_b == 0 else None,
@@ -3481,7 +3740,7 @@ def cmd_gate_pr(args):
                  "(landed/pending/declined) is derived later from the forge "
                  "and the current base")
     out({"created": created, "reused": not created, "pushed": True,
-         "pr": pr, "delivered": state["delivered"],
+         "pr": pr, "delivered": state["delivered"], "warning": warning,
          "note": "delivered — the loop's boundary. The Human Gate is PR "
                  "approval + merge on the forge; the loop never merges, "
                  "polls, or waits. status/init/unresolved derive the "
@@ -3601,15 +3860,40 @@ def cmd_finish(args):
                      f"{cleaned['kept'] or 'none'}; skipped: "
                      f"{cleaned['skipped_reasons'] or 'none'}")
     _ld = loop_dir(state["target"], state["run"])
-    # F138: a skipped branch (still checked out in its worktree) is a partial
-    # completion the operator must follow up on, but ok:true reads as "fully
-    # done" — surface it as a top-level warning, not only inside the
-    # branch_cleanup detail.
-    warning = None
+    # F138: a skipped branch is surfaced top-level, not only inside the
+    # branch_cleanup detail. F195: HOW it is surfaced follows whether the
+    # operator must act. A merged branch whose delete FAILED is a real
+    # follow-up -> `warning`. A branch skipped only because it is still
+    # checked out in its live worktree is ROUTINE beside a clean success —
+    # no action is required before the next init sweep: the next `init`
+    # collects it once the worktree is removed — so it rides the
+    # informational `note` field, never `warning`.
+    warning, note = None, None
     if cleaned.get("skipped"):
-        warning = ("branch cleanup incomplete — skipped: "
-                   + ", ".join(f"{b} ({r})" for b, r in
-                               cleaned["skipped_reasons"].items()))
+        routine = {b: r for b, r in cleaned["skipped_reasons"].items()
+                   if "checked out in a worktree" in r}
+        alarming = {b: r for b, r in cleaned["skipped_reasons"].items()
+                    if b not in routine}
+        if alarming:
+            warning = ("branch cleanup incomplete — skipped: "
+                       + ", ".join(f"{b} ({r})"
+                                   for b, r in alarming.items()))
+        if routine:
+            note = ("branch cleanup deferred, no action required: "
+                    + ", ".join(f"{b} is still checked out in its worktree"
+                                for b in routine)
+                    + " — the next `init` collects it after the worktree is "
+                      "removed (`git worktree remove <path>`); or re-run "
+                      "finish then")
+    # F108: a repeated finish used to emit only a quiet previously_finished
+    # block — surface it in the tool's standard warning field so the no-op is
+    # unmissable, consistent with the skipped-branch warning above.
+    if prev_finished:
+        rewarn = (f"run was already finished with reason "
+                  f"'{prev_finished['reason']}' at {prev_finished['at']} — "
+                  "this call changed nothing (the stop reason keeps the "
+                  "first close)")
+        warning = f"{rewarn}; {warning}" if warning else rewarn
     # F170: after a second finish, `reason` is just THIS call's argument while
     # `previously_finished.reason` is the earlier call's — neither is labeled
     # authoritative. The run's computational stop reason is state["stop"]
@@ -3622,6 +3906,9 @@ def cmd_finish(args):
                                     "'reason' is only this invocation's "
                                     "argument"),
                "warning": warning,
+               # F195: informational only — finish itself succeeded and the
+               # next init sweep needs nothing from the operator first.
+               "note": note,
                "branch_cleanup": cleaned,
                "host_drift": host_drift,
                # The morning gate is told to present these three; point at them
@@ -3638,6 +3925,17 @@ def cmd_finish(args):
                      f"'{prev_finished['reason']}' at {prev_finished['at']} — "
                      f"re-finished as '{args.reason}'")
     out(payload)
+
+
+def _fmt_duration(seconds):
+    """Human duration with units for the dashboard (F190): `45s` under a
+    minute (never a bare `0m`), `4m32s` under an hour, `1h04m` beyond."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m{s % 60:02d}s"
+    return f"{s // 3600}h{(s % 3600) // 60:02d}m"
 
 
 def _fmt_ids(ids, cap=6):
@@ -3776,13 +4074,21 @@ def _health(state, driving, unmatched):
                         f"from the base){gate_note}")
         return {"gate-ratified": "DONE — ratified at the morning gate",
                 "converged": f"OK — converged; run the morning gate{gate_note}",
-                "cap": "ATTENTION — cap hit without convergence; run the "
+                # F29: state the numbers the verdict used — same numerator/
+                # denominator as the `iterations:` line (consumed count /
+                # configured cap), so a cap lower than the planned count or a
+                # rolled-back iteration never reads as a contradiction.
+                "cap": f"ATTENTION — cap hit ({n_done}/{state['cap']} "
+                       "consumed) without convergence; run the "
                        f"morning gate{gate_note}",
                 }.get(fin["reason"],
                       f"ATTENTION — run ended: {fin['reason']}{gate_note}")
     if state.get("last_breaker"):
+        # F93: re-emitting a stored reason, so the cap breaker's
+        # skipped-checks note must survive here too.
         return ("ATTENTION — stopped by breaker: "
-                f"{state['last_breaker']['reason']}{gate_note}")
+                f"{with_skipped_checks_note(state['last_breaker']['reason'])}"
+                f"{gate_note}")
     if unmatched:
         return (f"ATTENTION — {unmatched} scenario anomal"
                 f"{'ies' if unmatched > 1 else 'y'} match no ledger finding "
@@ -3792,8 +4098,10 @@ def _health(state, driving, unmatched):
     if state["quiet_streak"] >= 2:
         return f"OK — converged; run the morning gate{gate_note}"
     if n_done >= state["cap"]:
-        return ("ATTENTION — cap hit without convergence; run the morning "
-                f"gate{gate_note}")
+        # F29: same numbers as the `iterations:` line (see the "cap" entry
+        # above) — the health verdict and the counter share one denominator.
+        return (f"ATTENTION — cap hit ({n_done}/{state['cap']} consumed) "
+                f"without convergence; run the morning gate{gate_note}")
     return f"OK — between iterations ({n_done}/{state['cap']} done){gate_note}"
 
 
@@ -3888,13 +4196,13 @@ EMPTY_STATES = {
                "a fresh target. Recording it (`tanuki-scheduler sync`, which "
                "reads the scenarios file and registers which scenarios exist) "
                "is part of `/tanuki <target> init`; you do not run it by hand",
-        next="tanuki <target> init"),
+        next="/tanuki {t} init (attended slash command)"),
     "scheduler:never-synced-after-runs": dict(
         expected=False,
         reason="{n} iteration(s) ran with no scenario matrix recorded, so "
                "the scheduler cannot have chosen anything — these runs "
                "drove an unmanaged set",
-        next="tanuki <target> init"),
+        next="/tanuki {t} init (attended slash command)"),
 }
 
 
@@ -3907,9 +4215,17 @@ def empty_state(key, target, **fmt):
     m = EMPTY_STATES[key]
     reason = m["reason"].format(t=target, **fmt)
     nxt = m["next"].format(t=target, **fmt) if m["next"] else None
-    body = reason if m["expected"] else f"GAP — {reason}"
-    if nxt:
-        body += f" · next: `{nxt}`"
+    # F166: EVERY render carries the expected-vs-gap verdict, not only the
+    # gap side — a bare reason left the reader to infer whether emptiness was
+    # normal. Expected states say so in as many words; a gap names the
+    # command that closes it inside the GAP tag itself.
+    if m["expected"]:
+        body = f"{reason} (expected for this run's state)"
+        if nxt:
+            body += f" · next: `{nxt}`"
+    else:
+        body = (f"{reason} (GAP — `{nxt}`)" if nxt
+                else f"{reason} (GAP)")
     return body, {"state": key, "expected": m["expected"], "reason": reason,
                   "next": nxt}
 
@@ -3939,7 +4255,11 @@ def _delivery_phrase(state, lifecycle):
     fin = state.get("finished") or {}
     if fin.get("reason") == "gate-ratified":
         return "landed (ratified at the morning gate — local merge)"
-    return "none"
+    # F127: the empty state teaches the populated shape — the EMPTY_STATES
+    # convention (state the value a non-empty render would show), applied to
+    # a line that lives outside that enumeration.
+    return ("none (a delivered run shows: <settlement> via PR #N, or via "
+            "local merge (direct-merge gate))")
 
 
 def cmd_dashboard(args):
@@ -3977,7 +4297,9 @@ def cmd_dashboard(args):
                 if lc["stop_reason"] == "unknown" else "")
             print(f"  latest run: {state['run']} · stop reason: {reason} · "
                   f"delivery: {_delivery_phrase(state, lc)} · "
-                  f"execution {int(lc['execution_s']) // 60}m")
+                  f"execution: {_fmt_duration(lc['execution_s'])} "
+                  "(frozen when the run closed; review/idle time not "
+                  "counted)")
             return
         if not _noted:
             emit_drift_note(state["target"], state.get("loop_repo"))
@@ -4078,8 +4400,17 @@ def cmd_dashboard(args):
                                   state["target"])
             drive_lines.append(f"  latest drive: {body}. {_DRIVE_IS}")
 
+        health = _health(state, driving, unmatched)
+        # F188: 'convergence' can appear on this first line, a whole screen
+        # before the convergence section defines it — define it at first use.
+        # And defining it in terms of 'quiet cycles' just moves the undefined
+        # term one word right (F188 residual): define THAT here too.
+        if "converg" in health:
+            health += (" (convergence = 2 consecutive quiet cycles; a cycle "
+                       "is quiet when it finds no new actionable finding, "
+                       "produces no patch, and met the exploration quota)")
         lines = [f"tanuki-loop — {state['target']} / {state['run']}",
-                 f"  health: {_health(state, driving, unmatched)}",
+                 f"  health: {health}",
                  f"  integration: {state['integration_branch']}  "
                  f"(base {state['base']})",
                  # F29: the counter is *consumed* iterations (rolled-back ones
@@ -4088,9 +4419,15 @@ def cmd_dashboard(args):
                  # to mention rolled-back iterations without ever saying how
                  # many, so a reader could not tell where a nonzero count would
                  # show. Zero is stated too, so "none" is a fact, not a guess.
+                 # F190: real units, never a bare `0m`, and a frozen label
+                 # that explains itself (F188's "clock frozen at close" was
+                 # uninterpretable without the finish docstring).
                  f"  iterations: {n_done}/{state['cap']} consumed "
-                 f"({n_rolled_back} rolled back) · execution {elapsed // 60}m"
-                 + ("" if lifecycle["active"] else " (frozen at close)")]
+                 f"({n_rolled_back} rolled back) · execution: "
+                 f"{_fmt_duration(elapsed)}"
+                 + ("" if lifecycle["active"] else
+                    " (frozen when the run closed; review/idle time not "
+                    "counted)")]
         # F129: the same build-artifact warning `status` and `iter-verify`
         # surface, on the live screen — a cold operator monitoring only the
         # dashboard would otherwise miss regenerable output the loop's own
@@ -4119,13 +4456,18 @@ def cmd_dashboard(args):
                 part("status→accepted", deltas["accepted"]),
                 part("recurred", deltas["recurred"]),
                 f"deferred {len(state.get('deferred', []))}",
-                f"frozen {len(state.get('frozen', []))}")))
+                # F188: "frozen findings", not bare "frozen" — the run-state
+                # label above uses the same word for the execution clock.
+                f"frozen findings {len(state.get('frozen', []))}")))
             # F6: define the counters inline. Every label is a ledger fact,
             # never a commit count — 'fixed' was retired because 'fixed 0'
             # beside a produced patch read as a contradiction.
             lines.append("    (status→accepted = ledger status transitions "
-                         "this run, not patch commits; recurred = recurrence "
-                         "bumped)")
+                         "this run, not patch commits; recurred = a known "
+                         "finding observed again this run — its recurrence "
+                         "count bumped; deferred/frozen = morning-queue "
+                         "entries in queue.md awaiting your ruling, not "
+                         "ledger findings)")
             if deltas["legacy"]:
                 lines.append("    (run predates status snapshots — "
                              "status→accepted/recurred not computable)")
@@ -4160,21 +4502,26 @@ def cmd_dashboard(args):
                         f"      {c.get('sha', '')[:12]} "
                         f"{_short(c.get('subject', ''))} "
                         f"({fc} file{'' if fc == 1 else 's'})")
+        # F188/F44: whenever deferred/frozen queue entries render near this
+        # ledger line — populated OR empty — the queue-vs-ledger distinction
+        # is stated, so the pairing can never read as a contradiction.
+        qnote = (" (deferred/frozen items above are morning-queue entries, "
+                 "not ledger findings)"
+                 if state.get("deferred") or state.get("frozen") else "")
         if findings:
             by = {}
             for fd in findings:
                 by[fd["status"]] = by.get(fd["status"], 0) + 1
             lines.append(f"  findings: {len(findings)} lifetime — " +
                          " · ".join(f"{k} {v}" for k, v in sorted(by.items())) +
-                         f" (history: /tanuki {state['target']} --history)")
+                         f" (history: /tanuki {state['target']} --history)"
+                         + qnote)
         else:
             # Deferred/frozen items live in the morning queue, not the
             # long-term ledger, so "none yet" beside a "deferred N" count is not
-            # a contradiction — say so (F44).
-            note = (" (deferred/frozen items above are morning-queue entries, "
-                    "not ledger findings)"
-                    if state.get("deferred") or state.get("frozen") else "")
-            lines.append("  findings: none in the ledger yet" + note)
+            # a contradiction — say so (F44), via the shared qnote above so
+            # the pairing cannot render bare on either branch.
+            lines.append("  findings: none in the ledger yet" + qnote)
 
         # -- (section 4) scheduler decisions — ALWAYS present: its DECISIONS
         #    for this iteration when a persisted plan exists; per-state pools
@@ -4207,6 +4554,12 @@ def cmd_dashboard(args):
                 lines.append(f"  scheduler decisions (iter {cur['n']} plan — "
                              "exploration quota "
                              f"{'met' if plan.get('quota_met') else 'NOT met'}):")
+                # F188: 'exploration quota' was never defined for a cold
+                # reader — one parenthetical at its first mention.
+                lines.append("    (exploration quota = the plan's required "
+                             "share of never-driven scenarios this iteration; "
+                             "an unmet quota keeps the cycle from counting as "
+                             "quiet)")
                 lines.append("    verifying fixes (replay): "
                              f"{_fmt_ids(plan.get('verify', []))}")
                 lines.append("    exploring (never driven): "
@@ -4229,11 +4582,19 @@ def cmd_dashboard(args):
                                  "selection reasons unavailable; states only)")
 
         # -- convergence: which conditions held last cycle, what's still needed
-        lines.append(f"  convergence: quiet streak {state['quiet_streak']}/2 — "
-                     "a cycle is quiet when it finds no new actionable "
-                     "finding, produces no patch commit, and met the "
-                     "exploration quota")
         lc = state.get("last_cycle")
+        if lc is None and state["quiet_streak"] == 0:
+            # F189: with record-cycle never run, a zero streak is silently
+            # meaningless — say so explicitly instead of rendering it.
+            lines.append("  convergence: no cycles recorded — convergence "
+                         "not evaluated (run record-cycle after each "
+                         "iteration)")
+        else:
+            lines.append(f"  convergence: quiet streak "
+                         f"{state['quiet_streak']}/2 — "
+                         "a cycle is quiet when it finds no new actionable "
+                         "finding, produces no patch commit, and met the "
+                         "exploration quota")
         if lc:
             held = [("no new findings" if lc["new_actionable"] == 0 else
                      f"{lc['new_actionable']} NEW actionable finding(s)"),
@@ -4282,8 +4643,10 @@ def cmd_dashboard(args):
                     f"  delivery: {_delivery_phrase(state, lifecycle)}")
         elif state.get("last_breaker") and \
                 not state["last_breaker"].get("recovered"):
+            # F93: re-emitting the stored reason — the cap breaker's
+            # skipped-checks note must survive this rendering too.
             lines.append(f"  STOPPED: breaker — "
-                         f"{state['last_breaker']['reason']} "
+                         f"{with_skipped_checks_note(state['last_breaker']['reason'])} "
                          f"(at {state['last_breaker']['at']})")
             if "external modification" in state["last_breaker"]["reason"]:
                 lines.append("  NEXT: attended recovery — `tanuki-loop "
@@ -4302,8 +4665,10 @@ def cmd_dashboard(args):
                          "(mine -> classify -> implement -> test -> commit) — "
                          "no action needed from you")
         elif state["quiet_streak"] >= 2 or n_done >= state["cap"]:
+            # F93: this is a cap-stop emission too — carry the skipped-checks
+            # note so no surface ever shows a bare 'iteration cap reached'.
             reason = ("converged" if state["quiet_streak"] >= 2
-                      else "iteration cap reached")
+                      else with_skipped_checks_note("iteration cap reached"))
             lines.append(f"  STOPPED-PENDING: {reason} — run not closed yet")
             at_gate = True
         else:
@@ -4335,8 +4700,11 @@ def cmd_dashboard(args):
                              + (f"; rule on {n_rule} deferred/frozen item(s)"
                                 if n_rule else ""))
             elif s.get("result") == "declined":
-                lines.append("  NEXT: the branch holds unlanded work — "
-                             "`reconcile` classifies it")
+                lines.append("  NEXT: the branch holds unlanded work — the "
+                             f"`/tanuki-loop {state['target']} reconcile` "
+                             "slash command (a Claude Code slash command, run "
+                             "in a Claude Code session — not a subcommand of "
+                             "this tool) classifies it")
             elif n_rule:
                 lines.append(f"  NEXT: rule on {n_rule} deferred/frozen "
                              "item(s) — reasons listed above")
@@ -4452,8 +4820,11 @@ def run_verdict(state):
     # verdict reads "stopped" while lifecycle.active is true — a direct
     # self-contradiction on one status screen.
     if lb and not lb.get("recovered"):
-        s = {"state": "stopped", "reason": lb.get("reason"), "at": lb.get("at"),
-             "summary": f"stopped: {lb.get('reason')}"}
+        # F93: re-emitting the stored reason — carry the cap breaker's
+        # skipped-checks note whichever build persisted it.
+        _r = with_skipped_checks_note(lb.get("reason") or "")
+        s = {"state": "stopped", "reason": _r, "at": lb.get("at"),
+             "summary": f"stopped: {_r}"}
         if lb.get("hint"):
             s["hint"] = lb["hint"]
         return s
@@ -4469,12 +4840,16 @@ def run_verdict(state):
     # closing it was a manual inference from comparing iterations_done to cap
     # on one screen — name the next action instead.
     if not openb and done >= cap:
+        # F93: a cap-stop emission — the summary carries the skipped-checks
+        # note so no surface ever shows a bare 'cap reached'.
         return {"state": "running", "reason": None,
                 "next_action": ("iteration cap consumed — close the run: "
                                 "finish --reason cap (or --reason converged "
                                 "if record-cycle reported converged)"),
                 "summary": (f"running: {done}/{cap} iterations consumed — "
-                            f"cap reached, close with finish")}
+                            + with_skipped_checks_note(
+                                "iteration cap reached")
+                            + ", close with finish")}
     where = (f"iteration {openb[-1]['n']} open" if openb
              else f"{done}/{cap} iterations done")
     return {"state": "running", "reason": None,
@@ -4520,8 +4895,14 @@ def cmd_status(args):
         "worktree": state["worktree"], "base": state["base"],
         # Operator-critical fields state.json holds but no CLI surfaced (F42):
         # base_sha is the gate diff's left side; last_breaker diagnoses a stop.
+        # F93: a cap breaker persisted by a pre-note build re-surfaces here —
+        # re-emit it WITH the skipped-checks note, never bare.
         "base_sha": state.get("base_sha"),
-        "last_breaker": state.get("last_breaker"),
+        "last_breaker": (
+            {**state["last_breaker"],
+             "reason": with_skipped_checks_note(
+                 state["last_breaker"].get("reason") or "")}
+            if state.get("last_breaker") else None),
         "finished": state.get("finished"),
         # Delivery + derived settlement (owner ruling 2026-07-17): the loop's
         # record ends at "delivered"; whether the PR landed is derived here,
@@ -4629,7 +5010,12 @@ def main():
 
     sp = sub.add_parser(
         "doctor",
-        help="read-only headless-readiness check (exit 0 = ready, 3 = not ready)",
+        # F116: the top-level listing is a cold reader's first contact — name
+        # what doctor validates here, not only in `doctor --help`.
+        help="read-only headless-readiness check: validates the loop ceilings "
+             "(test_cmd/iterations/wall-time/token-budget/attempt-cap), base "
+             "freshness, the baseline test on the base tip, policy coverage, "
+             "and host cloneability (exit 0 = ready, 3 = not ready)",
         description=(
             "Validate a target for a Phase 2/3 headless run without "
             "writing any state. Exit code 0 means ready; exit code 3 "
@@ -4650,7 +5036,22 @@ def main():
             "canonical file is never auto-loaded (F38, F87). The canonical "
             "directory is machine-wide and shared across every target, so a "
             "slug that collides with another session's shares its config "
-            "(F94)."),
+            "(F94).\n\n"
+            "Flag <-> config-key mapping — one knob, two names (F86): "
+            "--cap sets loop.iterations; --wall-time sets loop.wall_time_s; "
+            "--test-cmd sets loop.test_cmd; --token-budget sets "
+            "loop.token_budget; --attempt-cap sets loop.attempt_cap."),
+        epilog=(
+            "sandbox recipe (F185) — a permissive toy/sandbox \"loop\" block, "
+            "copy-pasteable into the scenarios file for a throwaway run:\n"
+            "  {\"loop\": {\"test_cmd\": \"true\",\n"
+            "            \"iterations\": 2,\n"
+            "            \"wall_time_s\": 3600,\n"
+            "            \"token_budget\": 1000000,\n"
+            "            \"attempt_cap\": 2}}\n"
+            "(\"test_cmd\": \"true\" is a NO-OP placeholder — accepted by "
+            "design, but the run then has no regression gate; use the repo's "
+            "real suite for anything beyond a sandbox)"),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     sp.add_argument("--loop-repo", required=True)
     sp.add_argument("--scenarios", default=None,
@@ -4811,7 +5212,18 @@ def main():
     sp.add_argument("--key", required=True); sp.add_argument("--issue", required=True)
     sp = sub.add_parser("policy")
     sp.add_argument("--finding", required=True); sp.add_argument("--decision", required=True)
-    sp = sub.add_parser("finish")
+    sp = sub.add_parser(
+        "finish",
+        help="mark the run terminal and delete merged integration branches — "
+             "a branch still checked out in its worktree is SKIPPED, not "
+             "deleted, so run `git worktree remove <path>` first (or "
+             "re-finish after) to get it collected (F138)",
+        description=(
+            "Mark the run terminal and delete this target's merged "
+            "integration branches. NOTE (F138): a merged branch still "
+            "checked out in its worktree is SKIPPED, not deleted — remove "
+            "the worktree first (`git worktree remove <path>`), or re-run "
+            "finish afterward to collect it."))
     # Validate against the documented enum (F71) so a typo'd reason can't be
     # silently accepted; choices= also lists them in --help.
     sp.add_argument("--reason", required=True,
@@ -4842,8 +5254,11 @@ def main():
             "status. Writes nothing but ~/.tanuki/<target>/unresolved.md; "
             "never prompts. SIGNALS, NEVER VERDICTS: whether a change is "
             "already landed, superseded, conflicting or still applicable is "
-            "semantic judgment and belongs to `reconcile` "
-            "(commands/tanuki-loop.md). `cherry_picks_cleanly` is a fact "
+            "semantic judgment and belongs to the `/tanuki-loop <target> "
+            "reconcile` slash command (a Claude Code slash command, run in a "
+            "Claude Code session — not a subcommand of this tool; see "
+            "commands/tanuki-loop.md). "
+            "`cherry_picks_cleanly` is a fact "
             "about git and is NOT a synonym for applicable."))
     sp.add_argument("--json", action="store_true")
     sp.add_argument("--loop-repo", default=None,

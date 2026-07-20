@@ -38,6 +38,14 @@ case "\$1 \$2" in
   "pr list")   echo "[]" ;;
   "pr create") echo "https://example.invalid/owner/repo/pull/7" ;;
   "pr view")
+    if echo "\$*" | grep -q "baseRefName"; then
+      if [ -f "\$state_dir/pr_base" ]; then
+        echo "{\"baseRefName\": \"\$(cat "\$state_dir/pr_base")\", \"headRefName\": \"h\"}"
+      else
+        echo "fake gh: pr_base not scripted" >&2; exit 1
+      fi
+      exit 0
+    fi
     st="\$(cat "\$state_dir/pr_state")"
     if [ "\$st" = "MERGED" ]; then
       oid="\$(cat "\$state_dir/merge_oid" 2>/dev/null || echo "")"
@@ -121,12 +129,22 @@ pass "gate-pr refuses a stale final-test pass (SHA mismatch)"
 
 # --- push failure leaves the local branch intact ------------------------------
 git -C "$repo" remote set-url origin "$root/nonexistent.git"
-if "${L[@]}" gate-pr >/dev/null 2>&1; then
+if pf="$("${L[@]}" gate-pr 2>/dev/null)"; then
   fail "gate-pr must fail when the push fails"
 fi
 git -C "$repo" rev-parse --verify -q "$integ" >/dev/null \
   || fail "a failed push must leave the local integration branch intact"
 pass "push failure: exit 3, local integration branch intact"
+# F192: the failure payload names the attempted refs, a cause classification,
+# and the documented recovery — never just the raw gh/git stderr.
+[ "$(echo "$pf" | jget '["base"]')" = "$base" ] \
+  && [ "$(echo "$pf" | jget '["integration_branch"]')" = "$integ" ] \
+  || fail "failure payload must name the attempted base + integration branch"
+[ "$(echo "$pf" | jget '["cause"]')" = "push failure" ] \
+  || fail "failure payload must classify the cause (push failure)"
+echo "$pf" | jget '["recovery"]' | grep -q "hand-create the PR" \
+  || fail "failure payload must carry the documented recovery"
+pass "push failure payload: refs + cause + recovery (F192)"
 git -C "$repo" remote set-url origin "$bare"
 
 # --- happy path: push + ONE Draft PR ------------------------------------------
@@ -166,12 +184,43 @@ off="$(PATH="$root/nogh" "$here/tanuki-loop" --target t status)"
 pass "offline: last observed settlement served, marked stale with timestamp"
 
 # --- idempotency: re-run reuses, never duplicates -----------------------------
+# F193: a reused PR's base comes from the FORGE (baseRefName), never restated
+# from local state.
+echo "$base" > "$root/gh-state/pr_base"
 res2="$("${L[@]}" gate-pr)"
 [ "$(echo "$res2" | jget '["reused"]')" = "True" ] \
   || fail "a second gate-pr must reuse the recorded PR"
 [ "$(grep -c "pr create" "$root/gh-state/calls.log")" = "1" ] \
   || fail "gate-pr must never create a second PR for the same head"
 pass "idempotent: re-run reuses PR #7, no duplicate create"
+
+# --- F193: the reused PR's base is the forge's fact ---------------------------
+[ "$(echo "$res2" | jget '["pr"]["base"]')" = "$base" ] \
+  || fail "reuse must stamp the forge's baseRefName"
+[ "$(echo "$res2" | jget '["warning"]')" = "None" ] \
+  || fail "no warning when the forge base matches state's base"
+# Re-targeted on the forge: record the forge's value, with a warning.
+echo "retargeted-base" > "$root/gh-state/pr_base"
+res3="$("${L[@]}" gate-pr)"
+[ "$(echo "$res3" | jget '["pr"]["base"]')" = "retargeted-base" ] \
+  || fail "a re-targeted PR must record the forge's base, not state's"
+echo "$res3" | jget '["warning"]' | grep -q "retargeted-base" \
+  || fail "a forge/state base mismatch must carry a warning"
+# The re-targeted base does not resolve locally: delivered.base_sha is null,
+# but never silently — the warning names the missing ref (F191).
+echo "$res3" | jget '["warning"]' | grep -q "does not resolve" \
+  || fail "an unresolvable base must be named in the warning, never silent"
+pass "reuse reads baseRefName from the forge; mismatch warned (F193/F191)"
+# Forge read failure: fall back to state's base, with a note.
+rm -f "$root/gh-state/pr_base"
+resf="$("${L[@]}" gate-pr)"
+[ "$(echo "$resf" | jget '["pr"]["base"]')" = "$base" ] \
+  || fail "a failed forge read must fall back to state's base"
+echo "$resf" | jget '["pr"]["base_note"]' | grep -q "falling back" \
+  || fail "the fallback must carry a note that the forge read failed"
+pass "forge read failure: local base fallback, noted (F193)"
+echo "$base" > "$root/gh-state/pr_base"
+"${L[@]}" gate-pr >/dev/null   # restore the recorded base for the tests below
 
 # --- unresolved annotates a delivered branch with its settlement --------------
 unres="$("${L[@]}" unresolved --json)"

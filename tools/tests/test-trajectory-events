@@ -8,7 +8,11 @@
 #   1. well-formed markers lift one-to-one: user_choice carries
 #      point/selected/alternatives, outcome carries disposition + free text,
 #      and both point at the actual raw line (raw.jsonl#L<n>);
-#   2. malformed markers are dropped and counted, never lifted, never fatal;
+#   2. malformed markers are dropped and recorded — one {line, marker} detail
+#      per drop (raw-stream line, text truncated to 120) — never lifted,
+#      never fatal, never a silent miss (F177/F210);
+#   2b. markdown-decorated markers (bold-wrapped, emphasis, trailing
+#      punctuation, indented mid-paragraph) still lift (F177);
 #   3. a tool_error followed by a same-command success (or a marker naming the
 #      command) yields a recovery with of_seq; an unmatched error yields none;
 #   4. a run with no outcome marker gets a synthesized disposition=partial
@@ -92,8 +96,40 @@ assert o["disposition"] == "success"
 assert o["detail"] == "ready report understood"
 assert o["evidence"] == "s1.raw.jsonl#L4", o["evidence"]
 assert "synthesized" not in o, "marker-lifted outcome is not synthesized"
-assert dropped == 2, dropped
+assert len(dropped) == 2, dropped
+assert [d["line"] for d in dropped] == [2, 3], dropped
+assert dropped[0]["marker"].startswith("TANUKI-CHOICE point=orphan"), dropped
+assert dropped[1]["marker"].startswith("TANUKI-OUTCOME disposition=nonsense"), \
+    dropped
 print("ok: marker lift one-to-one, raw-line evidence, malformed counted")
+
+# --- 2b: decorated markers lift; a marker-like leftover is a counted drop ----
+p = raw([
+    assistant(text("TANUKI-CHOICE point=clean selected=a")),        # L1 clean
+    assistant(text("**TANUKI-CHOICE point=bold selected=b**")),     # L2 bold
+    assistant(text("Weighing the entry points.\n"
+                   "    TANUKI-CHOICE point=indent selected=c "
+                   "alternatives=x|y\n"
+                   "Went with c.")),               # L3 indented mid-paragraph
+    assistant(text("note to self: emit `TANUKI-CHOICE` markers "
+                   + "pad " * 60)),                # L4 marker-like, unparseable
+    RESULT,
+])
+events, dropped = td.normalize(p, "r1", "s6")
+os.unlink(p)
+choices = [e for e in events if e["type"] == "user_choice"]
+assert [c["point"] for c in choices] == ["clean", "bold", "indent"], choices
+assert [c["selected"] for c in choices] == ["a", "b", "c"], choices
+assert choices[1]["evidence"] == "s6.raw.jsonl#L2", choices[1]
+assert choices[1]["detail"].startswith("TANUKI-CHOICE "), \
+    "decorated lift must expose the bare marker"
+assert choices[2]["alternatives"] == ["x", "y"], choices[2]
+assert len(dropped) == 1, dropped
+assert dropped[0]["line"] == 4 and "TANUKI-CHOICE" in dropped[0]["marker"], \
+    dropped
+assert len(dropped[0]["marker"]) <= 120, "drop detail text must be truncated"
+print("ok: decorated markers lift; unparseable marker-like line is a "
+      "counted drop with {line, marker} detail")
 
 # --- 3: recovery binding ------------------------------------------------------
 p = raw([
@@ -113,7 +149,7 @@ recs = [e for e in events if e["type"] == "recovery"]
 assert len(errs) == 2 and len(recs) == 1, (errs, recs)
 assert recs[0]["of_seq"] == errs[0]["seq"], "recovery must bind error A"
 assert "tanuki-loop" in recs[0]["detail"]
-assert dropped == 0
+assert dropped == []
 print("ok: same-command success binds recovery; unmatched error gets none")
 
 # --- 4: synthesized outcome ---------------------------------------------------
@@ -143,7 +179,7 @@ for e in legacy:
         "legacy events keep the event-seq evidence pointer"
     assert not set(e) - {"run", "scenario", "seq", "type", "detail",
                          "evidence"}, "legacy event shape must not change"
-assert dropped == 0
+assert dropped == []
 print("ok: markerless stream changes nothing but the synthesized outcome")
 PY
 pass "typed trajectory events: lift, recovery, outcome guarantee, legacy shape"

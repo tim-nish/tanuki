@@ -87,4 +87,15 @@ rc=0; "${S[@]}" history --trajectory >/dev/null 2>&1 || rc=$?
 [ "$rc" = "2" ] || fail "--trajectory without --scenario must refuse (exit 2)"
 pass "plain history unchanged; --trajectory requires --scenario"
 
+# --- 6: F204 — the empty state names the artifact trajectory needs -----------------
+none="$("${S[@]}" history --scenario ghost --trajectory)"
+echo "$none" | grep -q "no trajectory events for scenario ghost" \
+  || fail "empty state must name the scenario"
+echo "$none" | grep -q "ghost.events.jsonl" || fail "empty state must name the event file"
+echo "$none" | grep -q "produced by tanuki-drive" \
+  || fail "empty state must say tanuki-drive produces it"
+echo "$none" | grep -q "plan/record-run alone don't produce it" \
+  || fail "empty state must rule out plan/record-run"
+pass "F204: empty trajectory names <run-dir>/<id>.events.jsonl and its producer"
+
 echo "all checks passed"
