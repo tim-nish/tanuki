@@ -123,6 +123,24 @@ fully reversible runs unattended.
   what runs is always the ref the operator named, and the base tip + any
   behind-count are recorded in `state.json` and the audit. A missing upstream
   or an offline fetch degrades to a recorded note, not a stop.
+- **One active run per target — guarded at `init` (ADDED 2026-07-20, triage of
+  issue #258).** A target's run state is machine-wide and single-pointer:
+  `~/.tanuki/<target>/loop/current` names *the* active run, and every
+  subcommand that omits `--run` resolves through it. Two concurrent runs on one
+  target therefore race on that pointer and on the shared ledger — a second
+  `init` silently repoints `current`, and the older run's
+  `attempt`/`test`/`iter-verify`/`log`/`record-cycle` then write the
+  interloper's `state.json`/`audit.md`, corrupting both and inflating
+  convergence with the other run's findings (issue #258 / finding F237: on
+  2026-07-20 a headless run's iteration cross-wrote an attended run's audit and
+  left a spurious breaker, and a test-pass ran in the wrong worktree). So a run
+  is **exclusive by construction**: `init` **fails closed** (breaker, exit 3)
+  when another run for the same target is unfinished and its worktree still
+  exists — the same fail-closed idiom as base freshness — unless
+  `--allow-concurrent` is passed deliberately (recorded in the audit); and any
+  `current`-resolving subcommand refuses with `ambiguous — pass --run <id>`
+  when more than one unfinished run exists. Genuinely parallel work uses
+  distinct target slugs, never two runs on one target.
 
 ## Issue-free by construction
 
