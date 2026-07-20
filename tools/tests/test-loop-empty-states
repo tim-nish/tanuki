@@ -38,12 +38,13 @@ EOF
 )"
 covered="drive:iteration-open-not-driven
 drive:iterations-ran-none-drove
+drive:manual-run-no-plan
 drive:no-iteration-started
 live:never-initialized
 live:no-active-run
 run:commits-not-recorded
 run:no-iteration-started
-scheduler:never-synced-after-runs
+scheduler:manual-run-no-plan
 scheduler:never-synced-fresh
 unresolved:no-loop-repo
 unresolved:none"
@@ -94,28 +95,53 @@ grep -q "iteration 1 started but its drive has not begun yet" <<<"$out2" \
 grep -q "latest drive: GAP" <<<"$out2" && fail "mid-bracket is expected, not a gap"
 pass "drive:iteration-open-not-driven — expected mid-bracket"
 
-# --- after an iteration ran: two GAP members ---------------------------------
+# --- after an iteration ran OUTSIDE the scheduler: two EXPECTED members -------
+# This hand-run bracket persists no scheduler plan, so the run's provenance is
+# manual/toy/ad-hoc — its empty drive/scheduler sections are EXPECTED, not
+# gaps (F166 / issue #236; provenance derived from plan_record absence).
 echo v1 > "$wt/f"; git -C "$wt" commit -qam iter1
 "${L[@]}" iter-verify >/dev/null
 out3="$("${L[@]}" dashboard)"
 
-# drive:iterations-ran-none-drove
+# drive:manual-run-no-plan
 d="$(grep 'latest drive' <<<"$out3")"
-grep -q "GAP" <<<"$d" || fail "iterations ran with no drive is a GAP: $d"
-grep -q "1 iteration(s) ran and none recorded a drive" <<<"$d" \
-  || fail "drive:iterations-ran-none-drove reason wrong: $d"
-pass "drive:iterations-ran-none-drove — GAP"
+grep -q "GAP" <<<"$d" && fail "a manual run's empty drive is expected, not a GAP: $d"
+grep -q "1 iteration(s) ran outside the scheduler" <<<"$d" \
+  || fail "drive:manual-run-no-plan reason wrong: $d"
+grep -q "(expected for this run's state)" <<<"$d" \
+  || fail "drive:manual-run-no-plan must carry the expected verdict: $d"
+pass "drive:manual-run-no-plan — expected (provenance: no persisted plan)"
 
-# scheduler:never-synced-after-runs — the case #66's prose could not express.
+# scheduler:manual-run-no-plan
 s3="$(grep 'scheduler decisions' <<<"$out3")"
-grep -q "GAP" <<<"$s3" \
-  || fail "#66: no matrix AFTER runs is a gap, not 'expected': $s3"
-grep -q "cannot have chosen anything" <<<"$s3" \
-  || fail "the gap reason must say why it matters: $s3"
-# F166: a GAP with a closing command names it inside the GAP tag itself.
-grep -qF "(GAP — \`/tanuki t init (attended slash command)\`)" <<<"$s3" \
-  || fail "a gap must name the command that closes it in the GAP tag (F166): $s3"
-pass "scheduler:never-synced-after-runs — GAP (the distinction #66 asked for)"
+grep -q "GAP" <<<"$s3" && fail "a manual run's empty scheduler is expected, not a GAP: $s3"
+grep -q "ran outside the scheduler" <<<"$s3" \
+  || fail "scheduler:manual-run-no-plan reason wrong: $s3"
+grep -q "(expected for this run's state)" <<<"$s3" \
+  || fail "scheduler:manual-run-no-plan must carry the expected verdict: $s3"
+pass "scheduler:manual-run-no-plan — expected (provenance: drove an unmanaged set)"
+
+# --- a SCHEDULED run whose iteration did not drive: the real GAP -------------
+# When a plan WAS persisted for the iteration (a scheduled run) but no drive
+# was recorded, the empty drive section is a genuine gap (F166 / issue #236:
+# a scheduled run that should have driven and did not stays expected:false).
+run_id="$(cat "$TANUKI_ROOT/t/loop/current")"
+python3 - "$TANUKI_ROOT/t/scheduler.json" "$run_id" <<'EOF'
+import json, os, sys
+p, run = sys.argv[1], sys.argv[2]
+data = {"scenarios": {}, "plans": [
+    {"run": f"{run}-iter1", "plan": [], "verify": [], "explore": [],
+     "quota_met": True}]}
+os.makedirs(os.path.dirname(p), exist_ok=True)
+json.dump(data, open(p, "w"))
+EOF
+out4="$("${L[@]}" dashboard)"
+d4="$(grep 'latest drive' <<<"$out4")"
+grep -q "GAP" <<<"$d4" \
+  || fail "a scheduled run with no drive must be a GAP: $d4"
+grep -q "1 iteration(s) ran and none recorded a drive" <<<"$d4" \
+  || fail "drive:iterations-ran-none-drove reason wrong: $d4"
+pass "drive:iterations-ran-none-drove — GAP (a scheduled run that did not drive)"
 
 # run:commits-not-recorded — a run predating story 1.10's subject capture: a
 # verified, patch-bearing iteration with no `commits` key must degrade to the
@@ -138,12 +164,19 @@ grep -q "landed commits: GAP" <<<"$out_legacy" \
 pass "run:commits-not-recorded — expected; typed note, never a crash"
 
 # --- the expected/gap verdict is the whole point ------------------------------
-# Same section, same absent substrate, opposite verdicts depending on state.
-# That is what "expected vs gap" means and what prose kept failing to carry.
+# Same empty 'latest drive' section, opposite verdicts by RUN PROVENANCE: a
+# manual run (no persisted plan) is EXPECTED; a scheduled run that did not
+# drive is a GAP. That is what "expected vs gap" means (F166 / issue #236),
+# and what prose kept failing to carry. (For the scheduler section both empty
+# cases — fresh and manual — are expected: an absent scheduler.json only ever
+# means the run was not scheduled.)
 grep -q "expected on a fresh target" <<<"$out" \
   || fail "fresh scheduler state should be expected"
-grep -q "GAP" <<<"$s3" || fail "post-run scheduler state should be a gap"
-pass "one absent substrate, two verdicts — expected on a fresh target, GAP after runs"
+grep -q "(expected for this run's state)" <<<"$d" \
+  || fail "a manual run's empty drive should be expected: $d"
+grep -q "GAP" <<<"$d4" \
+  || fail "a scheduled run's empty drive should be a gap: $d4"
+pass "one empty drive section, two verdicts — expected (manual) vs GAP (scheduled)"
 
 # --- live view members (spec-tanuki-view D2 `live`: live = an ACTIVE run) -----
 

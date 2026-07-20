@@ -446,6 +446,21 @@ def plan_record(state, iter_n):
     return next((p for p in reversed(plans) if p.get("run") == rid), None)
 
 
+def drove_outside_scheduler(state):
+    """Run provenance for the empty-state expected-vs-gap signal (F166 /
+    issue #236; spec-tanuki-view D3, spec-tanuki-loop fixed-skeleton point 2).
+    A run with iterations but NO persisted plan record for any of them drove
+    outside the scheduler — a manual, toy, or ad-hoc run — so an empty
+    `latest drive` / `scheduler decisions` section is EXPECTED, not a gap.
+    Derived purely from persisted artifacts (plan_record presence), never
+    guessed. Returns False for a run with no iterations at all (that case has
+    its own not-started empty states)."""
+    n_iters = len(state.get("iterations") or [])
+    if not n_iters:
+        return False
+    return all(plan_record(state, n) is None for n in range(1, n_iters + 1))
+
+
 def generate_advisory(target):
     """Advisory generation-trigger signals for the convergence report (issue
     #168): uncovered plugin surface (feature drift) and an empty unexplored
@@ -4211,6 +4226,14 @@ EMPTY_STATES = {
         reason="{n} iteration(s) ran and none recorded a drive; an "
                "iteration should drive the scenarios before it is verified",
         next=None),
+    # Run provenance flips this from a gap to expected (F166 / issue #236):
+    # a run with iterations but no persisted plan drove OUTSIDE the scheduler.
+    "drive:manual-run-no-plan": dict(
+        expected=True,
+        reason="{n} iteration(s) ran outside the scheduler — no plan was "
+               "persisted for this run, so it is a manual, toy, or ad-hoc "
+               "run; a scheduled run would show its drive here",
+        next=None),
     # -- this run -------------------------------------------------------------
     "run:no-iteration-started": dict(
         expected=True,
@@ -4263,12 +4286,17 @@ EMPTY_STATES = {
                "reads the scenarios file and registers which scenarios exist) "
                "is part of `/tanuki <target> init`; you do not run it by hand",
         next="/tanuki {t} init (attended slash command)"),
-    "scheduler:never-synced-after-runs": dict(
-        expected=False,
-        reason="{n} iteration(s) ran with no scenario matrix recorded, so "
-               "the scheduler cannot have chosen anything — these runs "
-               "drove an unmanaged set",
-        next="/tanuki {t} init (attended slash command)"),
+    # Retired in favour of scheduler:manual-run-no-plan (F166 / issue #236):
+    # the scheduler section only renders an empty state when NO scheduler.json
+    # exists, which is exactly a run that drove outside the scheduler — a
+    # manual/toy/ad-hoc run, expected, never a gap. The old
+    # "never-synced-after-runs" GAP was the F166 defect this story removes.
+    "scheduler:manual-run-no-plan": dict(
+        expected=True,
+        reason="{n} iteration(s) ran outside the scheduler — no plan was "
+               "persisted, so nothing was scheduled: expected for a manual, "
+               "toy, or ad-hoc run that drove an unmanaged set by design",
+        next=None),
 }
 
 
@@ -4458,8 +4486,13 @@ def cmd_dashboard(args):
                                   state["target"], n=cur["n"])
             drive_lines.append(f"  latest drive: {body}. {_DRIVE_IS}")
         elif state["iterations"]:
-            body, _ = empty_state("drive:iterations-ran-none-drove",
-                                  state["target"], n=len(state["iterations"]))
+            # F166 / issue #236: run provenance flips expected-vs-gap — a run
+            # that drove outside the scheduler (no persisted plan) is expected
+            # here, not a gap.
+            key = ("drive:manual-run-no-plan" if drove_outside_scheduler(state)
+                   else "drive:iterations-ran-none-drove")
+            body, _ = empty_state(key, state["target"],
+                                  n=len(state["iterations"]))
             drive_lines.append(f"  latest drive: {body}. {_DRIVE_IS}")
         else:
             body, _ = empty_state("drive:no-iteration-started",
@@ -4599,7 +4632,14 @@ def cmd_dashboard(args):
             # this was normal. Enumerated now, and the two cases differ: on a
             # fresh target it is expected; once iterations have run it is a
             # gap, because the scheduler cannot have chosen anything.
-            key = ("scheduler:never-synced-after-runs" if state["iterations"]
+            # F166 / issue #236: run provenance flips expected-vs-gap. No
+            # scheduler state after a run that drove outside the scheduler
+            # (no persisted plan) is expected — the run drove an unmanaged set
+            # by design; only a run that should have been scheduled is a gap.
+            # No scheduler.json means the run was never scheduled: fresh
+            # before any iteration, else a manual/toy/ad-hoc run that drove an
+            # unmanaged set by design — expected, not a gap (F166 / issue #236).
+            key = ("scheduler:manual-run-no-plan" if state["iterations"]
                    else "scheduler:never-synced-fresh")
             body, _ = empty_state(key, state["target"],
                                   n=len(state["iterations"]))
