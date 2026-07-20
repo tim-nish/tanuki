@@ -134,29 +134,43 @@ machinery those two drive.
   cycle on its own integration branch and hands you one batch to review in the
   morning. The human gate is *relocated* here, not removed — only you merge.
 
-The basic sequence: onboard once with `init`, then run `/tanuki` as often as
-you like, deciding proposals as they come. When you trust it, hand the wheel
-to `/tanuki-loop` overnight and review the batch in the morning.
+The basic sequence starts at `/tanuki init` and ends with a filed GitHub
+issue. The attended path runs straight down; the unattended loop branches off
+once you trust it.
 
 ```mermaid
 flowchart TD
-    init["/tanuki init<br/>(one-time: propose scenarios)"] --> run["/tanuki<br/>(drive a run)"]
-    run --> decide["/tanuki &lt;t&gt; decide<br/>(the human gate)"]
-    decide -->|accept| issues["labeled GitHub issues"]
-    ingest["/tanuki &lt;t&gt; ingest &quot;…&quot;<br/>(friction you hit)"] --> decide
-    run -.->|any time, read-only| look["/tanuki &lt;t&gt; status · history · view"]
+    init["/tanuki init"] --> run["/tanuki"]
+    run --> decide["/tanuki decide"]
+    decide --> issue(["file a GitHub issue"])
 
-    run ==>|"once you trust it"| loop["/tanuki-loop<br/>(unattended: drive→mine→fix→test→commit, repeatedly)"]
-    loop --> morning["morning gate<br/>(review the integration diff — you merge)"]
-    loop -.->|batch left unmerged| reconcile["/tanuki-loop &lt;t&gt; unresolved · reconcile"]
+    run --> loop["/tanuki-loop"]
+    loop --> implement["implement"]
+    implement --> commit["commit"]
+    commit --> morning{{"morning gate"}}
+    morning --> reconcile["/tanuki-loop reconcile"]
+    morning --> decide
 
     classDef gate fill:#fde68a,stroke:#b45309,color:#000;
     class decide,morning gate;
 ```
 
-The two families never overlap in what they write: `/tanuki` produces a brief
-and (on your accept) files issues; `/tanuki-loop` writes only to its own
-integration branch. Neither ever writes into the repo under test.
+The steps, in order:
+
+- **`/tanuki init`** — one-time onboarding; proposes the scenarios to drive.
+- **`/tanuki`** — drives a run and produces the ranked proposal brief.
+- **`/tanuki decide`** — the human gate: accept a proposal to file its GitHub
+  issue, or dismiss/defer it.
+- **`/tanuki-loop`** — the unattended overnight branch: repeats the cycle on
+  its own integration branch.
+- **implement → commit** — the loop's per-iteration work, landed on the
+  integration branch (never on your default branch).
+- **morning gate** — the relocated human gate: you review the integration diff
+  and merge. Anything the loop deferred returns to `/tanuki decide`.
+- **`/tanuki-loop reconcile`** — lands any batch you left unmerged.
+
+The highlighted blocks are the two human gates; everything the loop writes
+stays on its integration branch, never in the repo under test.
 
 ## Command index
 
