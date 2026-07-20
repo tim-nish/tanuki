@@ -1633,9 +1633,19 @@ def cmd_distill(args, ledger):
                       '<template file>} in ~/.tanuki/config.json or the '
                       'scenarios file\'s "defaults" block')
             print(f"note: {notice}", file=sys.stderr)
+        # F213: match --check's explicit next-pointer — when configured but
+        # nothing qualifies, say what to do, not only why the list is empty.
+        next_hint = None
+        if block is not None and not cands:
+            next_hint = ("nothing to distill yet — re-drive the target (or "
+                         "bump an existing finding with `upsert-finding "
+                         "--match <id>`) until one recurs to the bar above, "
+                         "then re-run `distill --list`")
+            print(f"next: {next_hint}", file=sys.stderr)
         print(json.dumps(
             {"configured": block is not None,
              **({"notice": notice} if notice else {}),
+             **({"next": next_hint} if next_hint else {}),
              "min_recurrence": cfg["min_recurrence"],
              "min_scenarios": cfg["min_scenarios"],
              "candidates": [{"id": f["id"], "title": f["title"],
