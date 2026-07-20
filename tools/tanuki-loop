@@ -4858,15 +4858,20 @@ def cmd_dashboard(args):
         if lc is None and state["quiet_streak"] == 0:
             # F189: with record-cycle never run, a zero streak is silently
             # meaningless — say so explicitly instead of rendering it.
+            # F188: name what convergence IS even when it can't be evaluated —
+            # a cold reader meets the section's own subject term here first.
             lines.append("  convergence: no cycles recorded — convergence "
-                         "not evaluated (run record-cycle after each "
-                         "iteration)")
+                         "(two quiet cycles in a row) not evaluated (run "
+                         "record-cycle after each iteration)")
         else:
+            # F188: the '/2' and the section title use 'convergence' before it
+            # is defined — state the threshold (two quiet cycles in a row) at
+            # its first appearance, then define 'quiet'.
             lines.append(f"  convergence: quiet streak "
-                         f"{state['quiet_streak']}/2 — "
-                         "a cycle is quiet when it finds no new actionable "
-                         "finding, produces no patch commit, and met the "
-                         "exploration quota")
+                         f"{state['quiet_streak']}/2 — convergence is two "
+                         "quiet cycles in a row; a cycle is quiet when it "
+                         "finds no new actionable finding, produces no patch "
+                         "commit, and met the exploration quota")
         if lc:
             held = [("no new findings" if lc["new_actionable"] == 0 else
                      f"{lc['new_actionable']} NEW actionable finding(s)"),

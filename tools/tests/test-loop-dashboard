@@ -30,6 +30,14 @@ grep -q "^  convergence:" <<<"$out"          || fail "section 5 (convergence) mi
 grep -q "NEXT:" <<<"$out"                    || fail "section 6 (NEXT) missing"
 pass "all six sections render on an init-only run"
 
+# --- #254 / F188: cold-reader terms are defined on screen --------------------
+# 'convergence' is the section's own subject; state the threshold (two quiet
+# cycles in a row) at its first appearance rather than leaving a reader to
+# infer it from the '/2'. Reachable on the no-cycles branch of an init-only run.
+grep -q "convergence (two quiet cycles in a row)" <<<"$out" \
+  || fail "convergence must define its threshold (two quiet cycles in a row)"
+pass "#254: convergence defines its threshold inline (F188)"
+
 # --- missing substrate degrades to a stated reason, never silent absence -----
 # The exact wording is the D3 enumeration's business (tools/tests/
 # test-loop-empty-states, one case per member); this fixture asserts only the
@@ -76,6 +84,18 @@ grep -q "status→accepted = ledger status transitions this run, not patch commi
 grep -qE "this run: .*fixed" <<<"$out2" \
   && fail "the retired 'fixed' label must not render in the delta line"
 pass "delta counters carry inline definitions; 'fixed' label retired (F6)"
+
+# --- #254 / F6+F188: 'recurred' and the 'frozen' overload are glossed ---------
+# 'recurred' is unexplained jargon without its gloss; and 'frozen' is overloaded
+# (the execution clock vs. attempt-capped findings), so the findings sense is
+# labelled 'frozen findings' and disambiguated from the morning queue inline.
+grep -q "recurred = a known finding observed again this run" <<<"$out2" \
+  || fail "'recurred' must carry its inline definition (#254)"
+grep -q "frozen findings" <<<"$out2" \
+  || fail "the findings sense of 'frozen' must be labelled 'frozen findings' (#254)"
+grep -q "deferred/frozen = morning-queue entries" <<<"$out2" \
+  || fail "'frozen' overload must be disambiguated from the morning queue (#254)"
+pass "#254: 'recurred' glossed and the 'frozen' overload disambiguated (F6/F188)"
 
 # --- F7: a long deferral reason truncates WITH a pointer, never bare ----------
 run="$("${L[@]}" status | python3 -c 'import json,sys;print(json.load(sys.stdin)["run"])')"
