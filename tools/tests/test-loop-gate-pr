@@ -4,7 +4,10 @@
 #   - gate-pr refuses (exit 3, nothing pushed) before the run is finished,
 #     and when final tests have not passed on the CURRENT integration HEAD;
 #   - on a finished+tested run it pushes the integration branch and opens ONE
-#     Draft PR — the delivery of review material, not ratification;
+#     ready-for-review PR (ready-by-default amendment 2026-07-20) — the
+#     delivery of review material, not ratification;
+#   - the Draft is opt-in (`gate-pr --draft` or loop block gate_pr_draft:true),
+#     and a re-run reconciles an existing PR's draft status to the intended one;
 #   - it is idempotent: a re-run reuses the recorded PR, never duplicates;
 #   - a push failure leaves the local integration branch intact;
 #   - it NEVER merges (the fake gh records every invocation; no merge call
@@ -37,10 +40,14 @@ echo "\$*" >> "\$state_dir/calls.log"
 case "\$1 \$2" in
   "pr list")   echo "[]" ;;
   "pr create") echo "https://example.invalid/owner/repo/pull/7" ;;
+  "pr ready")  echo "ready toggled" ;;   # covers \`pr ready\` and \`pr ready --undo\`
   "pr view")
     if echo "\$*" | grep -q "baseRefName"; then
       if [ -f "\$state_dir/pr_base" ]; then
-        echo "{\"baseRefName\": \"\$(cat "\$state_dir/pr_base")\", \"headRefName\": \"h\"}"
+        # isDraft defaults to false (a PR created ready-for-review); the draft
+        # transition tests script pr_isdraft to drive reconciliation.
+        isd="\$(cat "\$state_dir/pr_isdraft" 2>/dev/null || echo false)"
+        echo "{\"baseRefName\": \"\$(cat "\$state_dir/pr_base")\", \"headRefName\": \"h\", \"isDraft\": \$isd}"
       else
         echo "fake gh: pr_base not scripted" >&2; exit 1
       fi
@@ -166,18 +173,23 @@ PY
 pass "F230: gate-pr recovery is cause-specific (missing base ref vs generic)"
 git -C "$repo" remote set-url origin "$bare"
 
-# --- happy path: push + ONE Draft PR ------------------------------------------
+# --- happy path: push + ONE ready-for-review PR (ready-by-default) ------------
 res="$("${L[@]}" gate-pr)"
 [ "$(echo "$res" | jget '["created"]')" = "True" ] \
-  || fail "gate-pr must create the Draft PR on first success"
+  || fail "gate-pr must create the PR on first success"
 [ "$(echo "$res" | jget '["pr"]["number"]')" = "7" ] \
   || fail "gate-pr must record the PR number"
+[ "$(echo "$res" | jget '["pr"]["draft"]')" = "False" ] \
+  || fail "the delivered PR must be ready-for-review by default (not a Draft)"
 git -C "$repo" rev-parse --verify -q "refs/remotes/origin/${integ#refs/heads/}" \
   >/dev/null 2>&1 || git -C "$bare" rev-parse --verify -q "$integ" >/dev/null \
   || fail "the integration branch must be on the remote"
-grep -q "pr create --draft" "$root/gh-state/calls.log" \
-  || fail "the PR must be created as a DRAFT"
-pass "finished+tested run: branch pushed, one Draft PR opened"
+grep -q "pr create" "$root/gh-state/calls.log" \
+  || fail "gate-pr must create the PR"
+if grep -q "pr create --draft" "$root/gh-state/calls.log"; then
+  fail "the PR must NOT be a Draft by default (ready-by-default 2026-07-20)"
+fi
+pass "finished+tested run: branch pushed, one ready-for-review PR opened"
 
 # --- the delivery record is the loop's terminal fact --------------------------
 [ "$(echo "$res" | jget '["delivered"]["pr"]')" = "7" ] \
@@ -241,6 +253,78 @@ pass "forge read failure: local base fallback, noted (F193)"
 echo "$base" > "$root/gh-state/pr_base"
 "${L[@]}" gate-pr >/dev/null   # restore the recorded base for the tests below
 
+# --- draft status is reconciled on re-run (ready-by-default + --draft opt-in) -
+# The delivered PR is ready (isDraft=false on the forge). Opting into a Draft
+# on a re-run must transition the existing PR via `gh pr ready --undo`, never
+# create a second PR.
+echo false > "$root/gh-state/pr_isdraft"
+: > "$root/gh-state/calls.log"
+resd="$("${L[@]}" gate-pr --draft)"
+[ "$(echo "$resd" | jget '["reused"]')" = "True" ] \
+  || fail "gate-pr --draft on a delivered run must reuse, not recreate"
+[ "$(echo "$resd" | jget '["pr"]["draft"]')" = "True" ] \
+  || fail "gate-pr --draft must record the PR as a Draft"
+grep -q "pr ready --undo" "$root/gh-state/calls.log" \
+  || fail "a ready->draft transition must call \`gh pr ready --undo\`"
+if grep -q "pr create" "$root/gh-state/calls.log"; then
+  fail "a draft transition must never create a second PR"
+fi
+pass "reuse: ready->draft reconciled via \`pr ready --undo\`, no new PR"
+
+# Now the forge PR is a Draft; the default (ready) re-run must un-draft it via
+# `gh pr ready` (no --undo).
+echo true > "$root/gh-state/pr_isdraft"
+: > "$root/gh-state/calls.log"
+resr="$("${L[@]}" gate-pr)"
+[ "$(echo "$resr" | jget '["pr"]["draft"]')" = "False" ] \
+  || fail "default gate-pr must reconcile a Draft PR back to ready-for-review"
+grep -q "pr ready" "$root/gh-state/calls.log" \
+  || fail "a draft->ready transition must call \`gh pr ready\`"
+if grep -q "pr ready --undo" "$root/gh-state/calls.log"; then
+  fail "a draft->ready transition must not pass --undo"
+fi
+pass "reuse: draft->ready reconciled via \`pr ready\` (no --undo)"
+
+# Idempotent: when the forge already matches the intended status, no transition
+# call is made.
+echo false > "$root/gh-state/pr_isdraft"
+: > "$root/gh-state/calls.log"
+"${L[@]}" gate-pr >/dev/null
+if grep -q "pr ready" "$root/gh-state/calls.log"; then
+  fail "no draft transition when the PR is already in the intended state"
+fi
+pass "reuse: already-ready PR is a no-op (no \`pr ready\` call)"
+rm -f "$root/gh-state/pr_isdraft"
+echo "$base" > "$root/gh-state/pr_base"
+"${L[@]}" gate-pr >/dev/null   # re-restore recorded base for the tests below
+
+# --- opt-in via the loop block: gate_pr_draft:true delivers a Draft on CREATE -
+# Validates the whole opt-in chain: loop_config reads gate_pr_draft, init
+# stores it in run state, and gate-pr passes --draft to `gh pr create`.
+scend="$root/scend.json"
+cat > "$scend" <<JSON
+{"target": "td", "loop": {"test_cmd": "true", "iterations": 3,
+ "wall_time_s": 600, "token_budget": 1000, "attempt_cap": 2, "gate": "pr",
+ "gate_pr_draft": true}}
+JSON
+LD=("$here/tanuki-loop" --target td)
+wtd="$("${LD[@]}" init --loop-repo "$repo" --scenarios "$scend" | jget '["worktree"]')"
+[ "$(cat "$root/td/loop/$(cat "$root/td/loop/current")/state.json" \
+     | jget '["gate_pr_draft"]')" = "True" ] \
+  || fail "init must store the loop block's gate_pr_draft opt-in in run state"
+"${LD[@]}" iter-start >/dev/null
+echo w >> "$wtd/f.txt"; git -C "$wtd" commit -qam "td work"
+"${LD[@]}" test >/dev/null
+"${LD[@]}" iter-verify >/dev/null
+"${LD[@]}" finish --reason cap >/dev/null
+: > "$root/gh-state/calls.log"
+resdc="$("${LD[@]}" gate-pr)"
+[ "$(echo "$resdc" | jget '["pr"]["draft"]')" = "True" ] \
+  || fail "gate_pr_draft:true must deliver a Draft PR on create"
+grep -q "pr create --draft" "$root/gh-state/calls.log" \
+  || fail "the loop block opt-in must pass --draft to \`gh pr create\`"
+pass "loop block gate_pr_draft:true delivers a Draft on create (opt-in chain)"
+
 # --- unresolved annotates a delivered branch with its settlement --------------
 unres="$("${L[@]}" unresolved --json)"
 [ "$(echo "$unres" | jget '["branches"][0]["delivered"]["settlement"]["result"]')" = "pending" ] \
@@ -253,7 +337,7 @@ echo "$dash" | grep -q "DELIVERED: PR #7" \
   || fail "dashboard must show the delivery"
 echo "$dash" | grep -q "SETTLEMENT: pending" \
   || fail "dashboard must show the derived settlement"
-echo "$dash" | grep -q "review + merge the Draft PR" \
+echo "$dash" | grep -q "review + merge the PR" \
   || fail "dashboard NEXT must point at the forge, not local merge steps"
 if echo "$dash" | grep -q "approve or reject the merge"; then
   fail "a delivered run must not show the local morning-gate steps"

@@ -81,8 +81,9 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
   gate-push                      push the base branch to its remote (after gate-check,
                                  before materializing issues); refuses a diverged
                                  remote rather than force-pushing
-  gate-pr [--title T] [--body-file F]   PR-protected targets: push the
-                                 INTEGRATION branch and open one Draft PR
+  gate-pr [--title T] [--body-file F] [--draft]   PR-protected targets: push
+                                 the INTEGRATION branch and open one
+                                 ready-for-review PR (Draft via --draft)
                                  against the base — DELIVERY, the loop's
                                  terminal act (owner ruling 2026-07-17).
                                  Records {pr, head_sha, base_sha}; never
@@ -1799,10 +1800,15 @@ def resolve_loop_config(args):
         else loopcfg.get("attempt_cap"),
         # "merge" (default): the operator merges locally and gate-push pushes
         # the base. "pr": the base branch is push-protected, so the run's close
-        # delivers a Draft PR instead (gate-pr) and the Human Gate moves to PR
-        # approval + merge on the forge (spec-tanuki-loop "PR-protected
-        # targets").
+        # delivers a ready-for-review PR instead (gate-pr; Draft opt-in) and
+        # the Human Gate moves to PR approval + merge on the forge
+        # (spec-tanuki-loop "PR-protected targets").
         "gate": getattr(args, "gate", None) or loopcfg.get("gate") or "merge",
+        # Ready-by-default (spec-tanuki-loop, ready-by-default amendment
+        # 2026-07-20): gate-pr delivers a ready-for-review PR unless the
+        # operator opts back into a Draft via the loop block's
+        # gate_pr_draft:true (or the per-run `gate-pr --draft` override).
+        "gate_pr_draft": bool(loopcfg.get("gate_pr_draft")),
     }
 
 
@@ -2358,7 +2364,7 @@ def cmd_init(args):
         "base": base, "base_sha": base_sha,
         "integration_branch": integration, "worktree": worktree,
         "phase": args.phase, "cap": cap, "attempt_cap": attempt_cap,
-        "gate_mode": cfg["gate"],
+        "gate_mode": cfg["gate"], "gate_pr_draft": cfg["gate_pr_draft"],
         "wall_start": time.time(), "wall_limit_s": wall,
         "token_budget": tokens, "test_cmd": test_cmd,
         "iterations": [], "attempts": {}, "frozen": [], "deferred": [],
@@ -2922,7 +2928,7 @@ def cmd_doctor(args):
                                   if gh_path else
                                   "gate mode 'pr' but `gh` (GitHub CLI) is "
                                   "not on PATH — gate-pr cannot deliver the "
-                                  "Draft PR; install/auth gh or switch the "
+                                  "PR; install/auth gh or switch the "
                                   "loop block's \"gate\" to \"merge\"")})
     else:
         checks.append({"check": "gate-pr-tooling", "ok": True,
@@ -3720,11 +3726,19 @@ def _classify_gate_pr_failure(err):
 
 
 def cmd_gate_pr(args):
-    """Deliver a finished run's review material as ONE Draft PR
-    (spec-tanuki-loop "PR-protected targets"). For a base branch that refuses
-    direct pushes, the local-merge + gate-push gate cannot run; instead the
-    run's close pushes the INTEGRATION branch and opens a single Draft PR
-    integration -> base.
+    """Deliver a finished run's review material as ONE ready-for-review PR
+    (spec-tanuki-loop "PR-protected targets", ready-by-default amendment
+    2026-07-20). For a base branch that refuses direct pushes, the local-merge
+    + gate-push gate cannot run; instead the run's close pushes the
+    INTEGRATION branch and opens a single PR integration -> base.
+
+    Ready-for-review is the default because a Draft is inert to required
+    status checks and review-request automation — the delivered PR could not
+    receive the review it was delivered for until a human un-drafted it. An
+    operator who wants "review material, not a request" opts back into a Draft
+    via `gate_pr_draft: true` in the scenarios loop block or `gate-pr --draft`.
+    Either way the PR is a proposal awaiting review, never a conclusion; the
+    conclusion (the merge) is the Human Gate and never happens here.
 
     THE LOOP ENDS HERE (owner ruling 2026-07-17, delivery boundary). Success
     records the run as delivered — PR number, integration-tip SHA, base SHA —
@@ -3749,6 +3763,11 @@ def cmd_gate_pr(args):
     state = load_state(args.target, args.run)
     repo, base, integ = state["loop_repo"], state["base"], \
         state["integration_branch"]
+    # Ready-by-default (amendment 2026-07-20): the PR is opened ready for
+    # review unless the operator opts into a Draft, either per-run
+    # (`gate-pr --draft`) or per-target (loop block gate_pr_draft:true, stored
+    # in state at init).
+    draft = bool(getattr(args, "draft", False) or state.get("gate_pr_draft"))
     fin = state.get("finished")
     if not fin or fin.get("reason") not in ("cap", "converged"):
         out({"created": False,
@@ -3823,15 +3842,19 @@ def cmd_gate_pr(args):
                 f"(reason: {fin['reason']}) — "
                 f"{len(state['iterations'])} iteration(s) on "
                 f"`{integ}`, base `{base}` @ {state['base_sha'][:12]}.\n\n"
-                "This Draft PR is the **delivery of review material, not "
-                "ratification**. The Human Gate is your approval + merge; "
-                "the loop never merges. Intended merge method: **create a "
-                "merge commit**, so the intent-scoped commits stay visible "
-                "in the base branch's history.\n\n"
+                f"This {'Draft ' if draft else ''}PR is the **delivery of "
+                "review material (a review request), not ratification**. The "
+                "Human Gate is your approval + merge; the loop never merges. "
+                "Intended merge method: **create a merge commit**, so the "
+                "intent-scoped commits stay visible in the base branch's "
+                "history.\n\n"
                 f"Audit trail: `{os.path.join(_ld, 'audit.md')}` — "
                 f"morning queue: `{os.path.join(_ld, 'queue.md')}`.")
-        rc_c, o = gh(repo, "pr", "create", "--draft", "--base", base,
-                     "--head", integ, "--title", title, "--body", body)
+        create_args = ["pr", "create", "--base", base, "--head", integ,
+                       "--title", title, "--body", body]
+        if draft:
+            create_args.insert(2, "--draft")
+        rc_c, o = gh(repo, *create_args)
         if rc_c != 0:
             audit(state, f"gate-pr: `gh pr create` failed: {o}")
             # F192: name the attempted refs, classify the cause from the gh
@@ -3853,15 +3876,22 @@ def cmd_gate_pr(args):
     # F193: a REUSED PR's base is the forge's fact, not local state's — the
     # PR may have been re-targeted since delivery. Read baseRefName from the
     # forge; fall back to state's base (with a note) only when the read fails.
+    # The same read supplies isDraft, so a re-run can reconcile the PR's draft
+    # status to the intended one (amendment 2026-07-20) — idempotent: only a
+    # genuine mismatch is transitioned, and a failed transition warns rather
+    # than undoing a successful delivery.
     pr_base, base_note, warning = base, None, None
+    actual_draft = draft
     if not created:
         ref = str(pr.get("number") or pr.get("url") or "")
-        forge_base = None
+        forge_base, forge_is_draft = None, None
         rc_v, o = gh(repo, "pr", "view", ref, "--json",
-                     "baseRefName,headRefName")
+                     "baseRefName,headRefName,isDraft")
         if rc_v == 0 and o:
             try:
-                forge_base = (json.loads(o) or {}).get("baseRefName")
+                _v = json.loads(o) or {}
+                forge_base = _v.get("baseRefName")
+                forge_is_draft = _v.get("isDraft")
             except ValueError:
                 forge_base = None
         if forge_base:
@@ -3876,7 +3906,29 @@ def cmd_gate_pr(args):
             base_note = (f"forge read of the PR's baseRefName failed — "
                          f"falling back to state's recorded base '{base}' "
                          "(F193)")
-    pr.update({"head_sha": head, "base": pr_base, "draft": True,
+        # Reconcile draft status to the intended one. When the forge read
+        # failed we cannot know the current status (forge_is_draft is None);
+        # base_note already records that failure, so we leave the PR untouched
+        # rather than guessing or double-warning.
+        if forge_is_draft is None:
+            actual_draft = draft
+        elif bool(forge_is_draft) != draft:
+            rc_d, od = (gh(repo, "pr", "ready", "--undo", ref) if draft
+                        else gh(repo, "pr", "ready", ref))
+            if rc_d == 0:
+                actual_draft = draft
+                audit(state, f"gate-pr: transitioned PR #{pr.get('number')} "
+                             f"to {'draft' if draft else 'ready-for-review'}")
+            else:
+                actual_draft = bool(forge_is_draft)
+                _dw = (f"could not transition PR draft status to "
+                       f"{'draft' if draft else 'ready-for-review'} (delivery "
+                       f"stands): {od}")
+                warning = f"{warning}; {_dw}" if warning else _dw
+                audit(state, f"gate-pr WARNING: {_dw}")
+        else:
+            actual_draft = bool(forge_is_draft)
+    pr.update({"head_sha": head, "base": pr_base, "draft": actual_draft,
                "at": time.strftime("%Y-%m-%d %H:%M:%S")})
     if base_note:
         pr["base_note"] = base_note
@@ -3898,8 +3950,9 @@ def cmd_gate_pr(args):
                           "base_sha": base_sha_now if rc_b == 0 else None,
                           "at": pr["at"]}
     save_state(state)
-    audit(state, ("gate-pr: opened Draft PR " if created else
-                  "gate-pr: reusing PR ")
+    audit(state, (("gate-pr: opened %s PR " %
+                   ("Draft" if actual_draft else "ready-for-review"))
+                  if created else "gate-pr: reusing PR ")
                  + f"#{pr.get('number')} ({pr.get('url')}) — head "
                  f"{head[:12]}; DELIVERED — the loop ends here; settlement "
                  "(landed/pending/declined) is derived later from the forge "
@@ -4905,7 +4958,7 @@ def cmd_dashboard(args):
                          "no action needed from you")
         if at_gate and _settle_block:
             # Delivered runs (owner ruling 2026-07-17): the loop ended at the
-            # Draft PR (decision lives on the forge) or a direct merge that has
+            # delivered PR (decision lives on the forge) or a direct merge that has
             # already landed — the dashboard reports the DERIVED settlement
             # instead of the local gate steps.
             at_gate = False
@@ -4924,7 +4977,7 @@ def cmd_dashboard(args):
                             if s.get("stale") else ""))
             n_rule = len(state.get("deferred", [])) + len(state.get("frozen", []))
             if s.get("result") == "pending":
-                lines.append("  NEXT: review + merge the Draft PR on the "
+                lines.append("  NEXT: review + merge the PR on the "
                              "forge (merge commit, don't squash)"
                              + (f"; rule on {n_rule} deferred/frozen item(s)"
                                 if n_rule else ""))
@@ -5298,8 +5351,8 @@ def main():
                     help="how the morning gate lands the batch: 'merge' "
                          "(default) = local merge + gate-push; 'pr' = the "
                          "base refuses direct pushes, so the close delivers "
-                         "a Draft PR via gate-pr (spec-tanuki-loop "
-                         "\"PR-protected targets\")")
+                         "a ready-for-review PR via gate-pr (Draft opt-in; "
+                         "spec-tanuki-loop \"PR-protected targets\")")
     sp.add_argument("--allow-stale-base", action="store_true",
                     help="override the base-freshness fail-closed for a "
                          "deliberately un-pushed local base")
@@ -5396,8 +5449,8 @@ def main():
                     help="how the morning gate lands the batch: 'merge' "
                          "(default) = local merge + gate-push; 'pr' = the "
                          "base refuses direct pushes, so the close delivers "
-                         "a Draft PR via gate-pr (spec-tanuki-loop "
-                         "\"PR-protected targets\")")
+                         "a ready-for-review PR via gate-pr (Draft opt-in; "
+                         "spec-tanuki-loop \"PR-protected targets\")")
     sp.add_argument("--allow-stale-base", action="store_true",
                     help="validate even when the base is behind its upstream "
                          "(the freshness check becomes a note, not a stop)")
@@ -5522,11 +5575,15 @@ def main():
     sp = sub.add_parser(
         "gate-pr",
         help="PR-protected targets: push the integration branch and open ONE "
-             "Draft PR against the base (idempotent; never merges)",
+             "ready-for-review PR against the base — Draft via --draft "
+             "(idempotent; never merges)",
         description=(
-            "Deliver a finished run's review material as a single Draft PR "
-            "integration -> base (spec-tanuki-loop \"PR-protected targets\"). "
-            "The Draft PR is the delivery of review material, NOT "
+            "Deliver a finished run's review material as a single "
+            "ready-for-review PR integration -> base (spec-tanuki-loop "
+            "\"PR-protected targets\", ready-by-default amendment 2026-07-20; "
+            "opt back into a Draft with --draft or the loop block's "
+            "gate_pr_draft:true). The PR is the delivery of review material "
+            "(a review request), NOT "
             "ratification: the Human Gate is PR approval + merge on the "
             "forge, and this command never merges. Preconditions (exit 3 "
             "with a remedy when unmet): the run is finished (cap|converged), "
@@ -5548,6 +5605,14 @@ def main():
                     help="file whose contents become the PR body (default: a "
                          "mechanical summary naming the run, the audit trail, "
                          "and the intended merge-commit method)")
+    sp.add_argument("--draft", action="store_true",
+                    help="deliver the PR as a Draft instead of the "
+                         "ready-for-review default (opt-in; also settable "
+                         "per-target via the scenarios loop block's "
+                         "gate_pr_draft:true). Preserves the pre-2026-07-20 "
+                         "'review material, not a request' framing; a Draft "
+                         "is inert to required checks and review-request "
+                         "automation until a human un-drafts it.")
     sp = sub.add_parser("issue-get")
     sp.add_argument("--key", required=True,
                     help="problem key to look up a previously recorded issue "
