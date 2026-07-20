@@ -4607,6 +4607,16 @@ def cmd_dashboard(args):
             lines.append(f"    last cycle (iter {lc['iter']}): "
                          f"{'quiet' if lc['quiet'] else 'not quiet'} — "
                          + " · ".join(held))
+            # F43: this "NEW actionable" is a DIFFERENT count from "this run:
+            # newly observed" above — same word, different denominators, so a
+            # cold reader must not read them as a contradiction. Name each
+            # scope: this line is one cycle's record-cycle snapshot (the
+            # convergence input for iter {lc['iter']}), the section above is the
+            # whole run's live ledger delta.
+            lines.append("      (scope: one cycle's convergence snapshot — the "
+                         "'this run: newly observed' count above is the live "
+                         "ledger delta across the whole run; the two use "
+                         "different denominators)")
             if not state.get("finished") and state["quiet_streak"] == 1:
                 lines.append("    one more quiet cycle ends the run (converged)")
 
