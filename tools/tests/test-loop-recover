@@ -85,6 +85,26 @@ pass "recover --restore: reset to head_expected, discard reported, iterations im
 "${L[@]}" dashboard | grep -q "STOPPED: breaker" && fail "recovered breaker still shows STOPPED" || true
 pass "post-restore: iter-start passes and the dashboard moves on"
 
+# --- restore lists discarded uncommitted edits, first filename intact (F168/F186)
+# reset --hard also throws away uncommitted TRACKED edits. F168: those must be
+# reported, not read as a no-op ("discarded_uncommitted_edits": []). F186: the
+# first `status --porcelain` line keeps its leading column (" M app.py"), so the
+# ln[3:] parser yields "app.py", not the old truncated "pp.py".
+"${L[@]}" iter-start >/dev/null
+echo "print('x')" > "$wt/app.py"; gwt add app.py; gwt commit -qam add-app
+"${L[@]}" iter-verify --no-patch >/dev/null      # app.py is now part of head_expected
+echo external-f > "$wt/f"; gwt commit -qam external-edit   # external commit trips the breaker
+rc=0; "${L[@]}" iter-start >/dev/null 2>&1 || rc=$?
+[ "$rc" = "3" ] || fail "expected external-modification breaker before the uncommitted-edit restore"
+echo "print('changed')" > "$wt/app.py"           # uncommitted tracked edit, discarded by reset --hard
+out="$("${L[@]}" recover --restore)"
+echo "$out" | jget '["ok"]' | grep -q True || fail "recover --restore did not succeed"
+# One exact-match assertion catches both bugs: [] (F168) and ['pp.py'] (F186 truncation).
+echo "$out" | jget '["discarded_uncommitted_edits"]' | grep -qxF "['app.py']" \
+  || fail "discarded uncommitted edits not reported accurately (F168 empty-list / F186 first-filename truncation)"
+[ "$(cat "$wt/app.py")" = "print('x')" ] || fail "restore did not revert the uncommitted edit"
+pass "recover --restore: discarded uncommitted edits listed, first filename not truncated (F168/F186)"
+
 # --- double-recover refusal ----------------------------------------------------
 echo external2 > "$wt/f"; gwt commit -qam external-2
 rc=0; "${L[@]}" iter-start >/dev/null 2>&1 || rc=$?
