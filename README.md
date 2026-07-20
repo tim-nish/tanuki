@@ -134,8 +134,14 @@ machinery those two drive.
   cycle on its own integration branch and hands you one batch to review in the
   morning. The human gate is *relocated* here, not removed — only you merge.
 
-After onboarding with `/tanuki init`, the flow branches into the two modes:
-the attended `/tanuki` pipeline and the unattended `/tanuki-loop`.
+After onboarding with `/tanuki init`, the flow branches into the two modes.
+They deliberately end differently, because they answer different questions:
+`/tanuki` **finds** problems and hands you proposals — its endpoint is a filed
+GitHub issue for you to act on — while `/tanuki-loop` **fixes** problems
+overnight and hands you a batch — the morning gate ends at a merge (that is
+the spec's own endpoint, not a simplification). What the two share is the
+human gate `/tanuki decide`: it decides the attended run's proposals, and the
+loop's deferred judgment items are handed back to that same attended sitting.
 
 ```mermaid
 flowchart TD
@@ -143,40 +149,27 @@ flowchart TD
     init --> tanuki["/tanuki"]
     init --> loop["/tanuki-loop"]
 
-    tanuki --> decide["/tanuki decide"]
-    decide --> issue(["file a GitHub issue"])
+    tanuki --> decide{{"/tanuki decide"}}
+    decide --> issue(["GitHub issue filed"])
 
-    subgraph iterate["overnight loop"]
-      direction LR
-      drive["drive"] --> mine["mine"] --> classify["classify"] --> implement["implement"] --> test["test"] --> commit["commit"]
-    end
-    loop --> drive
-    commit --> morning{{"morning gate"}}
-    morning --> merge(["you merge"])
-    morning -.-> reconcile["/tanuki-loop reconcile"]
-    reconcile --> merge
+    loop --> gate{{"morning gate"}}
+    gate --> merge(["you merge"])
+    gate -.->|deferred judgments| decide
 
-    classDef gate fill:#fde68a,stroke:#b45309,color:#000;
-    class decide,morning gate;
+    classDef gatecls fill:#fde68a,stroke:#b45309,color:#000;
+    class decide,gate gatecls;
 ```
 
-- **`/tanuki init`** — one-time onboarding; writes the scenarios file both
-  modes share. From here you run either mode.
-- **`/tanuki` → `/tanuki decide`** — the attended pipeline: drive a run, read
-  the brief, then the human gate where you accept a proposal to file its
-  GitHub issue (or dismiss / defer).
-- **`/tanuki-loop`** — the unattended overnight loop. Its cycle
-  (drive → mine → classify → implement → test → commit) runs automatically on
-  its own integration branch, repeating until two quiet cycles or the
-  iteration cap. You type none of those inner steps; `/tanuki-loop` drives them.
-- **morning gate** — the relocated human gate: you review the integration diff
-  and merge. Implement and commit already happened overnight *inside the loop*
-  — the gate only reviews and lands the result, it does not implement.
-- **`/tanuki-loop reconcile`** — a separate attended sitting that lands work
-  from an earlier run you left unmerged. It is a `/tanuki-loop` command, not a
-  `/tanuki` one.
+- **`/tanuki init`** — one-time onboarding; writes the scenario file both
+  modes run from.
+- **`/tanuki decide`** — the human gate for judgment, on both paths: accepting
+  a proposal files its GitHub issue; the loop's deferred spec/judgment items
+  arrive here too, because the loop never decides those on its own.
+- **morning gate** — the loop's human gate: you review the integration branch
+  diff, run the final tests, and merge. The fixing already happened overnight
+  on the loop's own branch — this gate reviews and lands, it does not
+  implement.
 
-Highlighted blocks are the two human gates (`/tanuki decide`, `morning gate`).
 Everything the loop writes stays on its own integration branch — never in the
 repo under test — until you merge.
 
