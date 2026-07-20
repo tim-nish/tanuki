@@ -47,6 +47,20 @@ resolves — before any drive consumes it. Once the declared-input
 configuration surface (#172, stories 1.27–1.29) lands, the block is
 declared/edited there; until then, a doctor-validated hand edit.
 
+**Scope is per-target, never machine-wide (issue #241 / F198).** `contribute_back`
+is resolved **only** from a target's own configuration — its scenarios-file
+`defaults` block, or the per-target declared-input surface once it lands —
+**never** from the machine-wide `~/.tanuki/config.json`. A `contribute_back`
+block found at global scope is **ignored** for resolution and **flagged by
+doctor** (a global-scope contribution target is almost always a leftover from
+another target's session). Rationale: the staging `path` names one target's
+knowledge hub; resolving it globally lets one target — or a stale scratch run
+— silently route *every* target's lessons into that hub, mutating shared
+machine state. This is the one exception to the general
+`~/.tanuki/config.json < target defaults < CLI` precedence
+(`docs/tanuki-spec.md`): for `contribute_back` the global tier does not
+participate at all.
+
 ## 3. The emit tool (deterministic, zero-dep per the routing rule)
 
 `tanuki-ledger distill` (or equivalent subcommand — no new top-level
