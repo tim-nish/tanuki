@@ -98,7 +98,8 @@ git -C "$repo" branch -D "$base" >/dev/null
   || fail "an unreadable base must derive settlement=unknown, never landed"
 pass "base unreadable: settlement=unknown (never optimistic)"
 
-# --- gate=pr path is UNCHANGED: undelivered -> null (no reachability shortcut) -
+# --- gate=pr path keeps NO reachability shortcut; its undelivered null is now
+# --- a typed empty-state, not a bare null (story 1.46 / issue #240) -----------
 prrepo="$root/prrepo"; mkdir -p "$prrepo"
 git init -q "$prrepo"; git -C "$prrepo" config user.email a@b.c
 git -C "$prrepo" config user.name t
@@ -118,11 +119,17 @@ echo work >> "$prwt/f.txt"; git -C "$prwt" commit -qam "loop work"
 "${PL[@]}" test >/dev/null
 "${PL[@]}" iter-verify >/dev/null
 "${PL[@]}" finish --reason cap >/dev/null
-# A pr-gate run that has NOT delivered (no gate-pr) stays null — the
-# direct-merge reachability derivation must not leak into the PR path (the full
-# pr flow is exercised by test-loop-gate-pr; this guards the branch here).
-[ "$(("${PL[@]}" status) | jget '["settlement"]')" = "None" ] \
-  || fail "an undelivered gate=pr run must keep settlement null (no regression)"
-pass "gate=pr unaffected: undelivered run stays null"
+# A pr-gate run that has NOT delivered (no gate-pr) derives NO settlement result
+# — the direct-merge reachability derivation must not leak into the PR path (the
+# full pr flow is exercised by test-loop-gate-pr; this guards the branch here).
+# story 1.46: the underlying settlement is still None, but `status` surfaces it
+# as the typed `undelivered-closed` empty-state (a closed hosted run that never
+# delivered is a gap), never a bare null.
+prstat="$("${PL[@]}" status)"
+[ "$(jget '["settlement"]["state"]' <<<"$prstat")" = "settlement:undelivered-closed" ] \
+  || fail "an undelivered, closed gate=pr run must surface undelivered-closed: $(jget '["settlement"]' <<<"$prstat")"
+[ "$(jget '["settlement"]["expected"]' <<<"$prstat")" = "False" ] \
+  || fail "a closed gate=pr run that never delivered is a GAP: $prstat"
+pass "gate=pr undelivered: no reachability shortcut; typed undelivered-closed, not null"
 
 echo "all direct-merge settlement fixtures passed"

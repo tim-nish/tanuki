@@ -4297,6 +4297,35 @@ EMPTY_STATES = {
                "persisted, so nothing was scheduled: expected for a manual, "
                "toy, or ad-hoc run that drove an unmanaged set by design",
         next=None),
+    # -- status delivered/settlement (story 1.46 / issue #240) ----------------
+    # `status` rendered `delivered`/`settlement` as a bare null whenever a run
+    # had nothing to settle, and that null conflated two states a reader must
+    # tell apart. The discriminator is the GATE, not the observation host: the
+    # direct-merge (non-PR) gate is HOSTLESS (no forge to deliver to), so a run
+    # with no work to merge has nothing to settle — expected; the PR gate is
+    # HOSTED (delivers to a forge), so a null means a delivery is still
+    # expected — and whether its absence is a gap flips with the run's state.
+    # Each null resolves to ONE of these members, carrying the expected-vs-gap
+    # verdict the null erased (F127 / the same D3 convention the dashboard uses).
+    "settlement:n-a-hostless": dict(
+        expected=True,
+        reason="n/a — this target's direct-merge (non-PR) gate is hostless "
+               "(no forge), and this run merged no work, so there is nothing "
+               "to deliver or settle; not a pending delivery — there is no "
+               "forge to be pending on",
+        next=None),
+    "settlement:pending-active": dict(
+        expected=True,
+        reason="none yet — this hosted (PR gate) run is still active and has "
+               "not delivered; the delivery is recorded at the gate and its "
+               "settlement is derived from the forge once a PR exists",
+        next=None),
+    "settlement:undelivered-closed": dict(
+        expected=False,
+        reason="the run closed without recording a delivery — this hosted "
+               "(PR gate) target was expected to deliver at its gate; the "
+               "integration branch holds work that never went out",
+        next=None),
 }
 
 
@@ -4997,6 +5026,31 @@ def cmd_status(args):
     # Derived once: the top-level settlement AND (on the direct-merge gate) the
     # delivery record it carries, so both fields agree on one derivation.
     _status_settlement = derive_settlement(state)
+    # story 1.46 / issue #240: a null settlement erased the expected-vs-gap
+    # signal — a hostless target (delivery never applies) rendered identically
+    # to a hosted run still awaiting delivery. Resolve the null to a typed
+    # empty-state member so `delivered`/`settlement` carry the verdict, the same
+    # enumerated convention (EMPTY_STATES) the dashboard uses; a real settlement
+    # is left untouched. `delivered` is null exactly when settlement is (no
+    # delivery ⇒ nothing to settle), so both fields carry the same member.
+    if _status_settlement is None:
+        if state.get("gate_mode", "merge") == "merge":
+            # Direct-merge (non-PR) gate: null ⇒ no work merged, nothing to
+            # deliver — hostless, expected.
+            _settle_key = "settlement:n-a-hostless"
+        elif state.get("finished"):
+            # PR gate, run closed with no delivery ⇒ a gap.
+            _settle_key = "settlement:undelivered-closed"
+        else:
+            # PR gate, run still active ⇒ delivery may still come.
+            _settle_key = "settlement:pending-active"
+        _, _empty = empty_state(_settle_key, args.target)
+        _delivered_field = _empty
+        _settlement_field = _empty
+    else:
+        _delivered_field = (state.get("delivered")
+                            or _status_settlement.get("delivered"))
+        _settlement_field = _status_settlement
     out({
         # Verdict leads: the condition is the question status exists to answer.
         "verdict": run_verdict(state),
@@ -5027,10 +5081,12 @@ def cmd_status(args):
         # record (it ends at a local merge), so `delivered` is derived from the
         # merge's reachability alongside `settlement` — populated when landed,
         # symmetrically with the PR path; a landed direct merge never shows
-        # `settlement: null`. None only for a run that was never delivered.
-        "delivered": state.get("delivered") or (_status_settlement or {}).get(
-            "delivered"),
-        "settlement": _status_settlement,
+        # `settlement: null`. A run with nothing to settle no longer renders a
+        # bare null either: it carries a typed empty-state member (story 1.46,
+        # resolved just above) so the reader can tell "n/a for this gate" from
+        # "a delivery is still expected".
+        "delivered": _delivered_field,
+        "settlement": _settlement_field,
         # F107: iterations_done counted iterations that were still OPEN, so "2"
         # could mean two closed or one closed and one in flight — ambiguous
         # exactly where the morning gate skims it. Report closed only, with the
