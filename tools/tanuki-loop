@@ -376,7 +376,9 @@ def with_skipped_checks_note(reason):
     a reason that already states it passes through untouched."""
     if "iteration cap reached" in reason and "not evaluated" not in reason:
         return (reason + " — later checks (wall-time, external modification) "
-                "were not evaluated (F93)")
+                "were not evaluated (F93); with no further iter-start to run "
+                "it, the worktree is no longer guarded against external "
+                "modification until a new run is initialized")
     return reason
 
 
@@ -5050,7 +5052,15 @@ def main():
             "  tanuki-loop --target myrepo init --loop-repo ~/work/myrepo "
             "--scenarios ~/.tanuki/scenarios/myrepo.scenarios.json --phase 1\n"
             "  tanuki-loop --target myrepo iter-start\n"
-            "  tanuki-loop --target myrepo status"),
+            "  tanuki-loop --target myrepo status\n"
+            "\n"
+            # F116: point at the full scenarios-file shape from the top level,
+            # so it is not discoverable only by knowing to run `doctor --help`.
+            "the per-target settings (test_cmd, iterations, wall_time_s, "
+            "token_budget, attempt_cap) live in the scenarios file's \"loop\" "
+            "block; it is NOT auto-loaded — pass it with --scenarios. Run "
+            "`tanuki-loop --target <t> doctor --help` for the full "
+            "copy-pasteable \"loop\"-block shape and the sandbox recipe."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     # --target is a global option and must precede the subcommand, e.g.
     # `tanuki-loop --target foo iter-start` (F40); it is a namespace slug, not a
