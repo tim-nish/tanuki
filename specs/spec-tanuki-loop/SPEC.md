@@ -3,7 +3,13 @@
 Status: RATIFIED 2026-07-16 (header sync — proposed 2026-07-13, since
 implemented and amended through 2026-07-15; the PROPOSED header had gone
 stale). AMENDED 2026-07-18 (triage of issue #138): concurrent drive phase —
-see "Concurrent drives within one iteration". Supersedes the blanket never-automate reading of the operator's
+see "Concurrent drives within one iteration". AMENDED 2026-07-21 (triage of
+#262/#263): **two-outcomes-only delivery** — the direct-merge-to-`main` path
+(local `git merge integration → main` + `gate-push`-onto-base) is **removed**;
+PR delivery is now the default and the only path that lands work, and the
+completion signal is deterministic. See "Two-outcomes-only delivery", which
+supersedes the merge-mode framing throughout "Morning gate" and "PR-protected
+targets". Supersedes the blanket never-automate reading of the operator's
 2026-07-11 decision record for mechanical (non-spec, non-outward) work
 executed against snapshot-isolated state (integration worktree, host
 fixture); the relocated morning gate is the surviving human gate
@@ -31,9 +37,11 @@ The Human Gate is **not removed — it is relocated.** It moves from N inline
 This keeps Tanuki's founding principle intact (`docs/tanuki-spec.md`:
 proposals-only, decision support not autonomy): the loop **prepares**, the
 human **ratifies**. Two things are therefore *never* automated, in any phase:
-irreversible / outward-facing actions (GitHub issues, the merge to `main`) and
-genuine design decisions (spec-touching work). Everything mechanical and
-fully reversible runs unattended.
+irreversible / outward-facing actions (GitHub issues, and — since 2026-07-21 —
+the merge to `main`, which the loop no longer performs at all: the human
+ratifies by merging the delivered PR or a manual branch merge; see
+"Two-outcomes-only delivery") and genuine design decisions (spec-touching
+work). Everything mechanical and fully reversible runs unattended.
 
 ## Non-negotiables
 
@@ -49,10 +57,17 @@ fully reversible runs unattended.
 - **Issue-free overnight.** During the run the loop creates **no** GitHub
   issues, labels, projects, PRs, or story artifacts. The ledger is the single
   source of truth (see below).
-- **`integration → main` happens only behind the operator's explicit
-  approval — every phase, Phase 3 included.** The loop never merges
-  unattended; once approved, the morning gate performs the merge, merge-first
-  (below). No iteration writes `main`.
+- **The loop never merges to `main` — two delivery outcomes only (AMENDED
+  2026-07-21, triage of #262/#263).** A normal close delivers exactly one of
+  two terminal states: (a) **branch-only** — the integration branch is left in
+  place and the loop stops there, or (b) **PR-from-branch** (the default) — a
+  PR is opened `integration → base`. The loop has **no** code path that merges
+  the integration branch into `main`/base — not unattended, and not as an
+  attended morning-gate step. The merge into `main` is the human's, performed
+  through the PR (or a manual branch merge), never driven by the loop; the
+  direct-merge (`git merge integration → main`) + `gate-push`-onto-base
+  sequence is removed. No iteration writes `main`. See "Two-outcomes-only
+  delivery" (which supersedes the earlier merge-first framing).
 - **A declined gate leaves a debt, and the debt has an owner.** The gate's
   other outcome is that the branch is *not* merged — and that work does not
   evaporate: it sits on the integration branch while `main` moves, until the
@@ -78,11 +93,13 @@ fully reversible runs unattended.
   **only genuine owner decisions** — contract conflicts, ambiguous
   supersession, spec-lane routing, `needs-owner` items — nothing a tool
   could have closed. After approval it performs the terminal actions with no
-  further commands: **merge → push → update state → clean up** (branch and
-  worktree cleanup that `/repo-cleanup` formerly owned moves here). On a
-  PR-protected target (`gate: "pr"`) the terminal "merge" is expressed as PR
-  mechanics, and the reconcile gate approval IS the explicit human decision —
-  the loop still never auto-merges (the 2026-07-17 ruling's substance is
+  further commands: **deliver → update state → clean up** (branch and
+  worktree cleanup that `/repo-cleanup` formerly owned moves here). Delivery is
+  the same two-outcomes model as a normal close (AMENDED 2026-07-21, triage of
+  #262/#263): the reconcile gate opens the PR `integration → base` (or leaves
+  the branch in place), **never** a local `git merge` into base — the
+  reconcile gate approval IS the explicit human decision to deliver, and the
+  loop still never auto-merges (the 2026-07-17 ruling's substance is
   preserved: no merge happens without the owner's explicit approval).
   Reconcile never resolves a contract conflict silently — it presents the
   decision the operator owes, with the governing text quoted.
@@ -156,14 +173,16 @@ propagate here.
   branch — no bound issue, no PR.
 - Intent-scoped commits land on the integration branch — no push, no PR.
 
-GitHub artifacts exist only *after* the morning approval (see "Morning gate").
-This honors the "ledger-only overnight" decision: the ledger is authoritative
-during the run; the outward-facing record is written once, describing what
-actually landed. One scoped exception: on a PR-protected target the run's
-close delivers a **ready-for-review PR** (see "PR-protected targets"; a Draft
-is available opt-in) — a proposal awaiting the approval, not a record
-asserting its outcome; issues and the merge itself still exist only after the
-operator ratifies.
+GitHub artifacts asserting a *conclusion* (issues stating what landed, a merge
+into `main`) exist only *after* the human ratifies (see "Two-outcomes-only
+delivery"). This honors the "ledger-only overnight" decision: the ledger is
+authoritative during the run; a conclusion-asserting record is written once,
+describing what actually landed. A normal close delivers a
+**ready-for-review PR** (`integration → base`; a Draft is available opt-in) —
+a proposal *awaiting* the approval, not a record asserting its outcome; the
+merge itself, and any issues stating what landed, exist only after the
+operator ratifies by merging the PR (or a manual branch merge). A branch-only
+close asserts nothing outward at all.
 
 ## Deterministic substrate (`tools/tanuki-loop`) vs. judgment
 
@@ -181,10 +200,12 @@ per-finding attempt counting and freezing (`attempt`), the two-quiet
 convergence counter (`record-cycle`), the post-merge reachability check
 (`gate-check`), and the materialization idempotency map (`issue-get`/
 `issue-put`). Breakers are `tanuki-loop` exit code 3 with `{"breaker": …}`.
-(`gate-check`/`gate-push` also exit 3 on their enumerated stop conditions
-but emit their own payloads — `{"reachable": false}` / `{"pushed": false,
-…}` — not a `breaker` key; scripted callers must not key on `.breaker` for
-the gate commands.)
+(`gate-check`/`gate-pr` also exit 3 on their enumerated stop conditions
+but emit their own payloads — `{"reachable": false}` / `{"pr": null, …}` —
+not a `breaker` key; scripted callers must not key on `.breaker` for
+the gate commands. `gate-push`-onto-base is retired under two-outcomes-only
+delivery (AMENDED 2026-07-21, triage of #262/#263) — it can never land loop
+output on `main`.)
 
 The tool also owns the operator surface: `doctor` (the read-only Phase 2/3
 headless-readiness validator — see "Headless readiness" below), `policy`
@@ -650,6 +671,68 @@ day they were not looking for it.
   target repo nets zero change), and nothing outside `~/.tanuki/<target>/`.
 - One fixture per enumerated empty state (D3's rule).
 
+## Two-outcomes-only delivery (AMENDED 2026-07-21 — triage of #262/#263)
+
+**The loop's terminal delivery is exactly one of two states, and the loop
+never merges to `main` itself.** This section is authoritative; where the
+older "Morning gate" and "PR-protected targets" text below describes a local
+`git merge integration → main` + `gate-push`-onto-base sequence, that path is
+**removed** and this section governs.
+
+The two outcomes:
+- **(a) Branch-only.** The integration branch (`tanuki-loop/<target>/<ts>`) is
+  left in place; the loop stops there. The operator merges or discards it later
+  through normal git/GitHub flow. The run records a branch-only terminal fact
+  (integration-tip SHA, base SHA, no PR). Used where no forge/tracker is
+  configured, or selected deliberately (`gate: "branch"`).
+- **(b) PR-from-branch (the default).** After a successful close
+  (`finish --reason cap|converged`) and a passing final test on the integration
+  HEAD, `tanuki-loop gate-pr` pushes the **integration branch** (never the
+  base, never forced) and opens **one PR** `integration → base`, **marked ready
+  for review** (a Draft is opt-in via `gate_pr_draft: true` / `gate-pr
+  --draft`). **The loop ends when that PR opens.**
+
+**No third outcome exists.** The loop has no path — attended or unattended —
+that merges the integration branch into `main`/base. The `git merge integration
+→ main` + `gate-push`-onto-base sequence is gone; the merge into `main` is the
+human's, performed through the PR (or a manual branch merge). The **motivating
+incident (2026-07-21)**: a writing-assistant morning gate's direct-merge path
+ran a local `git merge --no-ff` into `main` and `gate-push`ed it; `main` was
+unprotected, so the push landed with **no PR and no review sink**, forcing a
+remote revert and re-delivery via PR. Two-outcomes-only prevents this by
+construction — there is no code path to misuse.
+
+**The completion signal is deterministic (#262).** Delivery has a fixed shape
+and position: a normal run **always** ends by opening the PR (outcome b) or by
+recording the branch-only terminal fact (outcome a). Therefore the *absence* of
+the expected terminal artifact unambiguously means the run did **not** complete
+normally — a crash, an abort, or an early stop is visibly distinguishable from
+success from the output alone, never a silent "no PR" state identical to a
+clean completion. Any non-normal exit is marked as such (stop reason ≠
+`cap|converged`, or no recorded terminal delivery), never left to read as
+success. Best-effort/inconsistent PR creation is forbidden precisely because it
+destroys this property.
+
+**The human gate is preserved in both outcomes.** Nothing merges unattended,
+and no `gate`/delivery config can produce an unattended merge — config selects
+the delivery *form* (PR vs branch-only; ready vs draft), never whether there is
+a gate. PR approval + merge on the forge (or the operator's manual branch
+merge) is the Human Gate; `gate-pr` contains no merge call and no phase adds
+one.
+
+**Issue materialization.** Because the loop no longer merges, "what landed" is
+not asserted at loop close. Issue materialization (one issue per resolved
+problem, stamped `tanuki-loop: <run-id>/<problem-key>`) is the human's to run
+after the PR merges, or a post-merge step keyed off the merged PR — never an
+overnight artifact asserting a conclusion the loop cannot guarantee.
+
+**Settlement stays derived, never declared** (unchanged from the delivery-
+boundary ruling): read-only operations derive the outcome — `landed` (PR
+merged and reachable from the current base, or the branch-only tip reachable
+because the human merged it), `pending` (PR open / branch not yet merged),
+`declined` (PR closed unmerged), `unknown` (forge/base unverifiable, never an
+optimistic default).
+
 ## Morning gate (attended — invariant across all phases)
 
 The loop ends by presenting, for one review:
@@ -658,49 +741,42 @@ The loop ends by presenting, for one review:
 - the audit artifact (every auto-decision the loop made in lieu of the human,
   plus per-iteration start/end SHAs and the convergence/breaker reason).
 
-On the operator's approval the gate runs **merge-first and idempotent** — no
-outward-facing record is written until the merge is a fact:
+On the operator's approval the gate delivers via the two-outcomes model above —
+it **never** merges `integration → main` itself (AMENDED 2026-07-21, triage of
+#262/#263; the former local-merge + `gate-push`-onto-base steps are removed):
 1. **Approve + final tests.** Re-run the target's full test/verify on the
    integration HEAD; abort the gate on failure.
-2. **Merge `integration → main`.** Behind the approval, perform the merge.
-3. **Verify reachability from `main`** (`git merge-base --is-ancestor
-   <integration HEAD> main`).
-4. **Push `main` to its remote** (`tanuki-loop gate-push`) — the first
-   outward-facing step, before any issue is materialized. A merge that stays
-   local is not done: the commit links step 5 stamps onto issues reference a
-   commit that does not exist on the remote (they 404), and a local-only `main`
-   diverges the remote for any concurrent workflow's `git pull --ff-only`
-   (observed 2026-07-14, run `loop-20260714-154413`: a local-only gate merge
-   forced a manual reconcile after story PRs landed on the remote). A diverged
-   remote is reconciled **explicitly** — `gate-push` fetches and, if the remote
-   moved, refuses rather than force-pushing; the operator merges the remote in,
-   re-runs the final tests, and re-runs `gate-push`. Only past a successful
-   push does anything else outward-facing run.
-5. **Materialize** the converged work as GitHub issues — **one issue per
+2. **Deliver.** Open the PR `integration → base` (`tanuki-loop gate-pr`,
+   pushing the integration branch only — never the base, never forced), or,
+   for a branch-only target, record the branch-only terminal fact and stop.
+   **The loop ends here.** The merge into `main` is the human's, on the forge
+   (PR approval + merge) or by a manual branch merge — never the loop's.
+3. **Materialize** the converged work as GitHub issues — **one issue per
    resolved problem** (collapsing the intermediate findings), describing **what
-   landed**, each stamped `tanuki-loop: <run-id>/<problem-key>` (the
-   Materialization key above — one format, everywhere).
-6. **Link** each issue to the (now pushed) merge commit, **close it as
-   completed**, and reconcile the board to Done.
-7. **Remove the loop worktree.** No closing command follows (owner ruling
-   2026-07-17): the merge's reachability from the base *is* the settlement,
-   derived by whatever next needs it — the next `init`'s merged-branch sweep
-   deletes the integration branch, and `/repo-cleanup` owns any earlier
-   cleanup. `finish --reason gate-ratified` survives as a compatibility
-   mechanism only; no workflow instructs it.
+   landed**, each stamped `tanuki-loop: <run-id>/<problem-key>` — **after** the
+   human merges, keyed off the merged PR. It is never written overnight or at
+   loop close, when nothing has landed yet.
+4. **Remove the loop worktree** once the delivery is settled (owner ruling
+   2026-07-17): reachability of the delivered tip from the base *is* the
+   settlement, derived by whatever next needs it — the next `init`'s
+   merged-branch sweep deletes the integration branch, and `/repo-cleanup` owns
+   any earlier cleanup. `finish --reason gate-ratified` survives as a
+   compatibility mechanism only; no workflow instructs it.
 
 **Idempotent retry:** before creating an issue, search for its `<run-id>`
 marker (plus a per-problem key); an existing one is reused, never duplicated.
-If the gate dies after the push, re-running resumes at step 5 and creates only
-the missing issues. The GitHub history is a clean record of resolved problems,
-not a transcript of the overnight search.
+Re-running the post-merge materialization creates only the missing issues. The
+GitHub history is a clean record of resolved problems, not a transcript of the
+overnight search.
 
-## PR-protected targets (`gate: "pr"`)
+## PR delivery — the default gate (`gate: "pr"`)
 
-Some base branches refuse direct pushes (a required-check branch protection);
-there the local-merge + `gate-push` sequence above cannot run at all. For such
-a target the scenarios `loop` block sets `"gate": "pr"` (default `"merge"` —
-everything above unchanged), and the gate reshapes around the forge:
+**PR delivery is the default and the only path that lands work (AMENDED
+2026-07-21, triage of #262/#263).** The former `gate: "merge"` default — a
+local `git merge integration → main` + `gate-push`-onto-base — is **removed**;
+a target opts *out* of a PR only into **branch-only** delivery (`gate:
+"branch"`: leave the integration branch, open no PR), never into a
+loop-driven merge. The gate always reshapes around the forge:
 
 **Delivery is the loop's boundary (owner ruling 2026-07-17; ready-by-default
 amendment 2026-07-20).** After a successful unattended run closes (`finish
@@ -746,21 +822,24 @@ the forge and the current base, at the moment they actually need it:
   timestamp, always marked stale — a cache is never presented as current
   truth, and no view requires a human to restate the forge's decision.
 
-**The direct-merge (non-PR) gate settles the same way — by reachability, not
-by a forge PR.** On a non-PR-protected target the gate merges `integration →
-base` locally rather than opening a Draft PR, so there is no PR state to read;
-the settlement is nonetheless derived, from the **same strict test** — the
-integration tip's reachability from the current base (the "the merge's
-reachability from the base *is* the settlement" rule stated above):
+**The branch-only (non-PR) gate settles the same way — by reachability, not by
+a forge PR (AMENDED 2026-07-21, triage of #262/#263).** A `gate: "branch"`
+target opens no PR and the loop performs no merge, so there is no PR state to
+read; the settlement is nonetheless derived, from the **same strict test** —
+the integration tip's reachability from the current base (reachability of the
+delivered tip from the base *is* the settlement). The human's own later merge
+(via a PR they open, or a manual branch merge) is what makes the tip reachable:
 - **integration tip reachable from the current base** → `landed`, with
-  `delivered` populated from the local merge (integration-tip SHA, base SHA,
-  merge commit) exactly as `gate-pr` populates it from the PR;
-- **not yet reachable** (merge not run, or base moved past it) → `pending`;
+  `delivered` populated (integration-tip SHA, base SHA, merge commit) exactly
+  as `gate-pr` populates it from the PR;
+- **not yet reachable** (human has not merged, or base moved past it) →
+  `pending`;
 - **base unreadable** → `unknown`, never an optimistic default.
 So `status.delivered`/`settlement` populate symmetrically on both gate paths —
-the PR path sources reachability alongside the forge PR, the direct-merge path
-sources it from the base alone. A direct-merge run whose merge has landed must
+the PR path sources reachability alongside the forge PR, the branch-only path
+sources it from the base alone. A branch-only run whose tip has landed must
 never show `settlement: null`, which a reader would misread as a lost delivery.
+Neither path is ever a loop-driven merge into `main`.
 
 **Accounting uses the strict test.** Finding verification and recurrence
 accounting may treat a delivered change as landed **only** when its delivered
@@ -794,8 +873,9 @@ mutated, on violation):
   merge-commit oid, but the grouped history is then lost — an operator choice,
   not a loop one.)
 
-Issue materialization (steps 5–6) is unchanged where a tracker is configured;
-the PR replaces only the merge/push steps (2–4).
+Issue materialization is the post-merge step where a tracker is configured
+(Morning gate step 3) — run after the human merges the PR, keyed off the merged
+PR, never at loop close.
 
 **Branch cleanup has an owner** (amended by the 2026-07-17 delivery-boundary
 ruling): `/repo-cleanup` owns branch and worktree removal, with the next
@@ -855,35 +935,38 @@ phases share one implementation and differ only in supervision and cap:
   up front by `tanuki-loop doctor` (see "Headless readiness") before `init`.
 
 The architecture is **Phase-3-ready from the first commit**: raising the cap
-and removing supervision is the only change between phases. The morning
-`integration → main` gate is invariant in all of them.
+and removing supervision is the only change between phases. The two-outcomes
+delivery gate — a PR (or a branch-only terminal fact), and **never** a
+loop-driven merge into `main` — is invariant in all of them.
 
 ## Rules
 
 - Never write `main`; never touch the operator's normal working tree; never
   create GitHub issues/labels/PRs/story files during iterations.
-- The ledger is the source of truth overnight; GitHub artifacts are written
-  only at the morning gate, describing what landed.
+- The ledger is the source of truth overnight; conclusion-asserting GitHub
+  artifacts (issues describing what landed) are written only **after** the
+  human merges the delivered PR (Morning gate step 3), never at loop close.
 - Every iteration is bracketed by start/end SHAs; rollback is `reset --hard`
   **plus** `git clean -fd` in the loop worktree only, recorded in the audit.
 - Questions only in iteration 1 (recorded as run policy); iterations ≥ 2 are
   non-interactive — judgment without a policy answer is deferred, never asked.
 - A finding may be re-fixed up to its attempt cap (default 4), then it is
   **frozen** — never a whole-loop stop.
-- `integration → main` runs only after explicit approval, merge-first and
-  idempotent; the base is **pushed to its remote before any issue is
-  materialized** (`gate-push`, never force over a diverged remote); deferred
-  judgment waits for the morning, never auto-decided. On a PR-protected
-  target (`gate: "pr"`) the approval takes the form of **PR approval + merge
-  on the forge**: the loop ends at delivering one ready-for-review PR
-  (`gate-pr` — a review request, not ratification; owner ruling 2026-07-17,
-  ready-by-default amendment 2026-07-20; Draft available opt-in), it **never
-  auto-merges**, and settlement (landed / pending / declined / unknown) is
-  **derived** by read-only surfaces from the forge and the current base — no
-  human closing command restates the forge's decision. Reconcile's terminal
-  merge (#210) does not breach this: on a `gate: "pr"` target the terminal
-  action is expressed as PR mechanics, and the reconcile gate approval is
-  the owner's explicit decision — no merge ever happens without it.
+- **Delivery is two outcomes only; the loop never merges to `main` (AMENDED
+  2026-07-21, triage of #262/#263).** A normal close delivers either one
+  ready-for-review PR `integration → base` (`gate-pr`, the default — a review
+  request, not ratification; ready-by-default per the 2026-07-20 amendment,
+  Draft opt-in) or a branch-only terminal fact (`gate: "branch"`). There is
+  **no** direct-merge-to-`main` path — the removed `git merge integration →
+  main` + `gate-push`-onto-base sequence — attended or unattended; the merge
+  into `main` is the human's, on the forge (PR approval + merge) or by a manual
+  branch merge. The loop **never auto-merges**, deferred judgment waits for the
+  morning (never auto-decided), and settlement (landed / pending / declined /
+  unknown) is **derived** by read-only surfaces from the forge and the current
+  base — no human closing command restates the forge's decision. Reconcile
+  (#210) delivers the same two ways — a PR or a left branch — and its gate
+  approval is the owner's explicit decision to deliver; it, too, never merges
+  to `main`.
 - Merged integration branches are cleaned up by `finish` (backstop: the next
   `init`); outside reconcile, an unmerged tip is never deleted. An unmerged
   tip is therefore a **debt with an owner**: `unresolved` makes it visible
