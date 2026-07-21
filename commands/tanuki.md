@@ -556,6 +556,46 @@ Consolidation is a **presentation and filing act only**: ledger entries are
 never rewritten, merged, or deleted — groups are recorded through the
 existing status vocabulary plus shared issue URLs, never history surgery.
 
+### 4.0c Consult-first at the forks (opt-in — specs/spec-policy-advisory §6)
+
+**Active only when `policy_source` is configured** (`tanuki-ledger --target
+<t> policy-surface` returned neither `{"configured": false}` nor `"available":
+false`, exactly as step 3.2 gates it). With no policy source, this sub-step
+**does not exist** — the pass is byte-identical to today, and 4.1 walks every
+fork as a fresh question. Reuse step 3.2's already-read policy-surface output;
+do **not** invoke a second read.
+
+A **fork** here is a decision-point the gate would otherwise ask the human to
+resolve — a **conflict group** (4.0b), or a policy/architecture/prior-decision
+fork surfaced while walking the plan. Before presenting each fork, consult the
+policy surface (frontier judgment, yours — never code-matching, never a cheaper
+model):
+
+- **Covered fork → an overrideable FYI, never a question.** When a policy line
+  answers the fork, do **not** ask it. Present it as an FYI carrying the
+  **chosen option** and a **pinned verbatim quote**
+  `policy: resolved — <chosen option> per "<quote>" (<file>:<line>@<commit>)`,
+  and immediately offer a single **override** affordance ("override this
+  policy-resolved fork?"). The FYI is **never machine-final**: if the operator
+  overrides, their choice wins and the fork is walked as a normal question. A
+  policy-resolved fork that is *not* overridden is dispositioned exactly as if
+  the human had chosen that option (the same `set-status` / arbitration writes
+  as 4.1), attributed to the policy advisory. This is the single bounded
+  relaxation of the "never pre-selects" rule, and it applies to **forks only**
+  — a proposal's own accept/dismiss/defer disposition is **never**
+  policy-resolved (unchanged from step 3.2).
+- **Miss → escalate with candidates.** When no policy line covers the fork,
+  present it as today, but attach **up to 3 pinned candidate answers** drawn
+  from the allowlisted reads, each `(<file>:<line>@<commit>)` — ranked material
+  for the human's decision, **never** a pre-selected default and never
+  machine-final.
+- **Attribution + audit.** Every policy-resolved FYI and every candidate set is
+  labeled *policy advisory* in-session and named in the run's `consulted:` audit
+  line (step 3.3) — which allowlisted lines drove which fork. **Nothing** read
+  from the policy surface enters the ledger, events, or scheduler state (the
+  publication-boundary rule extends to FYI quotes and candidate answers): they
+  are session output and audit only.
+
 ### 4.1 Walk the plan
 
 Do not end at "here is the report." Present each plan item in-session
@@ -576,6 +616,12 @@ Per group kind:
   arbitration via `upsert-finding --match <id> --note "superseded by
   <winner>: <branch>"` — or, if the human says both should be absorbed into
   one issue, treat as a merge with the winning proposal text.
+  **When 4.0c policy-resolved this conflict** (a covered fork, not overridden),
+  the winning branch is the policy-chosen option: apply the same accept/dismiss/
+  arbitration writes, record the `policy: resolved …` line in the winner's issue
+  body alongside the usual conflict-arbitration evidence, and skip the question
+  — the operator was offered the override in 4.0c and declined it. An overridden
+  fork is walked here as the normal question.
 - **independent** → accept / dismiss / defer as today.
 
 Dispositions:
