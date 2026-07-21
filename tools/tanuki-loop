@@ -1405,7 +1405,8 @@ def _probe_site(wt, site):
             return None, "malformed cmd probe (no run)"
         try:
             r = subprocess.run(cmd, shell=True, cwd=wt,
-                               capture_output=True, text=True, timeout=120)
+                               capture_output=True, text=True, timeout=120,
+                               stdin=subprocess.DEVNULL)
         except (OSError, subprocess.TimeoutExpired) as e:
             return None, f"probe could not execute: {e}"
         if r.returncode in (126, 127):
@@ -1669,7 +1670,7 @@ def cmd_reconcile(args):
             try:
                 r = subprocess.run(test_cmd, shell=True, cwd=wt,
                                    capture_output=True, text=True,
-                                   timeout=1800)
+                                   timeout=1800, stdin=subprocess.DEVNULL)
             except subprocess.TimeoutExpired:
                 _terminal_block(args.target, st, tx,
                                 "verification timed out after 1800s",
@@ -2804,7 +2805,8 @@ def cmd_doctor(args):
         else:
             try:
                 r = subprocess.run(cfg["test_cmd"], shell=True, cwd=wt,
-                                   capture_output=True, text=True)
+                                   capture_output=True, text=True,
+                                   stdin=subprocess.DEVNULL)
                 tail = ((r.stdout or "") + (r.stderr or "")).strip()[-300:]
                 checks.append({
                     "check": "baseline-test", "ok": r.returncode == 0,
@@ -3545,7 +3547,8 @@ def cmd_test(args):
         out({"skipped": True, **post})
         return
     r = subprocess.run(cmd, shell=True, cwd=state["worktree"],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True,
+                       stdin=subprocess.DEVNULL)
     tail = ((r.stdout or "") + (r.stderr or "")).strip()[-300:]
     if r.returncode != 0:
         audit(state, f"test FAILED (exit {r.returncode}): …{tail}")

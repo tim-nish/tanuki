@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Regression for issue #264: tanuki-loop ran a target's test_cmd / doctor
+# baseline-test with stdin INHERITED from the loop process. In a headless /
+# backgrounded run whose stdin is an open stream that never sends EOF (a socket,
+# a pipe), a target check that reads stdin blocked FOREVER, silently wedging the
+# whole test/doctor step. The fix detaches stdin (subprocess.DEVNULL) at every
+# target-command site, so a target check can never read the loop's stdin.
+#
+# This fixture reproduces the never-EOF stdin with a FIFO held open by a
+# background writer, points the tool's stdin at it, and gives the target a
+# test_cmd that READS stdin (`cat >/dev/null`). Detached stdin -> cat gets EOF
+# from /dev/null and exits; inherited stdin -> cat blocks on the FIFO forever.
+# Each tool call is wrapped in `timeout`: completion (rc != 124) is the pass.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+root="$(mktemp -d)"
+holder=""
+cleanup() { [ -n "$holder" ] && kill "$holder" 2>/dev/null || true; rm -rf "$root"; }
+trap cleanup EXIT
+export TANUKI_ROOT="$root"
+jget() { python3 -c "import json,sys; d=json.load(sys.stdin); print(d$1)"; }
+
+repo="$root/repo"; git init -q "$repo"
+git -C "$repo" config user.email a@b.c; git -C "$repo" config user.name t
+echo x > "$repo/f.txt"; git -C "$repo" add -A; git -C "$repo" commit -qm init
+
+# A target whose test_cmd READS stdin — the exact hazard #264 describes.
+scen="$root/scen.json"
+cat > "$scen" <<'JSON'
+{"target": "t", "loop": {"test_cmd": "cat >/dev/null", "iterations": 1,
+ "wall_time_s": 600, "token_budget": 1000, "attempt_cap": 2, "gate": "branch"}}
+JSON
+
+# A never-EOF stdin: a FIFO whose write end is held open by a backgrounded
+# writer that never writes and never closes (stands in for a socket).
+fifo="$root/never_eof"; mkfifo "$fifo"
+sleep 120 > "$fifo" & holder=$!
+
+L=("$here/tanuki-loop" --target t)
+
+# --- doctor's baseline-test runs test_cmd — must not inherit our stdin -------
+rc=0
+timeout 15 "${L[@]}" doctor --loop-repo "$repo" --scenarios "$scen" \
+  < "$fifo" >/tmp/sd_doctor.$$ 2>&1 || rc=$?
+[ "$rc" != "124" ] \
+  || fail "doctor baseline-test HUNG on inherited stdin (#264 reproduced)"
+pass "doctor baseline-test completes with the loop's stdin an open never-EOF stream"
+
+# --- the `test` subcommand runs test_cmd — the incident's exact step ---------
+wt="$("${L[@]}" init --loop-repo "$repo" --scenarios "$scen" | jget '["worktree"]')"
+"${L[@]}" iter-start >/dev/null
+echo work >> "$wt/f.txt"; git -C "$wt" commit -qam work
+rc=0
+timeout 15 "${L[@]}" test < "$fifo" >/tmp/sd_test.$$ 2>&1 || rc=$?
+[ "$rc" != "124" ] \
+  || fail "the test subcommand HUNG on inherited stdin (#264 reproduced)"
+# and it actually ran the command (a real pass, not a skip)
+grep -q '"skipped": true' /tmp/sd_test.$$ \
+  && fail "test must have RUN test_cmd, not skipped it: $(cat /tmp/sd_test.$$)"
+pass "the test subcommand completes with the loop's stdin an open never-EOF stream"
+
+# --- iter-verify's gate/verify runner also detaches stdin --------------------
+rc=0
+timeout 20 "${L[@]}" iter-verify < "$fifo" >/tmp/sd_iv.$$ 2>&1 || rc=$?
+[ "$rc" != "124" ] \
+  || fail "iter-verify HUNG on inherited stdin (#264 reproduced)"
+pass "iter-verify completes with the loop's stdin an open never-EOF stream"
+
+rm -f /tmp/sd_doctor.$$ /tmp/sd_test.$$ /tmp/sd_iv.$$
+echo "ALL PASS"

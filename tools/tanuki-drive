@@ -379,7 +379,8 @@ def prepare_workspace(ws, plugin_repo, host_repo, host_setup, plugin_ref=None):
                 f"plugin checkout {plugin_ref} failed: {r.stderr.strip()}")
     for cmd in host_setup or []:
         r = subprocess.run(cmd, shell=True, cwd=clones["host"],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL)
         if r.returncode != 0:
             raise RuntimeError(f"host_setup failed ({cmd}): {r.stderr.strip()}")
     return clones["plugin"], clones["host"]
@@ -1011,7 +1012,7 @@ def drive_scenario(args, scenario, run_dir, cfg, prog=None):
     with open(raw_path, "w", encoding="utf-8") as out, \
          open(stderr_path, "w", encoding="utf-8") as err:
         proc = subprocess.Popen(cmd, cwd=host_clone, stdout=out, stderr=err,
-                                text=True)
+                                text=True, stdin=subprocess.DEVNULL)
         while True:
             try:
                 proc.wait(timeout=20)
