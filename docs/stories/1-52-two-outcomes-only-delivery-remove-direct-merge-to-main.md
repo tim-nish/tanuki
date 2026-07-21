@@ -1,8 +1,9 @@
 ---
 story: 1.52
 epic: 1
-title: "Story 1.52: Two-outcomes-only delivery — remove direct-merge-to-main; PR is the default gate"
-status: ready
+title: "Story 1.52: Two-outcomes-only delivery \u2014 remove direct-merge-to-main; PR is the default gate"
+status: published
+issue: 265
 umbrella: 263
 ---
 

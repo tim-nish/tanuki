@@ -2,10 +2,10 @@
 story: 1.53
 epic: 1
 title: "Story 1.53: Deterministic loop completion signal + PR-as-default delivery docs"
-status: ready
+status: published
+depends_on: ["1.52"]
+issue: 266
 umbrella: 263
-depends_on:
-  - 1.52
 ---
 
 Canonical discussion record: https://github.com/tim-nish/tanuki/issues/262
