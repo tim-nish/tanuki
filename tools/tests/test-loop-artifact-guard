@@ -10,8 +10,11 @@
 #     only at doctor time, which Phase 1 may skip;
 #   - a legitimate binary is declared per path with --allow-artifact; the
 #     override is audited and check (e) passes for declared paths only;
-#   - gate-push STILL refuses to push a merge carrying artifacts
-#     (belt-and-suspenders past an overridden check (e));
+#   - gate-pr STILL refuses to push an integration branch carrying artifacts
+#     (belt-and-suspenders past an overridden check (e)); the F102 guard moved
+#     from the retired gate-push to gate-pr under two-outcomes-only delivery
+#     (triage of #262/#263 — the loop never merges to main; gate-pr pushes the
+#     integration branch, so that is now the last boundary before the remote);
 #   - a clean bracket is unaffected (iter-start -> work -> iter-verify).
 set -euo pipefail
 
@@ -28,13 +31,13 @@ repo="$root/repo"; mkdir -p "$repo"
 git init -q "$repo"; git -C "$repo" config user.email a@b.c
 git -C "$repo" config user.name t
 echo x > "$repo/f.py"; git -C "$repo" add -A; git -C "$repo" commit -qm init
-# gate-push needs a real upstream to refuse against.
+# gate-pr pushes the integration branch to a real remote.
 base="$(git -C "$repo" rev-parse --abbrev-ref HEAD)"
 bare="$root/remote.git"; git init -q --bare "$bare"
 git -C "$repo" remote add origin "$bare"
 git -C "$repo" push -q -u origin "$base"
 
-wt="$("${L[@]}" init --loop-repo "$repo" --cap 9 | jget '["worktree"]')"
+wt="$("${L[@]}" init --loop-repo "$repo" --cap 9 --test-cmd true | jget '["worktree"]')"
 gwt() { git -C "$wt" "$@"; }
 
 # --- clean path: no regression ------------------------------------------------
@@ -113,21 +116,37 @@ echo "$s" | jget '["build_artifacts_committed"]' | grep -q "mod.cpython-311.pyc"
   || fail "status must name the swept paths for the gate"
 pass "the committed-artifact record reaches status, which the morning gate reads"
 
-# --- gate-push STILL refuses: belt-and-suspenders past the override -----------
+# --- gate-pr STILL refuses: belt-and-suspenders past the override -------------
+# The F102 guard moved from the retired gate-push to gate-pr (two-outcomes-only,
+# #262/#263). Set up a minimal fake gh so gate-pr's tooling precondition passes
+# and the artifact guard is the thing under test.
+mkdir -p "$root/bin"
+cat > "$root/bin/gh" <<'SHIM'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "pr list") echo "[]" ;;
+  "pr create") echo "https://example.test/pr/1" ;;
+  *) echo "fake gh: unscripted $*" >&2; exit 1 ;;
+esac
+SHIM
+chmod +x "$root/bin/gh"
+export PATH="$root/bin:$PATH"
+
 integ="$("${L[@]}" status | jget '["integration_branch"]')"
-git -C "$repo" merge -q --no-ff "$integ" -m "merge integration"
-rc=0; g="$("${L[@]}" gate-push 2>&1)" || rc=$?
-[ "$rc" = "3" ] || fail "gate-push must refuse a merge carrying artifacts, got $rc"
+"${L[@]}" test >/dev/null                 # record a pass on the current HEAD
+"${L[@]}" finish --reason cap >/dev/null   # gate-pr delivers a finished run
+rc=0; g="$("${L[@]}" gate-pr 2>&1)" || rc=$?
+[ "$rc" = "3" ] || fail "gate-pr must refuse an integration branch carrying artifacts, got $rc: $g"
 [ "$(echo "$g" | jget '["pushed"]')" = "False" ] || fail "nothing may be pushed: $g"
 echo "$g" | jget '["build_artifacts"]' | grep -q "mod.cpython-311.pyc" \
-  || fail "gate-push must name the offending paths: $g"
-[ "$(git -C "$bare" ls-tree -r --name-only "$base" 2>/dev/null | grep -c pycache)" = "0" ] \
-  || fail "an artifact reached the remote — F102 reproduced"
-pass "gate-push still refuses; the artifact never reaches the remote (F102 closed)"
+  || fail "gate-pr must name the offending paths: $g"
+[ "$(git -C "$bare" for-each-ref --format='%(refname)' 2>/dev/null | grep -c "$integ")" = "0" ] \
+  || fail "the integration branch reached the remote — F102 reproduced"
+pass "gate-pr still refuses; the artifact never reaches the remote (F102 closed)"
 
 # The push-side override exists and is deliberate.
-rc=0; "${L[@]}" gate-push --allow-artifacts >/dev/null 2>&1 || rc=$?
-[ "$rc" = "0" ] || fail "--allow-artifacts must permit a deliberate push, got $rc"
-pass "--allow-artifacts is the deliberate push-side override"
+rc=0; "${L[@]}" gate-pr --allow-artifacts >/dev/null 2>&1 || rc=$?
+[ "$rc" = "0" ] || fail "--allow-artifacts must permit a deliberate delivery, got $rc"
+pass "--allow-artifacts is the deliberate delivery-side override"
 
 echo "ALL PASS"

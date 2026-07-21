@@ -306,7 +306,11 @@ git -C "$repo" merge -q --no-ff "$integ" -m "merge integration"
 "${L[@]}" gate-check | jget '["reachable"]' | grep -q True || fail "gate-check should see integration reachable from base"
 pass "gate-check confirms integration reachable from base after merge"
 
-# --- #5: gate-push pushes the base to its remote; refuses a diverged remote ---
+# --- #5: gate-push is RETIRED (two-outcomes-only delivery, triage of #262/ ----
+# #263) — the loop never merges to main. gate-push must refuse (exit 3), push
+# NOTHING, and never land loop output on the base. The subcommand survives only
+# to give a legacy caller a clear, non-mutating refusal instead of a stale
+# success.
 gorigin="$tmp/gorigin"; git init -q --bare "$gorigin"
 git -C "$gorigin" symbolic-ref HEAD refs/heads/main
 grepo="$tmp/grepo"
@@ -314,29 +318,19 @@ git init -q "$grepo" && git -C "$grepo" config user.email t@e && git -C "$grepo"
 git -C "$grepo" checkout -qb main && echo g0 > "$grepo/f" && git -C "$grepo" add -A \
   && git -C "$grepo" commit -qm g0
 git -C "$grepo" remote add origin "$gorigin" && git -C "$grepo" push -qu origin main
+origin_before="$(git -C "$gorigin" rev-parse main)"
 Lg=("$loop" --target gg)
 wtg="$("${Lg[@]}" init --loop-repo "$grepo" --cap 1 | jget '["worktree"]')"
-ibrg="$("${Lg[@]}" status | jget '["integration_branch"]')"
 git -C "$wtg" commit -q --allow-empty -m iter
-git -C "$grepo" merge -q --no-ff "$ibrg" -m "gate merge"          # gate step 2
-"${Lg[@]}" gate-check | jget '["reachable"]' | grep -q True || fail "gg gate-check"
-"${Lg[@]}" gate-push | jget '["pushed"]' | grep -q True || fail "gate-push should push the base"
-[ "$(git -C "$grepo" rev-parse main)" = "$(git -C "$gorigin" rev-parse main)" ] \
-  || fail "the merge commit must exist on the remote after gate-push"
-pass "#5: gate-push pushes the merged base branch to its remote"
-
-# Diverge origin/main out-of-band, then a local commit — gate-push must refuse.
-oclone="$tmp/oclone"; git clone -q "$gorigin" "$oclone"
-git -C "$oclone" config user.email t@e && git -C "$oclone" config user.name t
-git -C "$oclone" checkout -q main && echo remote >> "$oclone/f" \
-  && git -C "$oclone" commit -qam remote-change && git -C "$oclone" push -q origin main
-git -C "$grepo" commit -q --allow-empty -m local-change           # local also moves
 rc=0; "${Lg[@]}" gate-push >/tmp/gp.json 2>&1 || rc=$?
-[ "$rc" = "3" ] && grep -q '"diverged": true' /tmp/gp.json \
-  || fail "gate-push must refuse a diverged remote (exit 3): $(cat /tmp/gp.json)"
-[ "$(git -C "$gorigin" rev-parse main)" != "$(git -C "$grepo" rev-parse main)" ] \
-  || fail "gate-push must NOT force-push over a diverged remote"
-pass "#5: gate-push refuses a diverged remote instead of force-pushing"
+[ "$rc" = "3" ] || fail "retired gate-push must exit 3, got $rc: $(cat /tmp/gp.json)"
+grep -q '"pushed": false' /tmp/gp.json \
+  || fail "retired gate-push must report pushed:false: $(cat /tmp/gp.json)"
+grep -q '"retired": true' /tmp/gp.json \
+  || fail "retired gate-push must mark itself retired: $(cat /tmp/gp.json)"
+[ "$(git -C "$gorigin" rev-parse main)" = "$origin_before" ] \
+  || fail "retired gate-push must push NOTHING — the remote base must not move"
+pass "#5: gate-push is retired — refuses, pushes nothing, never lands on main"
 
 # --- #6: finish/init delete merged integration branches, keep unmerged tips --
 crepo="$tmp/crepo"

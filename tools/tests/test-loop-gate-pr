@@ -15,8 +15,8 @@
 #   - finish --reason gate-ratified refuses while the PR is unmerged, refuses
 #     when the PR merged but local base does not contain the merge, and
 #     passes only when both hold;
-#   - doctor's gate-pr-tooling check is ok for merge mode, and fails in pr
-#     mode when gh is absent.
+#   - doctor's gate-pr-tooling check is ok (skipped) for branch mode, and
+#     fails in pr mode when gh is absent.
 set -euo pipefail
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
@@ -102,10 +102,13 @@ echo "$out" | grep -q "gate-pr-tooling" \
   || fail "doctor must fail gate-pr-tooling when gh is absent in pr mode"
 pass "doctor: gate-pr-tooling fails when gh absent (pr mode)"
 
-"${L[@]}" doctor --loop-repo "$repo" --scenarios "$scen" --gate merge \
-  | jget '["checks"]' | grep -q "gate mode 'merge'" \
-  || fail "doctor must note merge mode needs no forge tooling"
-pass "doctor: gate-pr-tooling explicit skip note in merge mode"
+# Branch-only gate needs no forge tooling — doctor says so explicitly (the
+# removed "merge" gate is auto-migrated to "pr", so --gate merge would NOT
+# skip; the hostless case is now --gate branch). Two-outcomes-only, #262/#263.
+"${L[@]}" doctor --loop-repo "$repo" --scenarios "$scen" --gate branch \
+  | jget '["checks"]' | grep -q "gate mode 'branch'" \
+  || fail "doctor must note branch mode needs no forge tooling"
+pass "doctor: gate-pr-tooling explicit skip note in branch mode"
 
 # --- init (pr mode) + one verified iteration ---------------------------------
 wt="$("${L[@]}" init --loop-repo "$repo" --scenarios "$scen" \

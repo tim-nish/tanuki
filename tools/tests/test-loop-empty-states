@@ -24,7 +24,11 @@ repo="$root/repo"; git init -q "$repo"
 git -C "$repo" config user.email a@b.c; git -C "$repo" config user.name t
 echo v0 > "$repo/f"; git -C "$repo" add -A; git -C "$repo" commit -qm base
 
-wt="$("${L[@]}" init --loop-repo "$repo" --cap 5 | jget '["worktree"]')"
+# Branch-only gate (two-outcomes-only, #262/#263): this target commits work but
+# its base is never merged here, so it derives a real reachability settlement
+# (`pending`) — the non-null case the guard at the end must leave untouched. The
+# default gate is now "pr", which would derive no settlement without a forge.
+wt="$("${L[@]}" init --loop-repo "$repo" --cap 5 --gate branch | jget '["worktree"]')"
 
 # --- the enumeration is closed and every member is covered here ---------------
 # Read the members out of the tool itself, so ADDING one without a case below
@@ -209,14 +213,16 @@ pass "live:no-active-run — expected; one historical line, no closed-run sectio
 
 # --- status delivered/settlement empty-states (story 1.46 / issue #240) -------
 # `status` rendered `delivered`/`settlement` as a bare null with nothing to
-# settle, conflating a hostless (direct-merge gate — no forge) target with a
+# settle, conflating a hostless (branch-only gate — no forge) target with a
 # hosted (PR gate) run still awaiting delivery. Each null now resolves to one
 # enumerated member; the discriminator is the GATE, and the hosted verdict
-# flips with the run's state — the whole point.
+# flips with the run's state — the whole point. (Two-outcomes-only delivery,
+# triage of #262/#263: the default gate is now "pr"; the hostless case is the
+# branch-only gate, selected with --gate branch.)
 
-# settlement:n-a-hostless — a fresh direct-merge (default) target that merged
-# no work: hostless (no forge), EXPECTED, and both fields carry the member.
-"$loop" --target th init --loop-repo "$repo" --cap 5 >/dev/null
+# settlement:n-a-hostless — a fresh branch-only target that produced no work:
+# hostless (no forge), EXPECTED, and both fields carry the member.
+"$loop" --target th init --loop-repo "$repo" --cap 5 --gate branch >/dev/null
 sh="$("$loop" --target th status)"
 [ "$(jget '["settlement"]["state"]' <<<"$sh")" = "settlement:n-a-hostless" ] \
   || fail "direct-merge/no-work settlement must be typed n-a-hostless: $(jget '["settlement"]' <<<"$sh")"

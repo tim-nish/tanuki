@@ -26,7 +26,11 @@ git -C "$repo" checkout -qb main
 git -C "$repo" config user.email a@b.c; git -C "$repo" config user.name t
 printf 'a1\na2\na3\n' > "$repo/app.py"
 git -C "$repo" add -A; git -C "$repo" commit -qm base
-"${L[@]}" init --loop-repo "$repo" --cap 2 --test-cmd true >/dev/null
+# Two-outcomes-only delivery (triage of #262/#263): reconcile never merges to
+# main either — it consolidates the deterministic work onto the staging branch
+# and DELIVERS it (branch-only here: no forge, so the staging branch is left in
+# place for the human to merge; a pr-gate target would open a PR instead).
+"${L[@]}" init --loop-repo "$repo" --cap 2 --test-cmd true --gate branch >/dev/null
 
 o="$("${L[@]}" reconcile --json)"
 [ "$(echo "$o" | jget '["transaction"]["state"]')" = "complete" ] \
@@ -44,14 +48,19 @@ tx() { echo "$o" | jget "[\"transaction\"]$1"; }
 [ "$(tx '["state"]')" = "complete" ] || fail "clean debt must complete: $o"
 [ "$(tx '["fixpoint"]["applied"]')" = "1" ] || fail "one unit must apply"
 [ "$(tx '["verify"]["rc"]')" = "0" ] || fail "verification must run: $o"
-[ "$(tx '["terminal"]["pushed"]')" = "no-remote" ] \
-  || fail "push must record no-remote, not fail: $o"
-grep -q NEW2 "$repo/app.py" || fail "the merge must land on base"
+[ "$(tx '["terminal"]["delivered"]["gate"]')" = "branch" ] \
+  || fail "branch-only reconcile must record a branch delivery, not a merge: $o"
+# branch-only: the applied work lives on the staging branch; base is UNTOUCHED
+# (the loop never merges to main — the human merges the staging branch).
+git -C "$repo" show tanuki-loop/t1/reconcile:app.py | grep -q NEW2 \
+  || fail "the applied work must land on the staging branch"
+grep -q NEW2 "$repo/app.py" \
+  && fail "branch-only reconcile must NOT merge to base (main untouched)"
 git -C "$repo" rev-parse --verify -q tanuki-loop/t1/20260101-aaa >/dev/null \
-  && fail "a fully-disposed branch must be cleaned up"
+  && fail "a fully-disposed source branch must be cleaned up"
 git -C "$repo" rev-parse --verify -q tanuki-loop/t1/reconcile >/dev/null \
-  && fail "the merged staging branch must be cleaned up"
-pass "t1: ONE invocation — apply, verify, empty gate, merge, cleanup"
+  || fail "the staging branch must SURVIVE — branch-only leaves it for the human to merge"
+pass "t1: ONE invocation — apply, verify, empty gate, branch-only deliver, cleanup"
 
 # idempotent re-run: nothing repeats
 o="$("${L[@]}" reconcile --json)"
@@ -71,7 +80,7 @@ git -C "$repo" config user.email a@b.c; git -C "$repo" config user.name t
 printf 'b1\nb2\nb3\nb4\nb5\nb6\nb7\nb8\nb9\n' > "$repo/lib.py"
 printf 'def cmd_journal():\n    pass\n' > "$repo/journal.py"
 git -C "$repo" add -A; git -C "$repo" commit -qm base
-"${L[@]}" init --loop-repo "$repo" --cap 2 --test-cmd true >/dev/null
+"${L[@]}" init --loop-repo "$repo" --cap 2 --test-cmd true --gate branch >/dev/null
 
 git -C "$repo" branch tanuki-loop/t2/20260101-bbb main
 git -C "$repo" checkout -q tanuki-loop/t2/20260101-bbb
@@ -101,11 +110,17 @@ print(len(json.load(sys.stdin)['transaction']['gate']['open_items']))")" = "2" ]
 grep -q GOOD "$repo/lib.py" && fail "unapproved gate must not merge"
 pass "t2: mixed debt -> parked needs-owner; gate holds only genuine decisions"
 
-# approve: deterministic work proceeds; parked items survive, never re-asked
+# approve: deterministic work proceeds; parked items survive, never re-asked.
+# Branch-only (#262/#263): the approved deterministic work is consolidated onto
+# the staging branch, NOT merged to base — main stays untouched.
 o="$("${L[@]}" reconcile --approve --json)"
 [ "$(tx '["state"]')" = "needs-owner" ] || fail "items remain parked: $o"
-grep -q GOOD "$repo/lib.py" || fail "approval must merge the deterministic work"
-grep -q CONFLICT9 "$repo/lib.py" && fail "the conflicting unit must NOT merge"
+git -C "$repo" show tanuki-loop/t2/reconcile:lib.py | grep -q GOOD \
+  || fail "approval must consolidate the deterministic work onto the staging branch"
+grep -q GOOD "$repo/lib.py" \
+  && fail "branch-only reconcile must NOT merge the work to base (main untouched)"
+git -C "$repo" show tanuki-loop/t2/reconcile:lib.py | grep -q CONFLICT9 \
+  && fail "the conflicting unit must NOT be applied"
 git -C "$repo" rev-parse --verify -q tanuki-loop/t2/20260101-bbb >/dev/null \
   || fail "a branch with an escalated unit must survive cleanup"
 pass "t2: --approve merges deterministic work; escalated branch survives"

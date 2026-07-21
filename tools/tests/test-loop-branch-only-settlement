@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
-# Fixture for direct-merge (non-PR) gate settlement derivation (spec-tanuki-loop
-# "The direct-merge (non-PR) gate settles the same way", story 1.11). The
-# contract under test — status/dashboard DERIVE delivered/settlement from the
-# integration tip's reachability from the current base, symmetrically with the
-# PR path, and NEVER leave them null after a landed merge:
-#   - BEFORE the local merge (tip not reachable from base): settlement is
+# Fixture for branch-only (non-PR) gate settlement derivation (spec-tanuki-loop
+# "The branch-only (non-PR) gate settles the same way", triage of #262/#263,
+# story 1.52; formerly the direct-merge gate, story 1.11). Under two-outcomes-
+# only delivery the loop NEVER merges to main — a branch-only target leaves the
+# integration branch in place and the HUMAN merges it later. The contract under
+# test — status/dashboard DERIVE delivered/settlement from the integration
+# tip's reachability from the current base, symmetrically with the PR path, and
+# NEVER leave them null after the tip has landed:
+#   - BEFORE the human's merge (tip not reachable from base): settlement is
 #     `pending`, NOT null; delivered is null;
-#   - AFTER the merge lands (tip reachable from base): settlement is `landed`
-#     and delivered is populated from the local merge (integration-tip SHA,
-#     base SHA, merge commit) — read-only, derived, never declared;
+#   - AFTER the tip lands (tip reachable from base): settlement is `landed`
+#     and delivered is populated (integration-tip SHA, base SHA, merge commit)
+#     — read-only, derived, never declared;
 #   - base unreadable: settlement is `unknown`, never an optimistic default;
 #   - the gate=pr path is UNCHANGED — an undelivered pr-gate run stays null
 #     (no reachability shortcut into landed).
-# No forge (gh) is involved on the direct-merge path — settlement is sourced
-# from the base alone.
+# No forge (gh) is involved on the branch-only path — settlement is sourced
+# from the base alone. The loop performs no merge here; the `git merge` below
+# stands in for the HUMAN's own later merge.
 set -euo pipefail
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
@@ -32,11 +36,11 @@ git -C "$repo" config user.name t
 echo x > "$repo/f.txt"; git -C "$repo" add -A; git -C "$repo" commit -qm init
 base="$(git -C "$repo" rev-parse --abbrev-ref HEAD)"
 
-# --- scenarios: default (merge) gate, no forge tooling required ---------------
+# --- scenarios: branch-only gate, no forge tooling required -------------------
 scen="$root/scen.json"
 cat > "$scen" <<JSON
 {"target": "t", "loop": {"test_cmd": "true", "iterations": 3,
- "wall_time_s": 600, "token_budget": 1000, "attempt_cap": 2, "gate": "merge"}}
+ "wall_time_s": 600, "token_budget": 1000, "attempt_cap": 2, "gate": "branch"}}
 JSON
 
 # --- init + one verified iteration -------------------------------------------
@@ -50,22 +54,22 @@ echo work >> "$wt/f.txt"; git -C "$wt" commit -qam "loop work"
 "${L[@]}" iter-verify >/dev/null
 "${L[@]}" finish --reason cap >/dev/null
 
-# --- (b) BEFORE the merge: settlement is pending, NOT null --------------------
+# --- (b) BEFORE the human's merge: settlement is pending, NOT null ------------
 st="$("${L[@]}" status)"
 [ "$(echo "$st" | jget '["settlement"]["result"]')" = "pending" ] \
-  || fail "pre-merge settlement must be 'pending' on the direct-merge gate"
+  || fail "pre-merge settlement must be 'pending' on the branch-only gate"
 [ "$(echo "$st" | jget '["settlement"]')" != "None" ] \
   || fail "pre-merge settlement must NOT be null (a lost-delivery misread)"
 [ "$(echo "$st" | jget '["delivered"]')" = "None" ] \
-  || fail "delivered must be null until the merge lands"
+  || fail "delivered must be null until the tip lands"
 pass "pre-merge: settlement=pending (not null), delivered=null"
 
-# --- perform the direct merge integration -> base ----------------------------
-git -C "$repo" merge -q --no-ff -m "gate: merge $integ" "$integ"
+# --- the HUMAN merges integration -> base (the loop never does this) ----------
+git -C "$repo" merge -q --no-ff -m "human merge $integ" "$integ"
 tip="$(git -C "$repo" rev-parse "$integ")"
 newbase="$(git -C "$repo" rev-parse "$base")"
 
-# --- (a) AFTER the merge lands: settlement=landed + populated delivered -------
+# --- (a) AFTER the tip lands: settlement=landed + populated delivered ---------
 st="$("${L[@]}" status)"
 [ "$(echo "$st" | jget '["settlement"]["result"]')" = "landed" ] \
   || fail "settlement must be 'landed' once the tip is reachable from the base"
@@ -78,18 +82,18 @@ st="$("${L[@]}" status)"
   || fail "delivered.merge_commit must be the derivable merge node"
 [ "$(echo "$st" | jget '["lifecycle"]["settlement"]["result"]')" = "landed" ] \
   || fail "the lifecycle block's offline settlement must agree: landed"
-pass "post-merge: settlement=landed, delivered populated from the local merge"
+pass "post-merge: settlement=landed, delivered populated by reachability"
 
-# --- dashboard renders the derived settlement, not the local gate steps -------
+# --- dashboard renders the derived settlement, never a loop-driven merge ------
 dash="$("${L[@]}" dashboard)"
-echo "$dash" | grep -q "DELIVERED: local merge" \
-  || fail "dashboard must show the derived local-merge delivery"
+echo "$dash" | grep -q "DELIVERED: branch-only" \
+  || fail "dashboard must show the derived branch-only delivery"
 echo "$dash" | grep -q "SETTLEMENT: landed" \
   || fail "dashboard must show the derived settlement: landed"
 if echo "$dash" | grep -q "approve or reject the merge"; then
-  fail "a landed direct-merge run must not show the local morning-gate steps"
+  fail "a landed branch-only run must not show a loop-driven merge step"
 fi
-pass "dashboard: landed direct-merge run shows settlement, no pending gate steps"
+pass "dashboard: landed branch-only run shows settlement, no loop merge step"
 
 # --- base unreadable -> unknown, never an optimistic default ------------------
 git -C "$repo" checkout -q --detach
@@ -120,7 +124,7 @@ echo work >> "$prwt/f.txt"; git -C "$prwt" commit -qam "loop work"
 "${PL[@]}" iter-verify >/dev/null
 "${PL[@]}" finish --reason cap >/dev/null
 # A pr-gate run that has NOT delivered (no gate-pr) derives NO settlement result
-# — the direct-merge reachability derivation must not leak into the PR path (the
+# — the branch-only reachability derivation must not leak into the PR path (the
 # full pr flow is exercised by test-loop-gate-pr; this guards the branch here).
 # story 1.46: the underlying settlement is still None, but `status` surfaces it
 # as the typed `undelivered-closed` empty-state (a closed hosted run that never
@@ -132,4 +136,4 @@ prstat="$("${PL[@]}" status)"
   || fail "a closed gate=pr run that never delivered is a GAP: $prstat"
 pass "gate=pr undelivered: no reachability shortcut; typed undelivered-closed, not null"
 
-echo "all direct-merge settlement fixtures passed"
+echo "all branch-only settlement fixtures passed"
