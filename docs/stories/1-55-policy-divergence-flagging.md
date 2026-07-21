@@ -1,8 +1,9 @@
 ---
 story: 1.55
 epic: 1
-title: "Story 1.55: Policy-divergence flagging — proposal-only divergence candidates at pinned policy reads"
-status: ready
+title: "Story 1.55: Policy-divergence flagging \u2014 proposal-only divergence candidates at pinned policy reads"
+status: published
+issue: 274
 umbrella: 271
 ---
 

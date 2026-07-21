@@ -1,8 +1,9 @@
 ---
 story: 1.54
 epic: 1
-title: "Story 1.54: Consult-first at the proposal gate (--brief) — covered forks auto-resolve to an overrideable FYI"
-status: ready
+title: "Story 1.54: Consult-first at the proposal gate (--brief) \u2014 covered forks auto-resolve to an overrideable FYI"
+status: published
+issue: 273
 umbrella: 271
 ---
 
