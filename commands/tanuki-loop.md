@@ -297,8 +297,29 @@ Do not end at "here is what ran." Present, for one review:
 `state.json` / `audit.md` / `queue.md` (under `~/.tanuki/<target>/loop/<run>/`)
 — take them from there rather than hunting the run dir.
 
-Then, behind the operator's single approval, run **merge-first and idempotent**
-— nothing outward-facing until the merge is a fact:
+> **Two-outcomes-only delivery (triage of #262/#263 — supersedes the
+> merge-first steps below).** The loop **never merges to `main`**, attended or
+> not. Delivery is exactly one of two outcomes, and **PR is the default**:
+> - **PR-from-branch (default, `"gate": "pr"`)** — after final tests pass, run
+>   `tanuki-loop gate-pr`; it opens one ready-for-review PR `integration →
+>   base` and **the loop ends there**. You approve + merge the PR on the forge.
+>   See "PR delivery (the default gate)" below.
+> - **Branch-only (`"gate": "branch"`)** — the loop leaves the integration
+>   branch in place and opens no PR; you merge it yourself (a PR you open, or a
+>   manual branch merge).
+>
+> The old `git merge integration → main` + `gate-push` steps (2–4) are
+> **removed**; `gate-push` is retired (it refuses, pushing nothing). The
+> **completion signal is deterministic**: a normal close always leaves its
+> terminal artifact (a PR, or the branch-only fact), surfaced as
+> `status.completion` / `finish.completion` — `normal:true` with
+> `state:"delivered"` (or `"awaiting-delivery"` until you run `gate-pr`) on a
+> normal close, `normal:false` on an aborted/errored one. The absence of a
+> terminal artifact therefore never reads as a silent success. Steps 5–7 below
+> (materialize issues, cleanup) still apply **after** the human merges.
+
+Then, behind the operator's single approval, deliver (per the two-outcomes note
+above) — **the loop never merges to `main` itself**:
 1. **Final tests** on integration HEAD — `tanuki-loop test` (the same
    configured `test_cmd` each iteration runs); abort the gate on failure.
    **Running `test` here is expected even though the run is already closed**
@@ -421,12 +442,13 @@ Then, behind the operator's single approval, run **merge-first and idempotent**
    too. Same remedies — `--force` or clean the paths first — and the same
    `.gitignore` entry prevents both the tracked and the untracked case.
 
-### PR-protected targets (`"gate": "pr"` in the loop block)
+### PR delivery (the default gate — `"gate": "pr"`)
 
-When the base branch refuses direct pushes (required-check protection),
-steps 2–4 above cannot run: there is no local merge to push. Set
-`"gate": "pr"` in the scenarios `loop` block (`doctor` then validates `gh`
-availability up front) and the gate reshapes:
+**This is the default delivery (triage of #262/#263): the loop never merges to
+`main`, so the merge-first steps 2–4 above are removed and PR delivery replaces
+them for every target with a forge.** `doctor` validates `gh` availability up
+front. A target with no forge sets `"gate": "branch"` instead (leave the
+integration branch, open no PR — you merge it yourself). The gate:
 
 - **Overnight close delivers the review material.** After the run finishes
   (`cap`/`converged`) and `tanuki-loop test` passes on the integration HEAD,

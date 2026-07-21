@@ -6,6 +6,34 @@ All notable changes to Tanuki are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **Two-outcomes-only loop delivery — the loop never merges to `main`**
+  (stories 1.52–1.53, spec-tanuki-loop "Two-outcomes-only delivery", triage of
+  #262/#263). `tanuki-loop` delivery is now exactly one of two terminal
+  outcomes, and **PR is the default**: `gate-pr` opens one ready-for-review PR
+  `integration → base` (`"gate": "pr"`, default), or a branch-only target
+  (`"gate": "branch"`) leaves the integration branch in place for the operator
+  to merge. The former direct-merge-to-`main` path — a local `git merge
+  integration → main` + `gate-push`-onto-base — is **removed**; the merge into
+  `main` is the human's, via the PR or a manual branch merge, never the loop's.
+  A stored `"gate": "merge"` is auto-migrated to `"pr"`.
+
+### Removed
+- **`gate-push` is retired.** It no longer pushes the base branch; it refuses
+  (exit 3, `{"pushed": false, "retired": true}`) so a legacy caller gets a
+  clear, non-mutating signal instead of a stale success. The F102
+  build-artifact guard moved to `gate-pr` (which now pushes the integration
+  branch), with `--allow-artifacts` preserved.
+
+### Added
+- **Deterministic loop completion signal** (story 1.53). `status.completion` /
+  `finish.completion` type the run's close so a normally-completed run is
+  distinguishable from an aborted/errored one from the output alone:
+  `normal:true` with `state:"delivered"` (branch left in place, or PR opened)
+  or `"awaiting-delivery"` (pr gate, normal close, `gate-pr` not yet run) on a
+  normal close; `normal:false` (`not-completed:<stop reason>`) otherwise. The
+  absence of a terminal artifact is therefore never a silent success.
+
 ## [0.3.0] — 2026-07-20
 
 ### Added
