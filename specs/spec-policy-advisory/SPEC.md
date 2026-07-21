@@ -2,7 +2,14 @@
 
 Status: RATIFIED 2026-07-15 by the operator, as written. Extends
 `docs/tanuki-spec.md` (Consolidator/brief and decision-pass contracts only —
-Driver, Miner, ingest, ledger, and scheduler are untouched).
+Driver, Miner, ingest, ledger, and scheduler are untouched). AMENDED
+2026-07-21 (triage of #271, owner decision record — policy-advisory extension
+adoption): two opt-in features added — **consult-first at the gate** (§6) and
+**policy-divergence flagging** (§7). Both are active only when `policy_source`
+is configured and are behaviorally absent otherwise; §4 and §8 are amended to carve
+the single bounded exception consult-first requires. No new config surface, and
+the §1–§3 boundary (Driver/Miner/ingest/ledger/scheduler untouched) is
+preserved.
 
 Problem: findings and their proposed fixes can conflict with decisions the
 operator has already made and recorded elsewhere — a proposal can be
@@ -70,11 +77,66 @@ never persisted into the ledger, events, or scheduler state.
   the decision pass. The flag never auto-dismisses, downgrades, or reorders a
   proposal, and never pre-selects a disposition — accept/dismiss/defer remain
   entirely the human's. A dismissal motivated by policy is recorded like any
-  other dismissal (deduped-against; never resurfaces as new).
+  other dismissal (deduped-against; never resurfaces as new). **The one bounded
+  exception is consult-first fork resolution (§6):** a *decision-point fork*
+  (not a proposal's disposition) whose answer the policy source covers may be
+  auto-resolved to an **overrideable FYI** — never machine-final, always the
+  human's to override, and only when `policy_source` is configured. Proposal
+  dispositions themselves remain entirely the human's, unchanged.
 - **Audit:** any run whose brief carries policy lines appends a `consulted:`
   line (which allowlisted files/lines were read; which applied) to the brief.
 
-## 5. Non-goals
+## 6. Consult-first at the gate (`--brief`, opt-in — ADDED 2026-07-21, triage of #271)
+
+At the decision pass, before surfacing a **decision-point fork** (a
+policy/architecture/prior-decision fork the flow would otherwise ask the human
+to resolve), the gate consults the configured policy source via the §2 reader:
+
+- **Covered fork → overrideable FYI.** When the policy source covers the fork,
+  the gate **auto-resolves** it and demotes it to an FYI carrying the **chosen
+  option** and a **pinned verbatim quote** (`file:line@commit`). The FYI is
+  always **overrideable** — the human may reopen and re-decide it — and is
+  **never machine-final**: the auto-resolution is a labor-saving default, not a
+  decision the tool owns. This is the single bounded relaxation of §4's
+  "never pre-selects" rule, and it applies to *forks*, never to a proposal's
+  accept/dismiss/defer disposition.
+- **Miss → escalate with candidates.** When the policy source does not cover
+  the fork, it escalates to the human as today, carrying **up to 3 pinned
+  candidate answers** drawn from the allowlisted reads (each `file:line@commit`)
+  — never a machine-final choice, only ranked material for the human's decision.
+- **Attribution.** Every auto-resolved FYI and every candidate set is attributed
+  in the run output as **policy advisory** and recorded in the `consulted:`
+  audit line (§4), naming which allowlisted lines drove it.
+- **Opt-in and silent-when-unconfigured.** `--brief` consult-first is active
+  **only** when `policy_source` is configured; a run without it is
+  byte-identical to today (no forks auto-resolved, no candidates attached). No
+  new config key: activation rides the existing `policy_source` block.
+
+## 7. Policy-divergence flagging (ADDED 2026-07-21, triage of #271)
+
+At the existing pinned policy reads (§4 brief/gate), the gate additionally flags
+**implementation decisions that contradict or have outgrown** a quoted policy
+line — a divergence between what the code/plan does and what the recorded policy
+says:
+
+- Flags are **divergence candidates**, emitted as **proposal-only** items —
+  never auto-applied, never authoritative, never a disposition. Each carries the
+  divergence clause and the pinned quote (`file:line@commit`), attributed as
+  policy advisory.
+- The human decides what to do with a divergence candidate exactly as with any
+  proposal; nothing about the code, the plan, or the policy repo is written.
+- Active only when `policy_source` is configured; silent (byte-identical to
+  today) otherwise.
+
+**Generic vocabulary (both §6 and §7).** Zero policy-source-specific identity in
+code, UX, or docs — the policy source is any operator-declared markdown repo
+(§1), and the consult-first / divergence surfaces name it only generically.
+**Publication-boundary lint** (the existing check that policy text never leaks
+into the ledger, events, or scheduler state) **extends to these new surfaces**:
+FYI quotes, candidate answers, and divergence flags are run-output/audit only,
+never persisted as events, findings, or scheduler state.
+
+## 8. Non-goals
 
 - Ingest-side filtering, validation, or classification of human feedback
   against policy — rejected by design, not deferred.
@@ -83,7 +145,10 @@ never persisted into the ledger, events, or scheduler state.
   a service should ever exist; if one does, it is the policy repo's concern,
   not Tanuki's.
 - Reading anything outside the configured `files` allowlist.
-- Auto-disposition, severity changes, or ranking changes driven by policy.
+- Auto-disposition of **proposals** (accept/dismiss/defer), severity changes, or
+  ranking changes driven by policy. (The §6 consult-first exception resolves
+  **decision-point forks** to an *overrideable, never-machine-final* FYI — it
+  does not dispose of proposals, and the human owns every final call.)
 - Caching or mirroring policy content anywhere under `~/.tanuki/` beyond the
   single run's brief text.
 
