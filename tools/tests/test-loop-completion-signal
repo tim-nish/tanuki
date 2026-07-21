@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# Fixture for the DETERMINISTIC completion signal (spec-tanuki-loop
+# "Two-outcomes-only delivery", triage of #262/#263, story 1.53). The contract:
+# a normally-completed run and an aborted/errored one are distinguishable FROM
+# THE RECORDED OUTPUT ALONE — the absence of a terminal artifact is never a
+# silent success. status.completion / finish.completion carry:
+#   - normal=False when the run did not close cap|converged (breaker/cancelled)
+#     or has not closed — the missing artifact is EXPECTED, not success;
+#   - normal=True, state="delivered" on a branch gate normal close (the branch
+#     left in place IS the artifact) or a pr gate that opened its PR;
+#   - normal=True, state="awaiting-delivery" on a pr gate normal close whose PR
+#     is not open yet — delivery owed, not failed, and not yet complete.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
+export TANUKI_ROOT="$root"
+jget() { python3 -c "import json,sys; d=json.load(sys.stdin); print(d$1)"; }
+
+mkrepo() {
+  local r="$1"; git init -q "$r"; git -C "$r" config user.email a@b.c
+  git -C "$r" config user.name t
+  echo x > "$r/f.txt"; git -C "$r" add -A; git -C "$r" commit -qm init
+}
+
+# ── pr gate: active run -> not-completed:active ─────────────────────────────
+repo="$root/r1"; mkrepo "$repo"
+P=("$here/tanuki-loop" --target p)
+"${P[@]}" init --loop-repo "$repo" --cap 3 --test-cmd true >/dev/null
+s="$("${P[@]}" status)"
+[ "$(echo "$s" | jget '["completion"]["normal"]')" = "False" ] \
+  || fail "an ACTIVE run must not read as a normal completion: $(echo "$s" | jget '["completion"]')"
+[ "$(echo "$s" | jget '["completion"]["state"]')" = "not-completed:active" ] \
+  || fail "an active run's completion state must be not-completed:active: $(echo "$s" | jget '["completion"]')"
+pass "pr gate active -> completion normal=False (not-completed:active)"
+
+# ── pr gate: normal close, no PR yet -> awaiting-delivery (owed, not failed) ──
+"${P[@]}" iter-start >/dev/null
+wt="$(cat "$root/p/loop/$(cat "$root/p/loop/current")/state.json" | jget '["worktree"]')"
+echo work >> "$wt/f.txt"; git -C "$wt" commit -qam work
+"${P[@]}" test >/dev/null
+"${P[@]}" iter-verify >/dev/null
+ffin="$("${P[@]}" finish --reason cap)"
+fnormal="$(echo "$ffin" | jget '["completion"]["normal"]')"
+[ "$fnormal" = "True" ] \
+  || fail "a cap close is a NORMAL completion: $(echo "$ffin" | jget '["completion"]')"
+[ "$(echo "$ffin" | jget '["completion"]["state"]')" = "awaiting-delivery" ] \
+  || fail "a pr gate normal close with no PR is awaiting-delivery: $(echo "$ffin" | jget '["completion"]')"
+[ "$(echo "$ffin" | jget '["completion"]["delivered"]')" = "False" ] \
+  || fail "no PR opened yet -> delivered:false: $(echo "$ffin" | jget '["completion"]')"
+pass "pr gate normal close, no PR -> awaiting-delivery (delivery owed, not failed)"
+
+# ── pr gate: aborted -> not-completed:cancelled (distinct from the above) ────
+repo2="$root/r2"; mkrepo "$repo2"
+PA=("$here/tanuki-loop" --target pa)
+"${PA[@]}" init --loop-repo "$repo2" --cap 3 --test-cmd true >/dev/null
+afin="$("${PA[@]}" finish --reason aborted)"
+anormal="$(echo "$afin" | jget '["completion"]["normal"]')"
+[ "$anormal" = "False" ] \
+  || fail "an aborted run must NOT read as a normal completion: $(echo "$afin" | jget '["completion"]')"
+[ "$(echo "$afin" | jget '["completion"]["state"]')" = "not-completed:cancelled" ] \
+  || fail "aborted -> not-completed:cancelled (the lifecycle name): $(echo "$afin" | jget '["completion"]')"
+pass "pr gate aborted -> completion normal=False (not-completed:cancelled)"
+
+# The two pr-gate closes are distinguishable from the output alone: one normal
+# (awaiting-delivery), one aborted (not-completed) — the whole point of #262.
+[ "$fnormal" != "$anormal" ] \
+  || fail "a normal close and an aborted close must be distinguishable"
+pass "a completed run and an aborted run are distinguishable from output alone"
+
+# ── branch gate: normal close -> delivered (the branch IS the artifact) ─────
+repo3="$root/r3"; mkrepo "$repo3"
+B=("$here/tanuki-loop" --target b)
+"${B[@]}" init --loop-repo "$repo3" --cap 3 --test-cmd true --gate branch >/dev/null
+"${B[@]}" iter-start >/dev/null
+bwt="$(cat "$root/b/loop/$(cat "$root/b/loop/current")/state.json" | jget '["worktree"]')"
+echo work >> "$bwt/f.txt"; git -C "$bwt" commit -qam work
+"${B[@]}" test >/dev/null
+"${B[@]}" iter-verify >/dev/null
+bfin="$("${B[@]}" finish --reason converged)"
+[ "$(echo "$bfin" | jget '["completion"]["normal"]')" = "True" ] \
+  || fail "a branch gate converged close is a normal completion: $(echo "$bfin" | jget '["completion"]')"
+[ "$(echo "$bfin" | jget '["completion"]["state"]')" = "delivered" ] \
+  || fail "a branch gate normal close is delivered (branch left in place): $(echo "$bfin" | jget '["completion"]')"
+[ "$(echo "$bfin" | jget '["completion"]["delivered"]')" = "True" ] \
+  || fail "branch-only delivery -> delivered:true: $(echo "$bfin" | jget '["completion"]')"
+# status agrees (the signal is stable, not a one-shot of finish)
+[ "$("${B[@]}" status | jget '["completion"]["state"]')" = "delivered" ] \
+  || fail "status must carry the same completion signal as finish"
+pass "branch gate normal close -> delivered (deterministic, stable in status)"
+
+echo "ALL PASS"

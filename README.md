@@ -113,8 +113,10 @@ They deliberately end differently, because they answer different questions:
 `/tanuki` **finds** problems and hands you proposals — its endpoint is a
 recorded disposition for each one (accept / dismiss / defer) — while
 `/tanuki-loop` **fixes** problems overnight and hands you a batch — the
-morning gate ends at a merge (that is the spec's own endpoint, not a
-simplification). What the two share is the
+morning gate ends at a **delivery you review and merge**: by default a
+ready-for-review PR (`integration → base`), or a branch-only target leaves the
+integration branch for you to merge. The loop never merges to `main` itself
+(triage of #262/#263). What the two share is the
 human gate `/tanuki decide`: it decides the attended run's proposals, and
 **only** the loop's *deferred* judgment items return to it — everything the
 loop implemented overnight goes through the morning gate instead.
@@ -129,7 +131,7 @@ flowchart TD
     decide --> disposition(["disposition recorded"])
 
     loop --> gate{{"morning gate"}}
-    gate --> merge(["you merge"])
+    gate --> deliver(["PR (default) or branch — you merge"])
     gate -.->|deferred judgments| decide
 
     classDef gatecls fill:#fde68a,stroke:#b45309,color:#000;
@@ -145,8 +147,11 @@ flowchart TD
   deferred spec/judgment items arrive here too, because the loop never
   decides those on its own.
 - **morning gate** — the loop's human gate, in summary: you review the
-  integration branch diff, run the final tests, and merge; the fixing already
-  happened overnight on the loop's own branch, so this gate reviews and
+  integration branch diff, run the final tests, and take delivery — approve +
+  merge the ready-for-review PR the loop opened (default), or merge the
+  branch-only target's integration branch yourself; the loop never merges to
+  `main`. The fixing already happened overnight on the loop's own branch, so
+  this gate reviews and
   lands — it does not implement. The complete step-by-step specification is
   [commands/tanuki-loop.md §2](commands/tanuki-loop.md#2-morning-gate-attended--invariant-in-every-phase).
 
@@ -194,7 +199,8 @@ work as aliases.
 | `/tanuki-loop <t> reconcile [branch…]` | classify unmerged work per change, then land it behind a gate ([details](commands/tanuki-loop.md#reconcile-tanuki-loop-target-reconcile-branch)) |
 
 The loop's internal steps — `doctor`, `iter-start`, `iter-verify`,
-`record-cycle`, `gate-check`/`gate-push`/`gate-pr`, `finish`, `dispose`,
+`record-cycle`, `gate-check`/`gate-pr` (`gate-push` is retired — the loop never
+merges to `main`), `finish`, `dispose`,
 `reevaluate`, `site-record`, `dashboard` — are driven by `/tanuki-loop`, not
 typed by you (`doctor` and `dashboard` are the exceptions you may run by hand;
 see [Unattended overnight mode](#unattended-overnight-mode-tanuki-loop)). Their
@@ -412,7 +418,7 @@ Each tool prints its **complete** subcommand and option surface with `--help`
 (e.g. `tools/tanuki-loop --help`, `tools/tanuki-ledger --help`), and the
 `commands/*.md` files are the authoritative command docs. This README covers
 the surfaces you reach for by hand; the loop's internal steps (`iter-start`,
-`iter-verify`, `record-cycle`, `gate-check`/`gate-push`, `finish`, …) are
+`iter-verify`, `record-cycle`, `gate-check`/`gate-pr`, `finish`, …) are
 driven by `/tanuki-loop`, not typed by you — so a subcommand you see the loop
 run but never invoke yourself is expected, not undocumented.
 

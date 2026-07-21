@@ -1995,18 +1995,24 @@ def derive_settlement(state, save=True, offline=False):
     anything else is the stale-marked last observation, or `unknown` — the
     same never-optimistic fallback."""
     d = state.get("delivered") or state.get("gate_pr")
-    if not d:
-        # No PR/delivery record. On the branch-only (non-PR) gate the loop
-        # writes none by design — it leaves the integration branch in place and
-        # never merges; the human's own later merge lands it — so settlement is
-        # derived from the integration tip's reachability from the current
-        # base, the SAME strict test the PR path uses (spec-tanuki-loop "The
-        # branch-only (non-PR) gate settles the same way", triage of
-        # #262/#263). A gate=pr run with no delivery yet stays None
-        # (undelivered — no regression to the PR path). A legacy gate_mode of
-        # "merge" (auto-migrated to "pr" for new runs) still settles by
-        # reachability here, so an already-landed legacy run is not misread.
-        if state.get("gate_mode", "branch") in ("branch", "merge"):
+    # Route by whether there is a FORGE PR to consult, not merely whether a
+    # delivery record exists (story 1.53): a branch-only close records a
+    # `delivered` fact with pr:None (the deterministic completion signal), but
+    # it has no forge PR — it must still settle by reachability, exactly like an
+    # unrecorded branch-only run, never by a bogus `gh pr view ""`.
+    has_forge_pr = bool(d and (d.get("number") or d.get("pr") or d.get("url")))
+    if not has_forge_pr:
+        # No forge PR. On the branch-only (non-PR) gate the loop leaves the
+        # integration branch in place and never merges; the human's own later
+        # merge lands it — so settlement is derived from the integration tip's
+        # reachability from the current base, the SAME strict test the PR path
+        # uses (spec-tanuki-loop "The branch-only (non-PR) gate settles the
+        # same way", triage of #262/#263). A gate=pr run with no delivery yet
+        # stays None (undelivered — no regression to the PR path). A legacy
+        # gate_mode of "merge" still settles by reachability here, so an
+        # already-landed legacy run is not misread.
+        if normalize_gate(state.get("gate_mode") or "pr") == "branch" \
+                or state.get("gate_mode") == "merge":
             return _derive_branch_settlement(state)
         return None
     repo, base = state["loop_repo"], state["base"]
@@ -4138,6 +4144,61 @@ def cmd_policy(args):
     out({"ok": True, "finding": args.finding})
 
 
+def derive_completion(state):
+    """The DETERMINISTIC completion signal (spec-tanuki-loop "Two-outcomes-only
+    delivery", triage of #262/#263, story 1.53). A normal run always ends with
+    a fixed-shape terminal artifact — a delivered PR (pr gate) or a recorded
+    branch-only terminal fact (branch gate) — so a completed run is
+    distinguishable from an aborted/errored one FROM THE OUTPUT ALONE, never a
+    silent "no PR" state identical to success. Read-only; derived from the
+    recorded stop reason and delivery, never from live process state.
+
+    Returns a typed dict {normal, state, reason} where:
+      - normal=False  — the run did NOT complete normally (stop reason is a
+        breaker or cancellation, or the run has not closed): the ABSENCE of a
+        terminal artifact is expected and must not read as success;
+      - normal=True, state="delivered"     — closed cap|converged AND the
+        terminal artifact exists (PR delivered, or branch-only fact recorded);
+      - normal=True, state="awaiting-delivery" — closed cap|converged on a pr
+        gate but gate-pr has not opened the PR yet: the delivery step is still
+        owed (NOT a failure — but NOT yet complete either).
+    A missing terminal artifact is therefore never ambiguous: it is either
+    `awaiting-delivery` (normal close, delivery owed) or an abnormal stop."""
+    stop = (state.get("stop") or {}).get("reason")
+    if not state.get("finished") or stop not in ("cap", "converged"):
+        # Not a normal computational close (breaker/cancelled), or still open.
+        s = stop or ("active" if not state.get("finished") else "unknown")
+        return {"normal": False, "state": f"not-completed:{s}",
+                "reason": ("the run did not complete normally "
+                           f"(stop reason: {s}) — the absence of a delivered "
+                           "PR / branch-only delivery is EXPECTED, never a "
+                           "silent success"),
+                "delivered": bool(state.get("delivered")
+                                  or state.get("gate_pr"))}
+    gate = normalize_gate(state.get("gate_mode") or "pr")
+    if gate == "branch":
+        # A branch gate's terminal artifact is the integration branch itself,
+        # left in place at the normal close — always present, so a normal
+        # branch-only run is always `delivered`.
+        return {"normal": True, "state": "delivered",
+                "reason": (f"closed {stop}; branch-only delivery — the "
+                           "integration branch is left in place for the "
+                           "operator to merge (a normal completion)"),
+                "delivered": True}
+    delivered = state.get("delivered") or state.get("gate_pr")
+    if delivered:
+        return {"normal": True, "state": "delivered",
+                "reason": (f"closed {stop} and delivered the PR — the terminal "
+                           "artifact is present (a normal completion)"),
+                "delivered": True}
+    # Normal close, pr gate, PR not opened yet: delivery owed, not a failure.
+    return {"normal": True, "state": "awaiting-delivery",
+            "reason": (f"closed {stop} but the PR has not been opened — run "
+                       "`gate-pr` to deliver; until then the run is not yet "
+                       "complete (the delivery step is owed, not failed)"),
+            "delivered": False}
+
+
 def cmd_finish(args):
     """Mark the run terminal, machine-readably: converged | cap | aborted.
     The dashboard's answer to 'why did it stop?'. gate-ratified is accepted
@@ -4186,6 +4247,18 @@ def cmd_finish(args):
     # run spends waiting for PR review or merge is not execution time.
     state.setdefault("wall_end", time.time())
     state["finished"] = {"reason": args.reason, "at": now_str}
+    # Branch-only completion audit (two-outcomes-only delivery, triage of
+    # #262/#263, story 1.53): a branch gate opens no PR — its terminal artifact
+    # IS the integration branch, left in place for the operator to merge. The
+    # completion signal is derived (derive_completion) from the stop reason +
+    # gate + branch, never declared as a `delivered` record here (settlement
+    # stays derived, never declared — the branch-only-settlement contract). A
+    # normal close just notes it in the audit trail.
+    if normalize_gate(state.get("gate_mode") or "pr") == "branch" \
+            and args.reason in ("converged", "cap"):
+        audit(state, "branch-only delivery: the integration branch is left in "
+                     "place for the operator to merge (the loop never merges "
+                     "to main)")
     # Host drift note (spec-host-snapshot): the ONE permitted post-init read of
     # the live host — read-only `git rev-parse`, informational only. It never
     # blocks, aborts, or reconciles; the run mined against the init-time
@@ -4261,6 +4334,9 @@ def cmd_finish(args):
                                     "computational close (first finish wins); "
                                     "'reason' is only this invocation's "
                                     "argument"),
+               # Deterministic completion signal (story 1.53): normal vs
+               # aborted/errored is readable from the output alone.
+               "completion": derive_completion(state),
                "warning": warning,
                # F195: informational only — finish itself succeeded and the
                # next init sweep needs nothing from the operator first.
@@ -5362,6 +5438,11 @@ def cmd_status(args):
         # settlement (views read this; the live-derived answer is the
         # top-level `settlement` field below).
         "lifecycle": run_lifecycle(state),
+        # Deterministic completion signal (story 1.53, triage of #262/#263):
+        # a normally-completed run (normal=True) is distinguishable from an
+        # aborted/errored one (normal=False) from this field alone — the
+        # absence of a terminal artifact is never a silent success.
+        "completion": derive_completion(state),
         "warning": warning,
         "build_artifacts_committed": swept or None,
         "run": state["run"], "integration_branch": state["integration_branch"],
