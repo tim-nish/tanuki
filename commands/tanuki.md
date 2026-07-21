@@ -475,6 +475,21 @@ short_circuited`, and any `plugin_clone_dirty: true`
    and nothing from the policy surface may enter the ledger, events, or
    scheduler state. This step exists only here and at the gate (step 4) —
    never at ingest, drive, or extraction.
+   **Policy-divergence flagging (specs/spec-policy-advisory §7).** At these same
+   pinned reads, additionally flag any **implementation decision that
+   contradicts or has outgrown** a quoted policy line — a divergence between
+   what the code/plan actually does and what the recorded policy says (distinct
+   from a *tension*, which is a proposal conflicting with policy). Emit each as
+   a **divergence candidate**, a **proposal-only** item on one line
+   `policy: divergence — <what diverged> vs "<quote>" (<file>:<line>@<commit>)`,
+   attributed to the policy advisory. A divergence candidate is **never
+   auto-applied and never authoritative** — it is walked at the gate exactly
+   like any proposal (accept/dismiss/defer, the human's call), and nothing about
+   the code, the plan, or the policy repo is written. Same bounds as the tension
+   line: active only when `policy_source` is configured (byte-identical
+   otherwise), generic vocabulary only, and never persisted into the ledger,
+   events, or scheduler state (the publication-boundary rule extends to
+   divergence flags).
 3. Write the brief to `~/.tanuki/<target>/briefs/<run-id>.md`:
    - **Delta this run** first: bumped vs new findings (from step 2.4).
    - **≤`brief_max_proposals` ranked proposals** (default 10; rank by
@@ -490,6 +505,11 @@ short_circuited`, and any `plugin_clone_dirty: true`
      recurrence-2-or-gap / rest — mirror `tanuki-ledger status`).
    - **Preflight-rule candidates**: mechanical items from the extraction
      pass's `preflight_rule_candidates` (step 2.2).
+   - **Policy-divergence candidates** (only when `policy_source` is configured
+     and step 3.2 produced any `policy: divergence` line): one line per
+     divergence, each a proposal-only item carrying its quote and
+     `file:line@commit`. Walked at the gate (4.1) like any proposal; never
+     auto-applied.
    - **Lesson candidates (for the den)**: transferable conclusions, proposed
      for your knowledge hub. They are FIRST-CLASS at the decision pass
      (story 1.35 / spec-den-distill §4): walked in 4.1c with
@@ -688,6 +708,20 @@ outside that list is not emittable and says so).
 The unattended loop renders lesson candidates in its brief but NEVER walks
 this gate and never emits — attended-gate work, the same class as issue
 filing (spec-den-distill §1).
+
+### 4.1d Policy-divergence candidates (specs/spec-policy-advisory §7)
+
+**Only when `policy_source` is configured and step 3.2 produced any
+`policy: divergence` line** (byte-identical to today otherwise — no such walk).
+Walk the brief's "Policy-divergence candidates" section like any proposal —
+accept / dismiss / defer per item, never a pre-selected default, attributed as
+policy advisory. Each carries its divergence clause and pinned quote
+(`file:line@commit`). A divergence candidate is **proposal-only**: nothing about
+the code, the plan, or the policy repo is written by accepting it — accept files
+a prepared issue (the separately-confirmed `gh issue create` path, exactly like
+a proposal), dismiss/defer behave as for any proposal. Never auto-applied, never
+authoritative; the policy quote never enters the ledger, events, or scheduler
+state.
 
 Close with: the run delta (when a run happened), dispositions taken per
 finding (with the issue URL for each one filed), **contributed lesson
