@@ -306,6 +306,35 @@ git -C "$repo" merge -q --no-ff "$integ" -m "merge integration"
 "${L[@]}" gate-check | jget '["reachable"]' | grep -q True || fail "gate-check should see integration reachable from base"
 pass "gate-check confirms integration reachable from base after merge"
 
+# --- #282 / F61: an unresolvable base is UNDETERMINED, never "did not land" --
+# `merge-base --is-ancestor` exits non-zero both when the ref is not an
+# ancestor and when <base> does not exist at all, so a base deleted after init
+# used to report a bare reachable:false — indistinguishable from a genuine
+# "not merged yet" and pointing the operator at the wrong remedy.
+retire
+"${L[@]}" init --loop-repo "$repo" --cap 1 --base main >/dev/null
+wtb="$("${L[@]}" status | jget '["worktree"]')"
+"${L[@]}" iter-start >/dev/null
+echo v9 > "$wtb/f"; git -C "$wtb" commit -qam iter1
+"${L[@]}" iter-verify >/dev/null
+# Move off main and delete it: the recorded base no longer resolves.
+git -C "$repo" checkout -q --detach
+git -C "$repo" branch -qD main
+rc=0; "${L[@]}" gate-check >/tmp/gcbase.json 2>&1 || rc=$?
+[ "$rc" = "3" ] || fail "gate-check must still exit 3 on an unresolvable base, got $rc"
+[ "$(jget '["base_missing"]' </tmp/gcbase.json)" = "True" ] \
+  || fail "gate-check must flag base_missing when the base does not resolve: $(cat /tmp/gcbase.json)"
+[ "$(jget '["base"]' </tmp/gcbase.json)" = "main" ] \
+  || fail "gate-check must name the base it tried to use: $(cat /tmp/gcbase.json)"
+grep -qi "not a 'did not land' verdict" /tmp/gcbase.json \
+  || fail "the hint must say the result is undetermined, not negative: $(cat /tmp/gcbase.json)"
+jget '["gate_progress"]["blocker"]' </tmp/gcbase.json | grep -qi "UNDETERMINED" \
+  || fail "gate_progress.blocker must not claim 'not landed yet' for an unaskable question: $(cat /tmp/gcbase.json)"
+pass "#282/F61: unresolvable base reports its own cause (base_missing + undetermined), not 'did not land'"
+# Restore main so later sub-tests keep their base.
+git -C "$repo" branch -q main "$(git -C "$repo" rev-parse HEAD)"
+git -C "$repo" checkout -q main
+
 # --- #5: gate-push is RETIRED (two-outcomes-only delivery, triage of #262/ ----
 # #263) — the loop never merges to main. gate-push must refuse (exit 3), push
 # NOTHING, and never land loop output on the base. The subcommand survives only
