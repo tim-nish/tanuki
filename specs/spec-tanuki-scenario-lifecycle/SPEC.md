@@ -398,6 +398,30 @@ search enters selection):**
   not "N runs elapsed." A finding with no recorded scenarios falls back to
   elapsed-run counting (legacy compatibility); `dismissed` findings are
   unaffected (deadness is not scenario-conditional).
+- **Absence verification is THREE-valued (ADDED 2026-07-22, owner ruling,
+  triage of issue #290).** Reporting absence as a two-valued
+  observed/not-observed answer is *true* in the degenerate case and is the
+  most confident possible statement at exactly the moment the system knows
+  least. The three outcomes are:
+  - **present** — the item was observed;
+  - **absent-with-evidence** — not observed, **and** the source demonstrably
+    records observations of that kind;
+  - **cannot-determine** — not observed, **and** the source records nothing
+    of that kind at all.
+
+  Collapsing `cannot-determine` into `absent-with-evidence` is the defect.
+  The criterion is **mechanical, deliberately** — a rule requiring judgment
+  here would be applied inconsistently and quietly abandoned: **read the
+  substrate's population for the scope being verified BEFORE reading your own
+  count.** Zero entries in the evidence source *for that scope* ⇒
+  `cannot-determine`, regardless of what the counter says; entries present
+  and the item absent from them ⇒ `absent-with-evidence`. One extra read, no
+  new state. Concretely for compaction: an accepted finding whose scenarios
+  were **never driven in any recorded run** is `cannot-determine`, and must
+  not be reported with the same shape as one that has been replayed and
+  stayed absent but has not yet reached the threshold. The distinction is
+  carried in the surfaces that report compaction, in a form a programmatic
+  caller can consume — not prose alone.
 
 **Consequences / invariants.**
 - `quota_met` can no longer be false while unexplored scenarios exist and
