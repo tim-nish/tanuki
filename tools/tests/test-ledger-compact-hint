@@ -90,15 +90,15 @@ pass "ingest-only finding: threshold named, re-drive fork correctly omitted"
 # true in the degenerate case and is the most confident possible statement at
 # exactly the moment the system knows least. `cannot-determine` must be
 # distinguishable from a below-threshold `absent-with-evidence`.
-root2="$(mktemp -d)"; trap 'rm -rf "$root" "$root2"' EXIT
-export TANUKI_ROOT="$root2"
+root3="$(mktemp -d)"; trap 'rm -rf "$root" "$root2" "$root3"' EXIT
+export TANUKI_ROOT="$root3"
 M=("$here/tanuki-ledger" --target m)
 "${M[@]}" init >/dev/null
 
 # (a) never-driven scope -> cannot-determine, not slow progress.
 printf '{"run":"20260101-aaa","scenario":"login","seq":1,"type":"note","detail":"x"}\n' \
-  > "$root2/e.jsonl"
-"${M[@]}" ingest "$root2/e.jsonl" >/dev/null
+  > "$root3/e.jsonl"
+"${M[@]}" ingest "$root3/e.jsonl" >/dev/null
 "${M[@]}" upsert-finding --title "Never replayed" --kind papercut \
   --evidence "20260101-aaa/login#1" >/dev/null
 "${M[@]}" set-status --id F1 --status accepted >/dev/null
