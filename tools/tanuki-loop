@@ -3660,7 +3660,7 @@ def cmd_log(args):
     out({"ok": True})
 
 
-def _gate_progress(state, reachable):
+def _gate_progress(state, reachable, base_missing=False):
     """Where delivery stands, derived READ-ONLY from existing state fields and
     the reachability fact gate-check just computed (F97) — no new state, no new
     subcommand. Under two-outcomes-only delivery (triage of #262/#263) the loop
@@ -3709,7 +3709,15 @@ def _gate_progress(state, reachable):
             "the issues step applies only where forge/tracker tooling is "
             "configured for this target — a hostless/trackerless target "
             "skips it and proceeds to cleanup")
-    if not reachable:
+    if base_missing:
+        # F61: never report "not landed yet" for a question we could not ask —
+        # an unresolvable base makes landing UNDETERMINED, not negative.
+        progress["blocker"] = ("base ref '%s' does not resolve — whether the "
+                               "work landed is UNDETERMINED (not a 'did not "
+                               "land' verdict); restore the base ref, then "
+                               "re-run gate-check (see hint)"
+                               % state.get("base"))
+    elif not reachable:
         progress["blocker"] = ("integration tip not reachable from the base "
                                "— not landed yet; the human merges the PR (or "
                                "the branch), never the loop (see hint)")
@@ -3733,16 +3741,35 @@ def cmd_gate_check(args):
     if branch_gone and finished:
         integ_head = state.get("head_expected") or ""
     ref = integ_head if branch_gone else state["integration_branch"]
-    if ref:
+    # F61 (recurrence): `merge-base --is-ancestor` exits non-zero BOTH when the
+    # ref genuinely is not an ancestor AND when <base> does not resolve at all
+    # (deleted or renamed after `init` — the F191/F232 case). Those are
+    # different operator problems with different remedies, and folding them
+    # into one bare reachable:false reports "did not land" for a question we
+    # could not even ask. Resolve the base FIRST and give its absence its own
+    # cause, field, and hint.
+    base_missing = git(repo, "rev-parse", "--verify",
+                       f"{base}^{{commit}}")[0] != 0
+    if ref and not base_missing:
         rc2, _ = git(repo, "merge-base", "--is-ancestor", ref, base)
     else:
         rc2 = 1
-    reachable = bool(ref) and rc2 == 0
+    reachable = bool(ref) and not base_missing and rc2 == 0
     audit(state, f"gate-check: integration reachable from {base}: {reachable}"
+                 + (" (base ref does not resolve — undetermined, not a "
+                    "'did not land' verdict)" if base_missing else "")
                  + (" (branch already deleted; checked the recorded HEAD)"
                     if branch_gone and finished else ""))
     if not reachable:
-        if branch_gone and not finished:
+        if base_missing:
+            hint = ("the base ref '%s' does NOT resolve in this loop repo, so "
+                    "reachability could not be computed — this is an "
+                    "undetermined result, NOT a 'did not land' verdict. The "
+                    "base was deleted or renamed after `init` (F191/F232). "
+                    "Restore it (`git -C %s branch %s <sha>`, or re-fetch it) "
+                    "and re-run gate-check; the run's recorded base_sha is in "
+                    "`status`." % (base, repo, base))
+        elif branch_gone and not finished:
             hint = ("the integration branch is gone but this run was never "
                     "finished — it was deleted outside the loop; inspect the "
                     "reflog, or re-run the gate from a fresh `init`")
@@ -3757,8 +3784,13 @@ def cmd_gate_check(args):
                     "never merges to %s (triage of #262/#263)."
                     % (base, base, state["integration_branch"], base))
         out({"reachable": False, "checked_ref": ref or None,
+             # Name the base that answered (or failed to answer) the question,
+             # and keep the undetermined case machine-readable (F61): a caller
+             # must be able to tell "not landed" from "could not be computed"
+             # without parsing the hint prose.
+             "base": base, "base_missing": base_missing,
              "branch_deleted": branch_gone, "run_finished": bool(finished),
-             "gate_progress": _gate_progress(state, False),
+             "gate_progress": _gate_progress(state, False, base_missing),
              "hint": hint})
         sys.exit(3)
     res = {"reachable": True, "integration_head": integ_head,
