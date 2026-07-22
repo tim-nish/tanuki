@@ -42,4 +42,38 @@ echo "$out" | grep -q "creating new target namespace" \
   && fail "write to existing target announced: [$out]"
 pass "existing target: silent"
 
+# --- story 1.57 / issue #289: the SECOND session on a slug is warned ------------
+# A slug reads session-local but is a machine-wide key. Plain writes to an
+# existing target stay silent (above, and that stays correct), but `init` — the
+# moment a session commits to a slug — must say what it is joining, not just
+# that something is there. Counts alone do not answer "whose state is this?",
+# so the notice names the namespace path, the last run and the last write.
+"$here/tanuki-ledger" --target shared init >/dev/null 2>&1
+"$here/tanuki-ledger" --target shared upsert-finding \
+  --title "Session one's finding" --kind friction --evidence "r100/s#1" >/dev/null 2>&1
+
+out="$("$here/tanuki-ledger" --target shared init 2>&1)"
+echo "$out" | grep -q "already exists" \
+  || fail "second init on an occupied slug must warn: [$out]"
+echo "$out" | grep -q "namespace $root/shared/" \
+  || fail "the warning must name the namespace path: [$out]"
+echo "$out" | grep -q "ledger last written" \
+  || fail "the warning must name when the namespace was last written: [$out]"
+echo "$out" | grep -q "finding(s)" \
+  || fail "the warning must keep the existing size counts: [$out]"
+pass "story 1.57: a second init on an occupied slug names path + last write"
+
+# The last-run signal appears once the namespace has recorded runs.
+"$here/tanuki-ledger" --target shared ingest-note --text "manual note" >/dev/null 2>&1
+out="$("$here/tanuki-ledger" --target shared init 2>&1)"
+echo "$out" | grep -q "last run manual-" \
+  || fail "the warning must name the most recent run once one exists: [$out]"
+pass "story 1.57: the occupancy notice names the most recent run"
+
+# A genuinely fresh slug is untaxed — no reuse warning, only the creation note.
+out="$("$here/tanuki-ledger" --target brandnew init 2>&1)"
+echo "$out" | grep -q "already exists" \
+  && fail "a fresh slug must not report reuse: [$out]"
+pass "story 1.57: a fresh slug is untaxed (creation note only, no reuse warning)"
+
 echo "ALL OK"
