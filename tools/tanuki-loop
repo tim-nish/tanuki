@@ -263,6 +263,51 @@ def unfinished_runs(target, exclude=None):
     return sorted(live)
 
 
+def live_runs_on_repo(repo, exclude_target=None):
+    """Live runs on the SAME physical loop repo, across ALL targets (issue
+    #200 / story 1.56).
+
+    `unfinished_runs` is keyed by target, so two *different* slugs pointed at
+    one checkout each pass that guard independently while still racing on the
+    underlying git repo — worktree paths, branch names, the shared object
+    store and index. Same liveness rule as `unfinished_runs` (never finished,
+    worktree still on disk); the record is each run's own `state.json` under
+    ~/.tanuki, so no cross-target index has to be invented or kept in sync.
+    Paths are compared by realpath, so a symlinked or trailing-slash spelling
+    of the same checkout still matches. Returns [(target, run, worktree), …]
+    sorted, excluding <exclude_target> (its own per-target guard covers it).
+    """
+    want = os.path.realpath(repo)
+    hits = []
+    if not os.path.isdir(TANUKI_ROOT):
+        return hits
+    for tgt in os.listdir(TANUKI_ROOT):
+        if tgt == exclude_target:
+            continue
+        base = os.path.join(TANUKI_ROOT, tgt, "loop")
+        if not os.path.isdir(base):
+            continue
+        for run in os.listdir(base):
+            if run == "current":
+                continue
+            sp = os.path.join(base, run, "state.json")
+            if not os.path.isfile(sp):
+                continue
+            try:
+                with open(sp, encoding="utf-8") as f:
+                    st = json.load(f)
+            except (ValueError, OSError):
+                continue
+            if st.get("finished"):
+                continue
+            lr, wt = st.get("loop_repo"), st.get("worktree")
+            if not lr or not wt or not os.path.isdir(wt):
+                continue
+            if os.path.realpath(lr) == want:
+                hits.append((tgt, run, wt))
+    return sorted(hits)
+
+
 def current_run(target):
     p = os.path.join(TANUKI_ROOT, target, "loop", "current")
     if not os.path.exists(p):
@@ -2334,6 +2379,33 @@ def cmd_init(args):
                         f"alongside it deliberately.",
              "unfinished_runs": [r for r, _ in live_before]})
         sys.exit(3)
+    # One active run per physical --loop-repo, not just per target (issue #200
+    # / story 1.56). Distinct slugs are NOT sufficient for safety on their own:
+    # the guard above is keyed by target, so two different targets pointed at
+    # the same checkout each pass it while still racing on the underlying git
+    # repo. Same fail-closed idiom, same --allow-concurrent escape hatch.
+    repo_live_before = live_runs_on_repo(repo, exclude_target=args.target)
+    if not args.allow_concurrent:
+        repo_live = repo_live_before
+        if repo_live:
+            ids = "; ".join(f"target '{t}' run {r} (worktree {w})"
+                            for t, r, w in repo_live)
+            out({"breaker": f"loop repo {repo} already has "
+                            f"{len(repo_live)} unfinished run(s) under a "
+                            f"DIFFERENT target: {ids}. Distinct target slugs "
+                            f"do not make concurrent runs safe when they share "
+                            f"one checkout — they still race on worktree "
+                            f"paths, branch names, and the shared object store "
+                            f"(issue #200). Finish or abort the other run "
+                            f"(`tanuki-loop --target <that-target> --run <id> "
+                            f"finish --reason aborted`) and remove its "
+                            f"worktree, give this target its own clone of the "
+                            f"repo, or re-run init with --allow-concurrent to "
+                            f"start alongside it deliberately.",
+                 "loop_repo": repo,
+                 "conflicting_runs": [{"target": t, "run": r, "worktree": w}
+                                      for t, r, w in repo_live]})
+            sys.exit(3)
     base, base_sha = resolve_base(repo, args.base)
     # Staleness guard (issue #2): never silently dogfood code older than the
     # remote. Best-effort fetch, then FAIL CLOSED if <base> is behind its
@@ -2494,6 +2566,16 @@ def cmd_init(args):
                      + ", ".join(r for r, _ in live_before)
                      + " (issue #258; they share the machine-wide `current` "
                        "pointer, so pin --run on every subcommand)")
+    # issue #200 / story 1.56: the cross-target case is recorded separately —
+    # a different slug on the same checkout races on the git repo itself, not
+    # on the `current` pointer, so the reader needs both facts named.
+    if repo_live_before and args.allow_concurrent:
+        audit(state, "init WARNING: --allow-concurrent — starting alongside "
+                     f"{len(repo_live_before)} live run(s) of OTHER target(s) "
+                     f"on this same loop repo ({repo}): "
+                     + ", ".join(f"{t}/{r}" for t, r, _ in repo_live_before)
+                     + " (issue #200; they share worktree paths, branch "
+                       "names, and the object store)")
     if ledger_reuse:
         audit(state, f"init note: {ledger_reuse}")
     if host:

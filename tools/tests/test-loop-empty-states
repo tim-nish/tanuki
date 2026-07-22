@@ -222,7 +222,12 @@ pass "live:no-active-run — expected; one historical line, no closed-run sectio
 
 # settlement:n-a-hostless — a fresh branch-only target that produced no work:
 # hostless (no forge), EXPECTED, and both fields carry the member.
-"$loop" --target th init --loop-repo "$repo" --cap 5 --gate branch >/dev/null
+# issue #200 / story 1.56: these sub-tests deliberately run several
+# TARGETS against one toy repo while an earlier run is still live, so
+# init's per-repo guard would refuse. The sharing is intentional here
+# (the fixture asserts on the earlier run), which is exactly what
+# --allow-concurrent declares — do not copy it into real usage.
+"$loop" --target th init --loop-repo "$repo" --allow-concurrent --cap 5 --gate branch >/dev/null
 sh="$("$loop" --target th status)"
 [ "$(jget '["settlement"]["state"]' <<<"$sh")" = "settlement:n-a-hostless" ] \
   || fail "direct-merge/no-work settlement must be typed n-a-hostless: $(jget '["settlement"]' <<<"$sh")"
@@ -236,7 +241,7 @@ pass "settlement:n-a-hostless — expected, both fields typed, reads n/a"
 
 # settlement:pending-active — a HOSTED (PR gate) run, still active, no delivery
 # yet: EXPECTED (it may still deliver), distinct from the hostless N/A case.
-"$loop" --target thp init --loop-repo "$repo" --cap 5 >/dev/null
+"$loop" --target thp init --loop-repo "$repo" --allow-concurrent --cap 5 >/dev/null
 runp="$(cat "$TANUKI_ROOT/thp/loop/current")"
 python3 - "$TANUKI_ROOT/thp/loop/$runp/state.json" <<'EOF'
 import json, sys
@@ -254,7 +259,7 @@ pass "settlement:pending-active — expected, distinct from the hostless N/A"
 # settlement:undelivered-closed — the SAME hosted target but the run has
 # closed without delivering: now a GAP (a delivery was expected but did not
 # take). Same absent field, opposite verdict — that is "expected vs gap".
-"$loop" --target thc init --loop-repo "$repo" --cap 5 >/dev/null
+"$loop" --target thc init --loop-repo "$repo" --allow-concurrent --cap 5 >/dev/null
 runc="$(cat "$TANUKI_ROOT/thc/loop/current")"
 python3 - "$TANUKI_ROOT/thc/loop/$runc/state.json" <<'EOF'
 import json, sys
