@@ -108,9 +108,11 @@ without that approval step (§"The plan gate confirms execution", loop exempt).
 - **Ledger lives in `~/.tanuki/<target>/`**, not the den. Consolidator output
   *proposes* lesson candidates for the user's knowledge hub. ~~a human moves
   them~~ (SUPERSEDED 2026-07-19: `specs/spec-den-distill/SPEC.md` ratifies a
-  gated, proposal-only contribute-back into the hub's staging intake —
-  opt-in, attended-accept per item, staging-directory-only writes; unset
-  config keeps today's manual behavior).
+  gated, proposal-only contribute-back — opt-in, attended-accept per item,
+  emitted into a directory this repo owns that the consuming side sweeps;
+  emission-directory-only writes, never a write into the consuming side's
+  tree; unset config keeps today's manual behavior. AMENDED 2026-07-22,
+  owner decision record 2026-07-22 (contribute-back emission target)).
 - **Scenario matrix is hand-written JSON** per target (no generation).
 - **Single target shape**: a Claude Code plugin exercised in a host repo via
   `claude --plugin-dir` headless runs.
@@ -332,8 +334,10 @@ written back via `set-status` — by the command, never typed by the user.
 is never lost, only visible. **Lesson candidates join the same pass**
 (AMENDED 2026-07-19, `specs/spec-den-distill/SPEC.md`): after the proposal
 walk, candidates get the identical accept / dismiss / defer walk; accept
-writes the staging-intake file right then when `contribute_back` is
-configured, and renders the one-line "not configured" notice when it isn't.
+writes the intake-shaped file right then into this repo's own emission
+directory when `contribute_back` is configured — the emission is the
+completing action, not arrival on the consuming side — and renders the
+one-line "not configured" notice when it isn't.
 The picker's "distill den" action runs the same walk over the existing
 ledger without driving.
 
