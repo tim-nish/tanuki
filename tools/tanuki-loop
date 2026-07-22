@@ -215,7 +215,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import date
+from datetime import date, datetime
 
 TANUKI_ROOT = os.environ.get("TANUKI_ROOT", os.path.expanduser("~/.tanuki"))
 
@@ -550,8 +550,28 @@ def ledger_reuse_note(target):
     ne = len(led.get("events", {}) or {})
     if not nf and not ne:
         return None
+    # Story 1.57 / issue #289: counts alone do not say WHOSE state this is.
+    # Name the namespace path and, when readable, its last write and most
+    # recent run — the signals that decide own-vs-foreign without a manual
+    # stat/ls. Mirrors tanuki-ledger's occupancy_clause; failure-tolerant, a
+    # notice must never break a run.
+    ns = os.path.join(TANUKI_ROOT, target)
+    bits = [f"namespace {ns}/"]
+    try:
+        bits.append("ledger last written " + datetime.fromtimestamp(
+            os.path.getmtime(path)).isoformat(timespec="seconds"))
+    except OSError:
+        pass
+    try:
+        runs = sorted(d for d in os.listdir(os.path.join(ns, "events"))
+                      if os.path.isdir(os.path.join(ns, "events", d)))
+        if runs:
+            bits.append(f"last run {runs[-1]}")
+    except OSError:
+        pass
     return (f"reusing the existing ledger for target '{target}' "
-            f"({ne} event record(s), {nf} finding(s)) — ~/.tanuki is shared "
+            f"({ne} event record(s), {nf} finding(s)) — {'; '.join(bits)} — "
+            f"~/.tanuki is shared "
             f"machine-wide (F94). If you expected a fresh target, stop and pick "
             f"an unused slug; this run will draw on the inherited findings")
 
@@ -2753,77 +2773,83 @@ def cmd_doctor(args):
                 "the breaker on iteration 1. A placeholder like `true` is "
                 "accepted but leaves the run with NO regression gate; doctor "
                 "cannot tell the difference, so it is your call.")
-        # Name the canonical path so the operator knows WHERE the "loop" block
-        # goes and that it is not auto-loaded (F38). Also say whether a file
-        # already EXISTS there (F159): the scenarios dir is machine-wide
-        # (F94), so a colliding target slug would silently inherit a foreign
-        # loop block — existence is the signal that needs a manual ls today.
-        _canon = os.path.join(
-            TANUKI_ROOT, "scenarios", f"{args.target}.scenarios.json")
-        _canon_exists = os.path.isfile(_canon)
-        loop_check["scenarios_file"] = {
-            "canonical": _canon,
-            "canonical_file_exists": _canon_exists,
-            "note": ("put the \"loop\" block in this file; its name must match "
-                     "--target. doctor/init do NOT auto-load it — pass it with "
-                     "--scenarios. $TANUKI_ROOT (default ~/.tanuki) sets the "
-                     "root. canonical_file_exists says whether a file is "
-                     "already there — the scenarios dir is machine-wide, so "
-                     "an existing file under your slug may be another "
-                     "session's config. For a scratch or sandboxed run you "
-                     "may pass ANY path via --scenarios — it need not live "
-                     "in this shared directory, which sidesteps the "
-                     "cross-session slug collision this canonical location "
-                     "is prone to (F94)."),
-        }
-        if _canon_exists:
-            # F176: canonical_file_exists alone gave the operator nothing to
-            # judge WHOSE file it is. Surface the three signals that judgment
-            # needs — the file's age (a days-old mtime suggests a leftover),
-            # its declared "target", and whether it carries a "loop" block at
-            # all — so deciding own-file vs. another session's leftover needs
-            # no manual stat/cat.
-            try:
-                _age_s = int(time.time() - os.path.getmtime(_canon))
-            except OSError:
-                _age_s = None
-            _existing = {"mtime_age_s": _age_s, "target": None,
-                         "has_loop_block": None}
-            try:
-                with open(_canon) as _f:
-                    _doc = json.load(_f)
-                if isinstance(_doc, dict):
-                    _existing["target"] = _doc.get("target")
-                    _existing["has_loop_block"] = isinstance(
-                        _doc.get("loop"), dict)
-                    _existing["detail"] = (
-                        "existing canonical file: mtime %s ago, target=%r, "
-                        "loop block %s — check these against your session "
-                        "before trusting or overwriting it" % (
-                            "%ds" % _age_s if _age_s is not None else "?",
-                            _existing["target"],
-                            "present" if _existing["has_loop_block"]
-                            else "ABSENT"))
-                else:
-                    _existing["detail"] = ("existing canonical file parses "
-                                           "but is not a JSON object")
-            except (OSError, ValueError):
-                _existing["detail"] = ("existing canonical file could not be "
-                                       "read as JSON — likely damaged or "
-                                       "mid-write by another session")
-            loop_check["scenarios_file"]["existing_file"] = _existing
-            # F176: promote the collision to the top-level warning when the
-            # existing file declares a DIFFERENT target — the strongest signal
-            # it belongs to another session's slug and must not be trusted.
-            _ex_target = _existing.get("target")
-            if _ex_target is not None and _ex_target != args.target:
-                collision_warning = (
-                    f"a canonical scenarios file already exists at {_canon} "
-                    f"but declares target={_ex_target!r}, not {args.target!r} "
-                    f"— likely another session's config under a colliding "
-                    f"slug (the scenarios dir is machine-wide); inspect "
-                    f"scenarios_file.existing_file before trusting or "
-                    f"overwriting it")
+    # Story 1.57 / issue #289: the target namespace is machine-wide but a slug
+    # reads session-local, so the scope statement must reach EVERY doctor run —
+    # not only the ones that happen to be missing config. This block used to sit
+    # inside `if missing:` above, which hid it from precisely the operator most
+    # at risk: the one whose loop block is already complete because a colliding
+    # session's file supplied it.
+    # Name the canonical path so the operator knows WHERE the "loop" block
+    # goes and that it is not auto-loaded (F38). Also say whether a file
+    # already EXISTS there (F159): the scenarios dir is machine-wide
+    # (F94), so a colliding target slug would silently inherit a foreign
+    # loop block — existence is the signal that needs a manual ls today.
+    _canon = os.path.join(
+        TANUKI_ROOT, "scenarios", f"{args.target}.scenarios.json")
+    _canon_exists = os.path.isfile(_canon)
+    loop_check["scenarios_file"] = {
+        "canonical": _canon,
+        "canonical_file_exists": _canon_exists,
+        "note": ("put the \"loop\" block in this file; its name must match "
+                 "--target. doctor/init do NOT auto-load it — pass it with "
+                 "--scenarios. $TANUKI_ROOT (default ~/.tanuki) sets the "
+                 "root. canonical_file_exists says whether a file is "
+                 "already there — the scenarios dir is machine-wide, so "
+                 "an existing file under your slug may be another "
+                 "session's config. For a scratch or sandboxed run you "
+                 "may pass ANY path via --scenarios — it need not live "
+                 "in this shared directory, which sidesteps the "
+                 "cross-session slug collision this canonical location "
+                 "is prone to (F94)."),
+    }
+    if _canon_exists:
+        # F176: canonical_file_exists alone gave the operator nothing to
+        # judge WHOSE file it is. Surface the three signals that judgment
+        # needs — the file's age (a days-old mtime suggests a leftover),
+        # its declared "target", and whether it carries a "loop" block at
+        # all — so deciding own-file vs. another session's leftover needs
+        # no manual stat/cat.
+        try:
+            _age_s = int(time.time() - os.path.getmtime(_canon))
+        except OSError:
+            _age_s = None
+        _existing = {"mtime_age_s": _age_s, "target": None,
+                     "has_loop_block": None}
+        try:
+            with open(_canon) as _f:
+                _doc = json.load(_f)
+            if isinstance(_doc, dict):
+                _existing["target"] = _doc.get("target")
+                _existing["has_loop_block"] = isinstance(
+                    _doc.get("loop"), dict)
+                _existing["detail"] = (
+                    "existing canonical file: mtime %s ago, target=%r, "
+                    "loop block %s — check these against your session "
+                    "before trusting or overwriting it" % (
+                        "%ds" % _age_s if _age_s is not None else "?",
+                        _existing["target"],
+                        "present" if _existing["has_loop_block"]
+                        else "ABSENT"))
+            else:
+                _existing["detail"] = ("existing canonical file parses "
+                                       "but is not a JSON object")
+        except (OSError, ValueError):
+            _existing["detail"] = ("existing canonical file could not be "
+                                   "read as JSON — likely damaged or "
+                                   "mid-write by another session")
+        loop_check["scenarios_file"]["existing_file"] = _existing
+        # F176: promote the collision to the top-level warning when the
+        # existing file declares a DIFFERENT target — the strongest signal
+        # it belongs to another session's slug and must not be trusted.
+        _ex_target = _existing.get("target")
+        if _ex_target is not None and _ex_target != args.target:
+            collision_warning = (
+                f"a canonical scenarios file already exists at {_canon} "
+                f"but declares target={_ex_target!r}, not {args.target!r} "
+                f"— likely another session's config under a colliding "
+                f"slug (the scenarios dir is machine-wide); inspect "
+                f"scenarios_file.existing_file before trusting or "
+                f"overwriting it")
     checks.append(loop_check)
 
     # 2. Base freshness — the same measurement init fails closed on (issue #2).

@@ -182,6 +182,43 @@ def ledger_path(target):
     return os.path.join(TANUKI_ROOT, target, "ledger.json")
 
 
+def namespace_occupancy(target):
+    """What already lives under this slug's machine-wide namespace (story 1.57
+    / issue #289).
+
+    A slug reads session-local but is a machine-wide key, so "already exists"
+    alone does not tell an operator WHOSE state they are about to join. Report
+    the signals that answer it — the namespace path, the ledger's last-write
+    time, and the most recent run id — so deciding own-vs-foreign needs no
+    manual stat/ls. Read-only and failure-tolerant: an unreadable namespace
+    degrades to None fields, never an exception (the announce_new_target rule —
+    a notice must never break a run)."""
+    ns = os.path.join(TANUKI_ROOT, target)
+    try:
+        mtime = datetime.fromtimestamp(
+            os.path.getmtime(ledger_path(target))).isoformat(timespec="seconds")
+    except OSError:
+        mtime = None
+    try:
+        runs = all_run_ids(target)
+        last_run = runs[-1] if runs else None
+    except OSError:
+        last_run = None
+    return {"path": ns, "ledger_mtime": mtime, "last_run": last_run}
+
+
+def occupancy_clause(occ):
+    """The human half of namespace_occupancy — one clause naming the path and,
+    when known, the last run and last write. Kept beside the data so the loop's
+    sibling notice and this tool's cannot drift apart in wording."""
+    bits = [f"namespace {occ['path']}/"]
+    if occ["last_run"]:
+        bits.append(f"last run {occ['last_run']}")
+    if occ["ledger_mtime"]:
+        bits.append(f"ledger last written {occ['ledger_mtime']}")
+    return "; ".join(bits)
+
+
 def load(target):
     path = ledger_path(target)
     if not os.path.exists(path):
@@ -223,11 +260,16 @@ def cmd_init(args, ledger):
     # a fresh one, silently reusing another session's data (~/.tanuki is
     # machine-wide, F94). State the reuse and its size; never a prompt.
     existed = os.path.isfile(ledger_path(args.target))
+    # Story 1.57 / issue #289: read the occupancy BEFORE save() rewrites the
+    # ledger — afterwards the mtime is this process's own write and says
+    # nothing about who was here first.
+    occ = namespace_occupancy(args.target) if existed else None
     save(args.target, ledger)
     if existed:
         print(f"note: target '{args.target}' already exists — reusing its "
               f"ledger ({len(ledger.get('events', {}))} event record(s), "
-              f"{len(ledger.get('findings', []))} finding(s)). If you "
+              f"{len(ledger.get('findings', []))} finding(s)). "
+              f"{occupancy_clause(occ)}. If you "
               f"expected a fresh target, pick an unused slug: ~/.tanuki/ is "
               f"shared machine-wide.", file=sys.stderr)
     print(f"ledger ready: {ledger_path(args.target)}")
