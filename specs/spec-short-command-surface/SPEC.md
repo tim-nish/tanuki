@@ -176,6 +176,23 @@ must state the full contract in place:
 
 ### D4 — no silent state changes (fixes F18, F21, F70)
 
+- **Shared scope announces itself (ADDED 2026-07-22, owner ruling, triage of
+  issue #289).** A resource whose *name* reads private but whose *scope* is
+  machine-wide must be **isolated OR warn loudly on collision** — silence is
+  not among the options. A `--target` slug is the case in point: it reads as
+  a label chosen for this run, and is in fact a machine-wide key, so two
+  sessions picking the obvious name share and can clobber one another. The
+  design-time test is *"if two sessions picked the obvious name, what
+  happens?"* — an answer of "they collide, quietly" means the resource is
+  mis-presented, not merely mis-scoped. Concretely, and at **every** entry
+  point rather than only the ones that happen to hit a missing-config path:
+  every surface that resolves a target states the scope and the path the slug
+  owns, and reuse of an existing slug names what already lives there (state,
+  last run, config mtime) instead of proceeding silently. The conformant
+  pattern already ships one surface over — `distill --check`'s notice that a
+  machine-wide `contribute_back` block is ignored names the key, the reason,
+  the deciding issue, and the correct location (spec-den-distill "Scope is
+  per-target, never machine-wide"); this generalizes that posture.
 - `--target <slug>` that resolves to a directory that does not yet exist is
   announced ("creating new target namespace ~/.tanuki/<slug>/") on write
   commands, so a typo cannot silently fork a ledger.
