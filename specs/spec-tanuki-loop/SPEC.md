@@ -158,6 +158,22 @@ work). Everything mechanical and fully reversible runs unattended.
   `current`-resolving subcommand refuses with `ambiguous — pass --run <id>`
   when more than one unfinished run exists. Genuinely parallel work uses
   distinct target slugs, never two runs on one target.
+- **One active run per physical `--loop-repo`, not just per target (ADDED
+  2026-07-22, triage of issue #200).** Distinct target slugs are **not**
+  sufficient for safety on their own: the guard above is keyed by target
+  (`~/.tanuki/<target>/loop/`), so two *different* targets pointed at the
+  *same* physical `--loop-repo` checkout each pass it independently, yet both
+  still race on the underlying git repo — worktree paths, branch names, the
+  shared object store and index (issue #200 / finding F200: a live collision
+  showed a headless run's calls landing in an attended run's state despite
+  distinct targets, because both shared one checkout). So `init` **also**
+  resolves `--loop-repo` to a real path and fails closed (breaker, exit 3)
+  when another target's unfinished run — worktree still present — already
+  holds that same resolved path, unless `--allow-concurrent` is passed
+  deliberately (recorded in the audit) — the same fail-closed idiom as the
+  per-target guard above. Genuinely parallel work therefore needs **both**
+  a distinct target slug **and** its own `--loop-repo` checkout; sharing a
+  checkout across concurrent targets is never automatically safe.
 
 ## Issue-free by construction
 
