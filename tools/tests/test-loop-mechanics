@@ -383,7 +383,12 @@ pass "#6: init sweeps merged integration branches, keeps unmerged tips"
 
 # finish deletes THIS run's branch once it's merged into base.
 Ld=("$loop" --target dd)
-wtd="$("${Ld[@]}" init --loop-repo "$crepo" --cap 1 | jget '["worktree"]')"
+# issue #200 / story 1.56: these sub-tests deliberately run several
+# TARGETS against one toy repo while an earlier run is still live, so
+# init's per-repo guard would refuse. The sharing is intentional here
+# (the fixture asserts on the earlier run), which is exactly what
+# --allow-concurrent declares — do not copy it into real usage.
+wtd="$("${Ld[@]}" init --loop-repo "$crepo" --cap 1 --allow-concurrent | jget '["worktree"]')"
 ibrd="$("${Ld[@]}" status | jget '["integration_branch"]')"
 git -C "$wtd" commit -q --allow-empty -m iter
 git -C "$crepo" merge -q --no-ff "$ibrd" -m "gate merge"

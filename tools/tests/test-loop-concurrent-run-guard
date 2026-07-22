@@ -101,4 +101,49 @@ python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));w=d.get("warning") or
   || fail "(5) the live-run warning must clear after the runs finish"
 pass "(5) doctor surfaces a live run as an advisory warning and clears once finished"
 
-echo "ALL PASS: concurrent-run guard (issue #258 / story 1.51)"
+# --- (6) issue #200 / story 1.56: the guard is per REPO, not just per target -
+# Distinct target slugs are not sufficient for safety on their own: two
+# different targets pointed at one physical --loop-repo each pass the
+# per-target guard independently while still racing on the underlying git repo
+# (worktree paths, branch names, the shared object store).
+runC="$("${L[@]}" init --loop-repo "$repo" --cap 1 --test-cmd true \
+        --wall-time 60 --token-budget 1000 --attempt-cap 1 \
+        --allow-stale-base 2>/dev/null | runid)"
+[ -n "$runC" ] || fail "(6) setup: run C did not init on target t"
+
+# A DIFFERENT target on the SAME repo must now fail closed.
+rc=0
+"$loop" --target other init --loop-repo "$repo" --cap 1 --test-cmd true \
+  --wall-time 60 --token-budget 1000 --attempt-cap 1 --allow-stale-base \
+  >"$tmp/x.txt" 2>/dev/null || rc=$?
+[ "$rc" = "3" ] || fail "(6) cross-target init on a shared repo must breaker (exit 3), got $rc: $(cat "$tmp/x.txt")"
+grep -q "200" "$tmp/x.txt" || fail "(6) the refusal must cite issue #200: $(cat "$tmp/x.txt")"
+python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));c=d.get("conflicting_runs") or [];sys.exit(0 if any(r["target"]=="t" for r in c) else 1)' "$tmp/x.txt" \
+  || fail "(6) the refusal must name the conflicting target in conflicting_runs: $(cat "$tmp/x.txt")"
+[ ! -e "$TANUKI_ROOT/other/loop/current" ] \
+  || fail "(6) a refused cross-target init must not create the other target's current pointer"
+pass "(6) issue #200: a different target on the same loop repo fails closed and names the holder"
+
+# --- (7) a DIFFERENT repo is unaffected — the common case stays untaxed ------
+repo2="$tmp/repo2"
+git init -q "$repo2"
+git -C "$repo2" config user.email t@e && git -C "$repo2" config user.name t
+git -C "$repo2" checkout -qb main
+echo v0 > "$repo2/f" && git -C "$repo2" add -A && git -C "$repo2" commit -qm base
+runD="$("$loop" --target other init --loop-repo "$repo2" --cap 1 \
+        --test-cmd true --wall-time 60 --token-budget 1000 --attempt-cap 1 \
+        --allow-stale-base 2>/dev/null | runid)"
+[ -n "$runD" ] || fail "(7) a second target on its OWN repo must init cleanly"
+pass "(7) one-target-per-repo path untaxed — a different checkout still inits"
+
+# --- (8) --allow-concurrent overrides the cross-target guard and is audited --
+rc=0
+runE="$("$loop" --target third init --loop-repo "$repo" --cap 1 \
+        --test-cmd true --wall-time 60 --token-budget 1000 --attempt-cap 1 \
+        --allow-stale-base --allow-concurrent 2>/dev/null | runid)" || rc=$?
+[ -n "$runE" ] || fail "(8) --allow-concurrent must permit a cross-target start on a shared repo"
+grep -q "200" "$TANUKI_ROOT/third/loop/$runE/audit.md" \
+  || fail "(8) the deliberate cross-target start must be audited citing #200: $(cat "$TANUKI_ROOT/third/loop/$runE/audit.md")"
+pass "(8) --allow-concurrent overrides the cross-target guard and records why"
+
+echo "ALL PASS: concurrent-run guard (issue #258 / story 1.51; issue #200 / story 1.56)"

@@ -46,7 +46,12 @@ cat > "$sc" <<EOF
 EOF
 
 # --- init pins the declared fixture with provenance --------------------------
-"$loop" --target ef init --loop-repo "$repo" --scenarios "$sc" > /tmp/ef1.json 2>&1 \
+# issue #200 / story 1.56: these sub-tests deliberately run several
+# TARGETS against one toy repo while an earlier run is still live, so
+# init's per-repo guard would refuse. The sharing is intentional here
+# (the fixture asserts on the earlier run), which is exactly what
+# --allow-concurrent declares — do not copy it into real usage.
+"$loop" --target ef init --loop-repo "$repo" --allow-concurrent --scenarios "$sc" > /tmp/ef1.json 2>&1 \
   || { cat /tmp/ef1.json; fail "hosted init with entry_fixture exited non-zero"; }
 run="$(jget "['run']" < /tmp/ef1.json)"
 src="$(jget "['entry_fixtures']['harvested']['source_commit']" < /tmp/ef1.json)"
@@ -67,7 +72,7 @@ d = json.load(open(sys.argv[1]))
 d["entry_fixtures"]["harvested"]["paths"] = ["facts/nonexistent.md"]
 json.dump(d, open(sys.argv[2], "w"))
 PY
-rc=0; "$loop" --target ef2 init --loop-repo "$repo" --scenarios "$sc_bad" >/tmp/ef2.out 2>&1 || rc=$?
+rc=0; "$loop" --target ef2 init --loop-repo "$repo" --allow-concurrent --scenarios "$sc_bad" >/tmp/ef2.out 2>&1 || rc=$?
 [ "$rc" != "0" ] || fail "init must fail closed on an unmaterializable fixture"
 grep -q "cannot be materialized" /tmp/ef2.out \
   || fail "failure must name the unmaterializable fixture: $(cat /tmp/ef2.out)"
@@ -81,7 +86,7 @@ d = json.load(open(sys.argv[1])); d.pop("entry_fixtures")
 for s in d["scenarios"]: s.pop("entry_fixture", None)
 json.dump(d, open(sys.argv[2], "w"))
 PY
-"$loop" --target ef3 init --loop-repo "$repo" --scenarios "$sc_plain" > /tmp/ef3.json 2>&1 \
+"$loop" --target ef3 init --loop-repo "$repo" --allow-concurrent --scenarios "$sc_plain" > /tmp/ef3.json 2>&1 \
   || fail "plain init exited non-zero"
 [ "$(jget "['entry_fixtures']" < /tmp/ef3.json)" = "None" ] \
   || fail "no declaration must leave entry_fixtures null"
@@ -94,7 +99,7 @@ import json, sys
 d = json.load(open(sys.argv[1])); d.pop("host")
 json.dump(d, open(sys.argv[2], "w"))
 PY
-"$loop" --target ef4 init --loop-repo "$repo" --scenarios "$sc_hostless" > /tmp/ef4.json 2>&1 \
+"$loop" --target ef4 init --loop-repo "$repo" --allow-concurrent --scenarios "$sc_hostless" > /tmp/ef4.json 2>&1 \
   || fail "hostless init exited non-zero"
 jget "['entry_fixtures_note']" < /tmp/ef4.json | grep -q "HOSTLESS" \
   || fail "hostless declaration must be reported out of scope"
