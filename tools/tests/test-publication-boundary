@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# test-publication-boundary — the publication-boundary lint fires and passes
+# where it should. Two halves:
+#   (1) the real tracked tree passes today (a failing first run means the
+#       check is wrong, not that a leak was found);
+#   (2) a deliberately seeded violation in a throwaway repo FAILS and names
+#       the offending file — the check is proven to fire, never assumed
+#       green from clean input.
+set -eu
+
+repo=$(git rev-parse --show-toplevel)
+check="$repo/tools/check-publication-boundary"
+fail=0
+err() { printf 'FAIL: %s\n' "$1" >&2; fail=1; }
+ok()  { printf 'ok:   %s\n' "$1"; }
+
+# (1) Clean tree passes.
+if "$check" >/dev/null 2>&1; then
+  ok "clean tracked tree passes"
+else
+  err "check failed on the real tree — port defect or a genuine leak; run it directly"
+fi
+
+# (2) Seeded violation fails and is named.
+work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+git -C "$work" init -q
+mkdir -p "$work/tools" "$work/docs"
+cp "$check" "$work/tools/check-publication-boundary"
+FAKE="f00dbabe0000000000000000000000000000cafe"
+# Assemble the leak from parts so THIS test file never contains the literal
+# the lint hunts (the test is self-excluded from scans, but keep it clean).
+hubname="product"; hubname="$hubname-lab"
+printf 'seeded: %s@%s in a doc\n' "$hubname" "$FAKE" > "$work/docs/leak.md"
+git -C "$work" add -A
+git -C "$work" -c user.email=t@t -c user.name=t commit -qm seed
+
+# Run INSIDE the throwaway repo — the check resolves its tree from cwd.
+rc=0
+out=$(cd "$work" && ./tools/check-publication-boundary 2>&1) || rc=$?
+if [ "$rc" -eq 0 ]; then
+  err "check exited 0 on a tree with a seeded leak"
+else
+  ok "check exits non-zero on a seeded leak"
+fi
+if printf '%s' "$out" | grep -q 'docs/leak.md'; then
+  ok "seeded violation names the offending file"
+else
+  err "offending file not named; output was: $out"
+fi
+
+[ "$fail" -eq 0 ] && printf 'PASS test-publication-boundary\n' || exit 1
