@@ -1,0 +1,174 @@
+#!/usr/bin/env sh
+# check-publication-boundary — reject private provenance in the public tree.
+# (owner decision record 2026-07-22 (publication-boundary reach); ported from
+# the sibling consumer's check of the same name.) This repo is public; the
+# ratified boundary is "mechanism public, provenance private": the tree may
+# state that a decision was ratified (date + title) and may document how the
+# policy-source seam works generically, but never the address, layout, or
+# commit pins of a private policy hub.
+#
+# REACH: the Git-TRACKED tree only — `git ls-files`, no history reads. The
+# boundary's enforcement point is publication: history predating a repo's
+# one-time pre-publication scrub is out of scope by ratified rule; keeping the
+# *current* tree clean is this check's whole job.
+#
+# TWO RULE SETS (re-derived for this repo, not copied):
+#
+#   A. PROVENANCE VALUES — the COMPLETE tracked tree. A real commit pin is
+#      owner-specific data wherever it sits, so this rule follows the VALUE,
+#      not the directory. Four shapes, each of which bypassed a
+#      pointer-only check in the reference implementation's history:
+#        A1  a policy-surface line pointer on a non-synthetic pin:
+#            (GLOSSARY.md|LESSONS.md|topics/<f>.md):LINE[-LINE]@<sha>
+#        A2  a hub-name pin (`<name>-lab|-hub|-repo@<sha>`) on a
+#            non-synthetic sha
+#        A3  a commit pin quoted in prose ("pin <sha>")
+#        A4  a bare sha assigned to a sha/pin/commit-named variable
+#
+#   B. OWNER-SPECIFIC LITERALS — tree-wide, DELIBERATELY WIDER than the
+#      reference's specs/-only reach, with a NARROWER pattern. Rationale:
+#      the reference repo needed a narrow reach because a sibling check
+#      deliberately excludes scripts/tests that name the hub as guard
+#      strings; this repo has no such sibling, and its public spec uses
+#      GLOSSARY.md / LESSONS.md / topics/ as *generic example filenames*
+#      (ratified genericization, 2026-07-15) — so those are NOT in the
+#      pattern, and neither is a bare `~/work` (generic examples like
+#      `~/work/my-plugin` are documentation). What remains is the actual
+#      owner vocabulary, which has zero legitimate occurrences in this
+#      tree: the private hub's name and its archive layout.
+#      The only files allowed to contain the patterns are this check and
+#      its test (guard strings), both self-excluded.
+#
+# SYNTHETIC PINS: fixtures and docs must pin to a DECLARED synthetic value.
+# This check cannot resolve a sha against a (private) hub, so the rule is
+# inverted — anything outside the declared synthetic set is presumed real.
+# POSIX shell + stdlib Python only.
+
+set -eu
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || {
+  printf 'FAIL: not inside a git repository\n' >&2; exit 1;
+}
+cd "$root"
+
+fail=0
+err() { printf 'FAIL: %s\n' "$1" >&2; fail=1; }
+ok()  { printf 'ok:   %s\n' "$1"; }
+
+work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+
+SELF='tools/check-publication-boundary'
+SELFTEST='tools/tests/test-publication-boundary'
+
+# Factored out so the self-tests prove the rules on known shapes.
+cat > "$work/scan.py" <<'PY'
+import re, sys
+
+# Declared synthetic pin prefixes — the ONLY commit pins allowed in the
+# public tree. Extend THIS list for a new fixture pin; never except a file.
+SYNTHETIC = ("8f3c2d1", "abc1234", "0000000", "deadbee", "1111111")
+
+HUB_POINTER = re.compile(
+    r"\b(GLOSSARY\.md|LESSONS\.md|topics/[A-Za-z0-9._-]+\.md)"
+    r":\d+(?:-\d+)?@([0-9a-f]{7,40})\b")
+HUB_PIN = re.compile(r"\b([a-z][a-z0-9-]*(?:-lab|-hub|-repo))@([0-9a-f]{7,40})\b")
+PROSE_PIN = re.compile(r"\bpin[\s:=]+`?([0-9a-f]{7,40})`?\b", re.I)
+BARE_SHA = re.compile(r"\b(?:sha|pin|commit)\s*[:=]\s*[\"']([0-9a-f]{7,40})[\"']", re.I)
+
+
+def synthetic(sha):
+    return any(sha.startswith(p) for p in SYNTHETIC)
+
+
+def scan(paths):
+    out = []
+    rules = ((HUB_POINTER, 2, "policy-surface line pointer on a non-synthetic commit"),
+             (HUB_PIN, 2, "hub pin on a non-synthetic commit"),
+             (PROSE_PIN, 1, "commit pin quoted in prose"),
+             (BARE_SHA, 1, "bare commit value assigned to a sha/pin/commit name"))
+    for p in paths:
+        try:
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                lines = fh.readlines()
+        except OSError:
+            continue
+        for n, line in enumerate(lines, 1):
+            seen = set()
+            for rx, grp, label in rules:
+                for m in rx.finditer(line):
+                    if synthetic(m.group(grp)) or m.group(grp) in seen:
+                        continue
+                    seen.add(m.group(grp))
+                    out.append((p, n, f"{label}: {m.group(0).strip()}"))
+    return out
+
+
+if __name__ == "__main__":
+    findings = scan([l.strip() for l in sys.stdin if l.strip()])
+    for p, n, msg in findings:
+        print(f"{p}:{n}: {msg}")
+    sys.exit(1 if findings else 0)
+PY
+
+# --- A. Provenance values across the complete tracked tree -------------------
+git ls-files | grep -v -e "^$SELF\$" -e "^$SELFTEST\$" > "$work/tracked"
+if out=$(python3 "$work/scan.py" < "$work/tracked"); then
+  ok "no real hub pins or line pointers in the tracked tree ($(wc -l < "$work/tracked" | tr -d ' ') files)"
+else
+  printf 'FAIL: owner-specific provenance in the public tree (publication boundary):\n' >&2
+  printf '%s\n' "$out" | sed 's/^/  /' >&2
+  printf '  Use a declared synthetic pin in fixtures/docs, or drop the locator —\n' >&2
+  printf '  never a real hub commit.\n' >&2
+  fail=1
+fi
+
+# --- B. Owner-specific literals, tree-wide ------------------------------------
+# Pattern re-derived for this repo (see header): the private hub's name and
+# its archive layout. Generic policy-surface filenames and generic ~/work
+# examples are legal here and deliberately NOT matched.
+PATTERN='product-lab|q_a/'
+violations=$(git ls-files | grep -v -e "^$SELF\$" -e "^$SELFTEST\$" \
+  | xargs grep -rnE "$PATTERN" -- 2>/dev/null || true)
+if [ -n "$violations" ]; then
+  printf 'FAIL: owner-specific literals in the public tree (publication boundary):\n' >&2
+  printf '%s\n' "$violations" | sed 's/^/  /' >&2
+  printf '  Replace with a generic decision line — e.g.\n' >&2
+  printf '  "owner decision record YYYY-MM-DD (title)" — and keep hub layout private.\n' >&2
+  fail=1
+else
+  ok "no owner-specific literals in the tracked tree"
+fi
+
+# --- Self-tests: prove the rules on known shapes ------------------------------
+mkdir -p "$work/t"
+FAKE="f00dbabe0000000000000000000000000000cafe"
+printf '{"seed": {"pointer": "topics/decisions.md:36@%s"}}\n' "$FAKE" > "$work/t/leak-pointer.json"
+printf 'sha = "%s"\n'                                         "$FAKE" > "$work/t/leak-bare-sha.py"
+printf 'pinned policy surface (pin %s, dated)\n'              "$FAKE" > "$work/t/leak-prose-pin.md"
+printf 'consulted: policy-hub@%s — a finding\n'               "$FAKE" > "$work/t/leak-alt-hub.md"
+for f in leak-pointer.json leak-bare-sha.py leak-prose-pin.md leak-alt-hub.md; do
+  printf '%s\n' "$work/t/$f" | python3 "$work/scan.py" >/dev/null 2>&1 \
+    && err "leak shape NOT caught: $f" || ok "leak shape caught: $f"
+done
+
+printf '{"seed": {"quote": "an illustrative fixture line", "pointer": "LESSONS.md:41@8f3c2d1e4a5b6c7d8e9f0a1b2c3d4e5f60718293"}}\n' \
+  > "$work/t/ok-fixture.json"
+printf '%s\n' "$work/t/ok-fixture.json" | python3 "$work/scan.py" >/dev/null 2>&1 \
+  && ok "synthetic fixture provenance passes (8f3c2d1…)" \
+  || err "synthetic fixture provenance was flagged"
+
+cat > "$work/t/generic-docs.md" <<'EOF'
+Configure `"policy_source": {"path": "~/path/to/policy-repo", "files":
+["GLOSSARY.md", "LESSONS.md", "topics/decisions.md"]}`. Run against
+~/work/my-plugin; the surface prints `== GLOSSARY.md @$sha ==` with numbered
+lines. Placeholders like `<hub>@<commit>` are documentation, not values.
+EOF
+printf '%s\n' "$work/t/generic-docs.md" | python3 "$work/scan.py" >/dev/null 2>&1 \
+  && ok "generic mechanism documentation does not false-positive" \
+  || err "generic documentation was flagged as a leak"
+
+if [ "$fail" -eq 0 ]; then
+  printf '\nOK: no owner-specific provenance in the public tree.\n'; exit 0
+else
+  printf '\npublication-boundary checks FAILED.\n' >&2; exit 1
+fi
