@@ -1064,6 +1064,70 @@ def override_host_tag(target, run):
     return None
 
 
+ABSENT_WITH_EVIDENCE = "absent-with-evidence"
+CANNOT_DETERMINE = "cannot-determine"
+
+
+def absence_verdict_fn(target):
+    """Build the three-valued absence classifier for <target> (issue #290 /
+    story 1.58; spec-tanuki-scenario-lifecycle "Absence verification is
+    THREE-valued").
+
+    Absence has three outcomes, not two — present, `absent-with-evidence`, and
+    `cannot-determine` — and the criterion is mechanical: **read the
+    substrate's population for the scope being verified BEFORE reading your own
+    count.** A counter of 0 is *true* in the degenerate case and is the most
+    confident possible statement at exactly the moment the system knows least,
+    so a scope the evidence source records nothing about must never be reported
+    with the shape of one that was replayed and stayed absent.
+
+    Returns a callable `f -> ABSENT_WITH_EVIDENCE | CANNOT_DETERMINE`. The
+    population read deliberately scans EVERY recorded run, not only runs after
+    `last_seen_run`: the question is whether the source records observations of
+    that kind at all, which is independent of this finding's own timeline.
+
+    Both `cmd_compact` and `compaction_hint` consume this one function so the
+    two surfaces cannot grow separate vocabularies for the same distinction.
+    Scope is `accepted` findings; `dismissed` compaction counts elapsed runs by
+    design ("deadness is not scenario-conditional") and is left untouched.
+    """
+    runs = all_run_ids(target)
+    driven = driven_scenarios_by_run(target)
+    binding_of = bindings_by_run(target)
+    cur_b = current_binding(target)
+    covers_by_sid = {}
+    try:
+        with open(os.path.join(TANUKI_ROOT, target, "scheduler.json"),
+                  encoding="utf-8") as fh:
+            covers_by_sid = {sid: set(st.get("covers") or [])
+                             for sid, st in
+                             json.load(fh).get("scenarios", {}).items()}
+    except (OSError, ValueError):
+        pass
+
+    def verdict(f):
+        tag = f.get("surface")
+        covering = ({sid for sid, tags in covers_by_sid.items() if tag in tags}
+                    if tag else set())
+        scen = (set(f.get("scenarios", [])) - {"ingest"}) | covering
+        if not scen:
+            # ingest/no-scenario findings verify by ELAPSED runs, so the
+            # substrate is the run list itself: no runs recorded at all means
+            # nothing could have elapsed, and 0 is unknowable rather than clean.
+            return ABSENT_WITH_EVIDENCE if runs else CANNOT_DETERMINE
+        # Real scenario: the substrate is the run manifests. Was this scope
+        # EVER driven under this finding's binding? If not, its 0 says nothing
+        # about the fix — only that nothing ever replayed it.
+        want_b = f.get("host_binding") or cur_b
+        return (ABSENT_WITH_EVIDENCE
+                if any((scen & driven.get(r, set()))
+                       and (binding_of.get(r) or cur_b) == want_b
+                       for r in runs)
+                else CANNOT_DETERMINE)
+
+    return verdict
+
+
 def cmd_compact(args, ledger):
     """Compaction of the dead tail (invariant 3). A finding that is `dismissed`,
     or `accepted` and unseen for >= N *driven-and-absent* runs (its fix verified
@@ -1175,6 +1239,12 @@ def cmd_compact(args, ledger):
         compacted.append((f["id"], resolution))
 
     save(args.target, ledger)
+    if compacted and getattr(args, "json", False):
+        print(json.dumps({"compacted": [{"id": fid, "resolution": res}
+                                        for fid, res in compacted],
+                          "threshold": n, "candidates": [],
+                          "cannot_determine": []}, indent=2))
+        return
     if compacted:
         for fid, res in compacted:
             # F209: say the dismissed rule where it fires — a dismissed
@@ -1200,6 +1270,9 @@ def cmd_compact(args, ledger):
         # cause so the caller sees exactly how far each candidate is from the bar.
         reasons = []
         real_blocked = 0  # F141: accepted, real-scenario, waiting on re-drives
+        undetermined = []  # issue #290: scopes the substrate records nothing of
+        verdict_of = absence_verdict_fn(args.target)
+        machine = []       # the consumable form (--json), same data as the prose
         for f in ledger["findings"]:
             if f.get("tombstone"):
                 continue
@@ -1209,19 +1282,44 @@ def cmd_compact(args, ledger):
                 if k >= n:
                     continue  # (would have compacted; handled above)
                 scen = set(f.get("scenarios", [])) - {"ingest"}
-                if scen:
+                # Issue #290 / story 1.58: read the substrate's population
+                # BEFORE reporting the count. A scope no recorded run ever
+                # drove is `cannot-determine` — never the same shape as a
+                # below-threshold `absent-with-evidence`, which at least has
+                # replays behind it.
+                v = verdict_of(f)
+                if v == CANNOT_DETERMINE:
+                    undetermined.append(f["id"])
+                    why = ("no run manifest records this scope being driven "
+                           "at all" if scen else
+                           "no runs recorded for this target at all")
+                    tail = (f"CANNOT-DETERMINE — {why}, so the {k}/{n} counter "
+                            f"says nothing about the fix; this is not progress "
+                            f"toward the bar")
+                elif scen:
                     real_blocked += 1
-                    tail = (f"{k}/{n} driven-and-absent run(s) — {n - k} more "
-                            f"re-drive(s) of its scenario to verify the fix "
-                            f"(hand-ingest will not advance this)")
+                    tail = (f"{ABSENT_WITH_EVIDENCE}: {k}/{n} driven-and-absent "
+                            f"run(s) — {n - k} more re-drive(s) of its scenario "
+                            f"to verify the fix (hand-ingest will not advance "
+                            f"this)")
                 else:
-                    tail = (f"{k}/{n} later run(s) elapsed (ingest/no-scenario) "
-                            f"— {n - k} more, driven or manual")
+                    tail = (f"{ABSENT_WITH_EVIDENCE}: {k}/{n} later run(s) "
+                            f"elapsed (ingest/no-scenario) — {n - k} more, "
+                            f"driven or manual")
+                machine.append({"id": f["id"], "status": "accepted",
+                                "absence": v, "count": k, "threshold": n,
+                                "real_scenario": bool(scen)})
                 reasons.append(f"  {f['id']}: accepted, {tail}")
             elif status == "dismissed":
                 k = runs_since(f.get("last_seen_run"))
                 if k >= n:
                     continue
+                # Deliberately two-valued: `dismissed` compaction counts
+                # ELAPSED runs because deadness is not scenario-conditional
+                # (spec "Driven-absence compaction"), so the population
+                # criterion has no scope to read. Story 1.58 leaves it alone.
+                machine.append({"id": f["id"], "status": "dismissed",
+                                "count": k, "threshold": n})
                 reasons.append(f"  {f['id']}: dismissed, {k}/{n} run(s) elapsed "
                                f"— detail kept until it is truly quiet")
         head = (f"nothing to compact (threshold: unseen for >= {n} run(s)); an "
@@ -1230,6 +1328,14 @@ def cmd_compact(args, ledger):
                 f"(no real scenario: only the reserved 'ingest' pseudo-scenario "
                 f"that marks manual ingests, or none at all) — "
                 f"once that many later runs (driven or manual) have elapsed")
+        if getattr(args, "json", False):
+            # Issue #290 / story 1.58: the distinction must be consumable
+            # without parsing sentences — a caller reads `absence` per finding.
+            print(json.dumps({"compacted": [], "threshold": n,
+                              "candidates": machine,
+                              "cannot_determine": undetermined},
+                             indent=2))
+            return
         if reasons:
             print(head + "\ncandidates below the threshold:")
             for line in reasons:
@@ -1240,6 +1346,15 @@ def cmd_compact(args, ledger):
                 print(f"cause: {real_blocked} finding(s) tied to real "
                       f"scenarios advance only when those scenarios are "
                       f"re-driven (tanuki-drive), not by hand-ingest")
+            # The undetermined set is NOT slow progress — it is an unanswerable
+            # question, and collapsing the two is exactly the #290 defect.
+            if undetermined:
+                print(f"cause: {len(undetermined)} finding(s) "
+                      f"({', '.join(undetermined)}) are CANNOT-DETERMINE — no "
+                      f"recorded run drove their scope, so their counters "
+                      f"carry no evidence either way. Drive the relevant "
+                      f"scenario(s) with tanuki-drive to make absence "
+                      f"measurable at all.")
         else:
             print(head + "\nno accepted or dismissed findings are awaiting "
                   "compaction (nothing has been resolved yet)")
@@ -1333,14 +1448,20 @@ def classify_ledger(ledger, runs):
     return "fresh"
 
 
-def compaction_hint(awaiting):
+def compaction_hint(awaiting, target=None):
     """One-line pointer for accepted findings awaiting compaction. Names the
     `--unseen-runs` threshold (config `compaction_unseen_runs`, default 3) so a
     reader of `status`/`next` learns it without running `compact`, and — reusing
     cmd_compact's real-scenario distinction (scenarios minus the reserved
     `ingest` pseudo-scenario) — notes that a finding evidenced against a real
     scenario advances only when that scenario is re-driven (hand-ingest will
-    not), while an ingest/no-scenario finding advances on any later run."""
+    not), while an ingest/no-scenario finding advances on any later run.
+
+    With <target>, it also carries the three-valued absence distinction (issue
+    #290 / story 1.58) through the SAME classifier `compact` uses — a status
+    reader must not be told a finding is inching toward the bar when no run
+    ever drove its scope. Target is optional so the hint degrades to its
+    previous wording rather than failing where no target is threaded through."""
     n = load_config()["compaction_unseen_runs"]
     real = [f for f in awaiting if set(f.get("scenarios", [])) - {"ingest"}]
     ingest = [f for f in awaiting if not (set(f.get("scenarios", [])) - {"ingest"})]
@@ -1354,6 +1475,15 @@ def compaction_hint(awaiting):
         clauses.append("an ingest/no-scenario finding advances on any later run")
     if clauses:
         msg += "; " + ", while ".join(clauses)
+    if target:
+        verdict_of = absence_verdict_fn(target)
+        undet = [f["id"] for f in awaiting
+                 if verdict_of(f) == CANNOT_DETERMINE]
+        if undet:
+            msg += (f". {len(undet)} of these ({', '.join(undet)}) are "
+                    f"{CANNOT_DETERMINE}: no recorded run drove their scope, "
+                    f"so they are not progressing toward the bar at all — "
+                    f"drive the scenario(s) to make absence measurable")
     return msg
 
 
@@ -1390,7 +1520,7 @@ def render_next(state, target, ledger):
             f"this one in the plugin's tools/ dir, not a subcommand of it) "
             f"then `ingest` its events here "
             f"(or the /tanuki {target} slash command in Claude Code, which "
-            f"drives both). " + compaction_hint(awaiting)),
+            f"drives both). " + compaction_hint(awaiting, target)),
         "watching-only": (
             # F123: name BOTH thresholds and the preview, not just
             # --min-recurrence — the default bar is an OR of the two, so a
@@ -1491,7 +1621,7 @@ def cmd_status(args, ledger):
         for f in awaiting:
             print(f"    {f['id']} rec:{f['recurrence']} — {f['title'][:90]}"
                   + (" [contributed]" if f.get("contributed") else ""))
-        hint = compaction_hint(awaiting)
+        hint = compaction_hint(awaiting, args.target)
         if hint not in nxt:
             print(f"    hint: {hint}")
     watching = sorted(by["open"], key=lambda f: (-f["recurrence"],
@@ -2207,6 +2337,14 @@ def main():
     sp.add_argument("--unseen-runs", type=int, default=None,
                     help="re-driven runs the finding must be absent from before "
                          "tombstoning (default from config)")
+    sp.add_argument("--json", action="store_true",
+                    help="machine-readable report: per-candidate `absence` "
+                         "verdict (absent-with-evidence | cannot-determine), "
+                         "its count/threshold, and the cannot_determine id "
+                         "list. Absence is three-valued (issue #290): a scope "
+                         "no recorded run ever drove is UNKNOWABLE, not "
+                         "verified-absent, and a caller must be able to tell "
+                         "them apart without parsing prose")
     sp = sub.add_parser("scenario-yield")
     sp.add_argument("--runs", type=int, default=5)
     sub.add_parser("stats")

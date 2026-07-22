@@ -85,4 +85,67 @@ echo "$status2" | grep -q "any later run" \
   || fail "ingest-only hint must note advance on any later run"
 pass "ingest-only finding: threshold named, re-drive fork correctly omitted"
 
+# --- story 1.58 / issue #290: absence verification is THREE-valued -------------
+# Reporting "0/3 driven-and-absent" for a scope NO recorded run ever drove is
+# true in the degenerate case and is the most confident possible statement at
+# exactly the moment the system knows least. `cannot-determine` must be
+# distinguishable from a below-threshold `absent-with-evidence`.
+root3="$(mktemp -d)"; trap 'rm -rf "$root" "$root2" "$root3"' EXIT
+export TANUKI_ROOT="$root3"
+M=("$here/tanuki-ledger" --target m)
+"${M[@]}" init >/dev/null
+
+# (a) never-driven scope -> cannot-determine, not slow progress.
+printf '{"run":"20260101-aaa","scenario":"login","seq":1,"type":"note","detail":"x"}\n' \
+  > "$root3/e.jsonl"
+"${M[@]}" ingest "$root3/e.jsonl" >/dev/null
+"${M[@]}" upsert-finding --title "Never replayed" --kind papercut \
+  --evidence "20260101-aaa/login#1" >/dev/null
+"${M[@]}" set-status --id F1 --status accepted >/dev/null
+
+out="$("${M[@]}" compact 2>/dev/null)"
+echo "$out" | grep -qi "CANNOT-DETERMINE" \
+  || fail "(a) a never-driven scope must report cannot-determine: $out"
+echo "$out" | grep -q "no run manifest records this scope being driven" \
+  || fail "(a) cannot-determine must name WHY: $out"
+pass "story 1.58 (a): a never-driven scope reports cannot-determine, naming why"
+
+# (b) the verdict is consumable without parsing prose.
+js="$("${M[@]}" compact --json 2>/dev/null)"
+python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+c=[x for x in d["candidates"] if x["id"]=="F1"]
+assert c, d
+assert c[0]["absence"]=="cannot-determine", c
+assert "F1" in d["cannot_determine"], d
+' <(echo "$js") || fail "(b) --json must carry absence=cannot-determine for F1: $js"
+pass "story 1.58 (b): --json exposes the verdict machine-readably"
+
+# (c) status/next carry the same vocabulary (no second dialect).
+st="$("${M[@]}" status 2>/dev/null)"
+echo "$st" | grep -q "cannot-determine" \
+  || fail "(c) status must carry the same cannot-determine vocabulary: $st"
+pass "story 1.58 (c): status reuses compact's vocabulary"
+
+# (d) a DRIVEN scope below threshold is unchanged — absent-with-evidence.
+mkdir -p "$TANUKI_ROOT/m/events/20260102-bbb"
+cat > "$TANUKI_ROOT/m/events/20260102-bbb/manifest.json" <<'EOF'
+{"run":"20260102-bbb","target":"m","results":[{"scenario":"login","events":1}]}
+EOF
+out2="$("${M[@]}" compact 2>/dev/null)"
+echo "$out2" | grep -q "absent-with-evidence" \
+  || fail "(d) a driven-and-absent scope must report absent-with-evidence: $out2"
+echo "$out2" | grep -qi "CANNOT-DETERMINE" \
+  && fail "(d) a driven scope must NOT report cannot-determine: $out2"
+js2="$("${M[@]}" compact --json 2>/dev/null)"
+python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))
+c=[x for x in d["candidates"] if x["id"]=="F1"]
+assert c and c[0]["absence"]=="absent-with-evidence", d
+assert d["cannot_determine"]==[], d
+' <(echo "$js2") || fail "(d) --json must flip to absent-with-evidence once driven: $js2"
+pass "story 1.58 (d): once the scope is driven, it reports absent-with-evidence (path that works is unchanged)"
+
 echo "ALL OK"
