@@ -360,6 +360,21 @@ above) — **the loop never merges to `main` itself**:
    (F187, F194).
 3. **Verify** with `tanuki-loop gate-check` (integration HEAD reachable from
    base).
+   **`gate-check` also reports where you are in this 7-step sequence** — read
+   its `gate_progress` block when you lose your place (a crash-retry, a
+   handover, or picking the gate back up hours later). Every step here is
+   independently idempotent, so the risk is not damage but *not knowing which
+   steps already ran*; `gate_progress` answers that from recorded state rather
+   than memory (F97). It carries `last_completed_step` (the end of the
+   contiguous completed prefix — never the latest step that merely happens to
+   have evidence), `next_step` (the first step this state cannot prove done),
+   and `blocker` (`null` when nothing stands in the way). Its vocabulary is the
+   delivery sequence — `final-tests`, `deliver`, `landed`, `issues`, `cleanup`
+   — where `deliver` means the loop's terminal act (a PR opened via `gate-pr`,
+   or a branch-only run leaving its branch in place) and `landed` means the
+   **human** merged it; the loop never lands its own work. A step with no
+   derivable evidence is omitted, never guessed, so `next_step` is a statement
+   about what this state can prove, not a prediction.
    **On a re-run or crash-retry after the branch was already deleted** (a
    later step, or a prior gate pass, removed the integration branch — see
    step 7), `gate-check` does not error: it reports `branch_deleted: true`
