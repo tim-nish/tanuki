@@ -1,13 +1,13 @@
 ---
-story: 2.1
-epic: 2
-title: "Story 2.1: driven session escaped its charter sandbox and created a real GitHub repo — gh credentials are fully inherited under --dangerously-skip-permissions"
+story: 5.1
+epic: 5
+title: "Story 5.1: driven session escaped its charter sandbox and created a real GitHub repo — gh credentials are fully inherited under --dangerously-skip-permissions"
 status: published
 issue: 300
 umbrella: 300
 ---
 
-# Story 2.1: A driven session inherits no ambient authority
+# Story 5.1: A driven session inherits no ambient authority
 
 Canonical discussion record: [#300](https://github.com/tim-nish/tanuki/issues/300)
 (with [#308](https://github.com/tim-nish/tanuki/issues/308) as the ledger-side

@@ -1,13 +1,13 @@
 ---
-story: 2.2
-epic: 2
-title: "Story 2.2: Operator-facing hints instruct the user to run internal tools directly, with no rule fixing which surface a hint may address"
+story: 5.2
+epic: 5
+title: "Story 5.2: Operator-facing hints instruct the user to run internal tools directly, with no rule fixing which surface a hint may address"
 status: published
 issue: 311
 umbrella: 311
 ---
 
-# Story 2.2: Hints address the surface the reader is using
+# Story 5.2: Hints address the surface the reader is using
 
 Canonical discussion record: [#311](https://github.com/tim-nish/tanuki/issues/311).
 On conflict, the issue wins.
