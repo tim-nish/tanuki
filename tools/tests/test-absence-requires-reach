@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Fixture for the reach precondition on absence and quiet-accounting
+# (story 5.4 / issue #299).
+#
+# The invariant this implements is deliberately CONDITIONAL: absence
+# verification and quiet-accounting read reach; yield, streaks and demotion do
+# not. A conditional invariant is easier to misapply than a blanket one — that
+# was the counter-argument recorded at the decision gate — so this fixture
+# pins BOTH sides, and the yield side is the one that matters most: it is the
+# assertion that fails if someone "helpfully" makes yield consistent.
+#
+# Asserts:
+#   1. an unreached execution does not count as a replay, so an accepted
+#      finding's absence counter does not advance;
+#   2. a reached execution of the same shape DOES count — the filter is about
+#      reach, not about being strict;
+#   3. yield still counts an unreached execution's findings (the other side of
+#      the split);
+#   4. a manifest predating the reach axis is treated as reached, never
+#      retro-voided.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+L="$here/tanuki-ledger"
+root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
+export TANUKI_ROOT="$root"
+
+seed_run() {   # <run> <scenario> <reach|omit>
+  local run="$1" scen="$2" reach="$3"
+  mkdir -p "$root/t/events/$run"
+  if [ "$reach" = "omit" ]; then
+    printf '{"run":"%s","results":[{"scenario":"%s","status":"ok"}]}\n' "$run" "$scen"
+  else
+    printf '{"run":"%s","results":[{"scenario":"%s","status":"ok","reach":"%s"}]}\n' "$run" "$scen" "$reach"
+  fi > "$root/t/events/$run/manifest.json"
+}
+
+driven() {     # print the driven-scenarios map for target t
+  python3 - "$L" <<'PY'
+import importlib.machinery, importlib.util, sys, json
+loader = importlib.machinery.SourceFileLoader("tl", sys.argv[1])
+spec = importlib.util.spec_from_loader("tl", loader)
+tl = importlib.util.module_from_spec(spec); loader.exec_module(tl)
+print(json.dumps({k: sorted(v) for k, v in tl.driven_scenarios_by_run("t").items()}))
+PY
+}
+
+# --- 1. an unreached execution is not a replay --------------------------------
+seed_run r1 checkout unreached
+[ "$(driven)" = '{"r1": []}' ] \
+  || fail "an unreached execution counted as a replay: $(driven)"
+pass "an unreached execution does not count as a replay (absence cannot advance on it)"
+
+# --- 2. a reached execution of the same shape does ----------------------------
+rm -rf "$root/t/events"; seed_run r1 checkout reached
+[ "$(driven)" = '{"r1": ["checkout"]}' ] \
+  || fail "a reached execution was not counted: $(driven)"
+pass "a reached execution counts as a replay"
+
+# --- 4. a pre-axis manifest is treated as reached, never retro-voided ---------
+rm -rf "$root/t/events"; seed_run r1 checkout omit
+[ "$(driven)" = '{"r1": ["checkout"]}' ] \
+  || fail "a manifest predating the reach axis was retro-voided: $(driven)"
+pass "a manifest with no reach field is treated as reached (no retroactive voiding)"
+
+# --- 3. THE OTHER SIDE: yield still counts an unreached execution -------------
+# If this assertion ever fails, someone made yield read reach "for consistency"
+# — which is exactly what the amended invariant forbids: a short-circuited run
+# that surfaced friction is still a productive run.
+rm -rf "$root/t/events"; seed_run r1 checkout unreached
+"$L" --target t init >/dev/null 2>&1
+"$L" --target t upsert-finding --title "friction found by a short-circuited run" \
+  --kind friction --evidence "r1/checkout#1" >/dev/null 2>&1
+y="$("$L" --target t scenario-yield 2>/dev/null)"
+python3 - <<PY || fail "yield stopped counting an unreached execution's findings"
+import json
+d = json.loads('''$y''')
+# shape: {scenario: [{run, events, findings[], actionable}, ...]}
+runs = d.get("checkout")
+assert runs, f"checkout absent from yield entirely: {d}"
+total = sum(r.get("actionable", 0) for r in runs)
+assert total >= 1, f"unreached execution's finding was dropped from yield: {runs}"
+PY
+pass "yield still counts an unreached execution's findings (the invariant stays conditional)"
+
+echo "all checks passed"
