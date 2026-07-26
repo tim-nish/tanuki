@@ -1778,9 +1778,15 @@ def cmd_distill(args, ledger):
                    '— to enable, set contribute_back {"path": <staging dir>, '
                    '"schema": <template file>} under the "defaults" block of '
                    # F35/#302: naming the block without the path left the
-                   # operator to discover the file by failing once.
+                   # operator to discover the file by failing once. #303: name
+                   # the example to copy for <template file> too — both halves
+                   # of "where does this go?" answered in one place.
                    f'{os.path.join(TANUKI_ROOT, "scenarios", f"{args.target}.scenarios.json")}'
-                   " (per-target only; the "
+                   " — for <template file>, copy the bundled "
+                   "templates/contribute-back-intake.example.md (its tokens "
+                   "are documented in the sibling "
+                   "contribute-back-intake.README.md, which is never "
+                   "rendered) — (per-target only; the "
                    'machine-wide ~/.tanuki/config.json is NOT read, issue '
                    '#241)')
             if global_ignored_note:
@@ -1841,10 +1847,14 @@ def cmd_distill(args, ledger):
                       'candidates are listed but nothing can be emitted; to '
                       'enable, set contribute_back {"path": <staging dir>, '
                       '"schema": <template file>} under the "defaults" block '
-                      # F35/#302: name the file, not just the block.
+                      # F35/#302: name the file, not just the block. #303:
+                      # name the example to copy as well.
                       "of "
                       f'{os.path.join(TANUKI_ROOT, "scenarios", f"{args.target}.scenarios.json")}'
-                      " (per-target only; the "
+                      " — for <template file>, copy "
+                      "templates/contribute-back-intake.example.md (token "
+                      "table in the sibling contribute-back-intake.README.md) "
+                      "— (per-target only; the "
                       "machine-wide ~/.tanuki/config.json is NOT read)")
             print(f"note: {notice}", file=sys.stderr)
         # issue #241 / F198: flag an ignored global-scope block on --list too.
