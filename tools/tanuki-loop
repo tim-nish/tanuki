@@ -2755,10 +2755,19 @@ def cmd_doctor(args):
         # recipe"); tie the two together so a first-timer knows they are the
         # same block and where the ready-to-use version is, rather than
         # reconciling two disconnected skeletons.
+        # F35/#302: the shape alone never said WHERE it goes. An operator who
+        # had the keys still had to run doctor and fail once to learn the file
+        # and the block it nests under — the same class as `distill`'s
+        # contribute_back notice, which showed the shape without the path.
         loop_check["scenarios_loop_shape_note"] = (
-            "placeholders mark the required keys; for a filled-in, "
-            "copy-pasteable sandbox block with concrete values see the "
-            "'sandbox recipe' in `doctor --help`")
+            f"placeholders mark the required keys. This block nests under the "
+            f"top-level \"loop\" key of "
+            f"{os.path.join(TANUKI_ROOT, 'scenarios', '<target>.scenarios.json')}"
+            f" (for this run: "
+            f"{os.path.join(TANUKI_ROOT, 'scenarios', f'{args.target}.scenarios.json')}"
+            f") — it is NOT auto-loaded, so pass it with --scenarios <file>. "
+            f"For a filled-in, copy-pasteable sandbox block with concrete "
+            f"values see the 'sandbox recipe' in `doctor --help`")
         if "test_cmd" in missing:
             # Nothing said what a good test_cmd validates, so a first-timer
             # could not tell whether a trivial "true" was acceptable or a
