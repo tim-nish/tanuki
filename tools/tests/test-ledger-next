@@ -46,16 +46,20 @@ expect_state "watching-only" "promote chronic/high-confidence open findings"
 "${L[@]}" upsert-finding --match F1 --evidence "r003/s#1" >/dev/null
 "${L[@]}" promote --min-recurrence 3 --min-scenarios 99 >/dev/null 2>&1
 expect_state "proposed-awaiting" "decide the 1 proposed item(s)"
-# F84: `/tanuki …` is the plugin's slash command, not runnable from the shell
-# the operator reads this hint in — so the hint must name the CLI equivalent
-# too, and say which is which. (Substring, not the whole line: the wording is
-# free to improve; naming a runnable step is the contract.)
+# D2 (AMENDED 2026-07-26, issue #311): exactly ONE command per hint, in the
+# CLI form — the surface this output is read on. F84's fix (name what runs
+# here) is ratified; the two-command answer that followed it is not, because a
+# signal with two actions is emphasis rather than structure. The command layer
+# translates to the `/tanuki` form when it relays; that half is prose in
+# commands/tanuki.md and is checked by tools/check-hint-surface, not here.
+# (Substring, not the whole line: wording is free to improve; naming a runnable
+# step is the contract.)
 "${L[@]}" next | grep -q "findings --status proposed" \
   || fail "proposed-awaiting must name the CLI step to READ the items (F84)"
 "${L[@]}" next | grep -q "set-status" \
   || fail "proposed-awaiting must name the CLI step to DECIDE them (F84)"
-"${L[@]}" next | grep -q "in Claude Code" \
-  || fail "proposed-awaiting must mark the slash command as Claude Code's (F84)"
+"${L[@]}" next | grep -q "/tanuki" \
+  && fail "a hint must not name the slash command — the command layer translates (D2/#311)"
 # F90: tanuki-drive is a SIBLING tool, not a subcommand — naming it bare just
 # moved the dead end. The accepted-awaiting hint must say where it lives.
 "${L[@]}" set-status --id F1 --status accepted >/dev/null

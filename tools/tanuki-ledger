@@ -8,6 +8,16 @@ semantic judgment (what is a finding, whether a candidate matches an existing
 one, what to propose) belongs to the orchestrating model and never happens here
 (deterministic-tool-over-llm-in-loop).
 
+The guided surface: this is the machine substrate, and every hint it prints
+names a command runnable in THIS shell. The human-facing layer is the
+`/tanuki <target> …` slash command in Claude Code (`commands/tanuki.md`) —
+`decide` walks the gate and files issues for you, `status`/`view` render these
+same reads. Neither implements the other: the slash command calls this tool and
+translates its hints for a reader who is not in a shell
+(spec-short-command-surface D2). Naming it here so a CLI reader who wants the
+guided path can find it — the dead end F84 recorded was a hint pointing at a
+surface `--help` never mentioned.
+
 Ledger: ~/.tanuki/<target>/ledger.json
   {"events": {fingerprint: {…, count, first_seen, last_seen, runs[]}},
    "findings": [{id, title, kind, first_seen, last_seen, recurrence,
@@ -1488,10 +1498,13 @@ def compaction_hint(awaiting, target=None):
 
 
 def render_next(state, target, ledger):
-    """The single next command for an enumerated state — a /tanuki form where
-    one exists, the tool form otherwise. Raises on a state outside the
-    enumeration rather than guessing (the F24/F36/F76 regression mode was a
-    fall-through to advice for a state you were not in)."""
+    """The single next command for an enumerated state, in the CLI form — the
+    surface this output is read on (spec-short-command-surface D2, AMENDED
+    2026-07-26 / #311: exactly one command per hint, each layer naming what
+    runs on its own surface; the command layer translates to the `/tanuki`
+    form when it relays). Raises on a state outside the enumeration rather
+    than guessing (the F24/F36/F76 regression mode was a fall-through to
+    advice for a state you were not in)."""
     by = {s: [f for f in ledger["findings"] if f["status"] == s]
           for s in STATUSES}
     awaiting = [f for f in by["accepted"] if not f.get("tombstone")]
@@ -1500,16 +1513,19 @@ def render_next(state, target, ledger):
         "events-no-findings": (
             "events are ingested but no findings yet — extract one with "
             "upsert-finding --title … --evidence <run>/<scenario>#<seq>"),
-        # `/tanuki …` is the PLUGIN's slash command, driven from Claude Code —
-        # not something this CLI implements, and not runnable from the shell
-        # you are reading this in (F84). Name the CLI equivalent first, then
-        # the slash command, and say which is which.
+        # ONE command per hint, in the CLI form — the surface this output is
+        # read on (spec-short-command-surface D2, AMENDED 2026-07-26 / #311).
+        # `/tanuki …` is the PLUGIN's slash command, not runnable from this
+        # shell (F84); naming it here was the dead end, and naming BOTH was
+        # the two-signal answer that replaced it. The command layer translates
+        # to the `/tanuki` form when it relays a hint to a Claude Code user —
+        # the translation lives at that boundary, not duplicated into every
+        # tool. Six findings (F24, F36, F76, F84, F90, F130/F120) oscillated
+        # while this was unstated.
         "proposed-awaiting": (
             f"decide the {len(by['proposed'])} proposed item(s): "
             f"`findings --status proposed` to read them, then `set-status "
-            f"--id <F> --status accepted|dismissed` for each "
-            f"(or the /tanuki {target} decide slash command in Claude Code "
-            f"for the guided pass)"),
+            f"--id <F> --status accepted|dismissed` for each"),
         # tanuki-drive is a SIBLING tool next to this one, not a subcommand —
         # naming it bare just moved the dead end (F90): the operator went
         # looking for it in `tanuki-ledger --help` and did not find it. Say
@@ -1518,9 +1534,8 @@ def render_next(state, target, ledger):
             f"re-run the pipeline to verify the {len(awaiting)} accepted "
             f"item(s) stop recurring: `tanuki-drive` (a sibling tool beside "
             f"this one in the plugin's tools/ dir, not a subcommand of it) "
-            f"then `ingest` its events here "
-            f"(or the /tanuki {target} slash command in Claude Code, which "
-            f"drives both). " + compaction_hint(awaiting, target)),
+            f"then `ingest` its events here. "
+            + compaction_hint(awaiting, target)),
         "watching-only": (
             # F123: name BOTH thresholds and the preview, not just
             # --min-recurrence — the default bar is an OR of the two, so a
@@ -1530,9 +1545,7 @@ def render_next(state, target, ledger):
             "(default bar: recurrence >= min_recurrence OR seen in "
             ">= min_scenarios scenarios; widen either per call with "
             "--min-recurrence N / --min-scenarios M, or preview the effect "
-            "first with --dry-run), then decide them with the "
-            f"/tanuki {target} decide slash command in Claude Code "
-            "(not a tanuki-ledger subcommand)"),
+            "first with --dry-run)"),
         "all-decided": (
             # "compacted" is NOT a status — a tombstoned finding is still
             # accepted or dismissed (issue #62 / F25; the F99 regression was
@@ -1540,8 +1553,7 @@ def render_next(state, target, ledger):
             # then rejects).
             "all findings are decided (accepted/dismissed, some tombstoned) — "
             f"re-run the pipeline (`tanuki-drive`, the sibling tool beside "
-            f"this one, then `ingest` here; or the /tanuki {target} slash "
-            f"command in Claude Code) to surface any new ones"),
+            f"this one, then `ingest` here) to surface any new ones"),
     }
     if state not in hints:
         raise ValueError(f"unenumerated ledger state: {state!r} "

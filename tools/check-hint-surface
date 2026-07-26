@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""check-hint-surface: a hint names one command, runnable where it is read.
+
+Lint for spec-short-command-surface D2 (AMENDED 2026-07-26 — issue #311). Six
+recorded findings oscillated over which surface an operator-facing hint may
+address — F24, F36, F76, F84, F90, F130/F120 — each fix trading one unreachable
+reference for another. The rule is now stated; this makes it enforced, because
+the oscillation persisted precisely while nothing but attention was checking.
+
+SCOPE, stated because it is narrower than "every string in the repo":
+
+  * The **next-hint derivation** (`render_next` in `tools/tanuki-ledger`) is
+    what D2 governs and what this lints. Its output is the per-state operator
+    instruction the six findings kept breaking.
+  * **Not** `--help` text or module docstrings. D3 requires help to carry the
+    contract, including naming the `/tanuki` command layer so a CLI reader can
+    find the guided path — the exact opposite duty. A lint that flagged those
+    would forbid what another deliverable requires.
+  * **Not** `tanuki-loop` / `tanuki-scheduler` output. Whether their hints
+    belong under the same rule is an open question on story 5.2 (F174 suggests
+    yes); deciding it by widening a lint would be deciding it silently.
+
+What is checked inside that scope:
+
+  1. no hint interpolates a `/tanuki {target}` slash command — a tool emits the
+     CLI form, and the command layer translates when it relays;
+  2. nothing a hint presents as runnable carries an unresolved <placeholder>;
+  3. the command layer states the relay rule, so D2's translation half has a
+     home rather than living in a reviewer's memory.
+
+Not checked, deliberately: whether the command layer *actually* translates at
+runtime. That is prose behaviour, not a string a lint can see — the
+counter-argument recorded at the #311 gate, carried as an open question on
+story 5.2. A lint that pretended to cover it would be worse than one that says
+it does not.
+
+Exit 0 = clean, 1 = violations (each named with file:line), 2 = usage error.
+"""
+
+import os
+import re
+import subprocess
+import sys
+
+LEDGER = "tools/tanuki-ledger"
+HINT_FN = "def render_next("
+COMMAND_LAYER = "commands/tanuki.md"
+RELAY_MARKER = "Translate the hint, never quote it"
+
+# An INTERPOLATED slash command is a generated instruction; a literal one in
+# prose is documentation. That distinction is the whole reason this lint can
+# coexist with D3's requirement that --help name the command layer.
+INSTRUCTION = re.compile(r'/tanuki \{\s*(?:args\.)?target\s*\}')
+
+# A backticked span naming a sibling tool is presented as runnable.
+RUNNABLE = re.compile(
+    r'`([^`\n]*\b(?:tanuki-drive|tanuki-ledger|tanuki-loop|tanuki-scheduler)\b[^`\n]*)`')
+PLACEHOLDER = re.compile(r'<[a-z][a-z0-9 _.-]*>')
+
+
+def hint_region(path):
+    """Line range of the next-hint derivation: from `def render_next(` to the
+    next top-level `def`. Returns (start, end) 1-indexed inclusive, or None."""
+    lines = open(path, encoding="utf-8").read().splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.startswith(HINT_FN):
+            start = i
+            break
+    if start is None:
+        return None
+    for j in range(start + 1, len(lines)):
+        if lines[j].startswith("def ") or lines[j].startswith("class "):
+            return (start + 1, j, lines[start:j])
+    return (start + 1, len(lines), lines[start:])
+
+
+def main():
+    root = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                          capture_output=True, text=True)
+    if root.returncode != 0:
+        print("error: not a git repository", file=sys.stderr)
+        return 2
+    os.chdir(root.stdout.strip())
+
+    violations = []
+
+    if not os.path.exists(LEDGER):
+        print(f"error: {LEDGER} not found", file=sys.stderr)
+        return 2
+    region = hint_region(LEDGER)
+    if region is None:
+        # The derivation is the thing D2 names; if it is gone or renamed, the
+        # lint is checking nothing and must say so rather than pass quietly.
+        print(f"error: {HINT_FN}…) not found in {LEDGER} — the next-hint "
+              f"derivation D2 governs. If it was renamed, update this lint; "
+              f"a lint that silently checks nothing is worse than none.",
+              file=sys.stderr)
+        return 2
+    first, _last, body = region
+    for offset, line in enumerate(body):
+        n = first + offset
+        if line.lstrip().startswith("#"):
+            continue              # a comment explaining the rule is not a hint
+        if INSTRUCTION.search(line):
+            violations.append(
+                f"{LEDGER}:{n}: a hint interpolates a `/tanuki` command. Tools "
+                f"emit the CLI form; the command layer translates when it "
+                f"relays (D2).")
+        for span in RUNNABLE.findall(line):
+            ph = PLACEHOLDER.findall(span)
+            if ph:
+                violations.append(
+                    f"{LEDGER}:{n}: hint presents a command as runnable but "
+                    f"carries unresolved {', '.join(sorted(set(ph)))} — derive "
+                    f"it from state, or describe the act instead of emitting a "
+                    f"command that only looks pasteable (D2).")
+
+    if os.path.exists(COMMAND_LAYER):
+        if RELAY_MARKER not in open(COMMAND_LAYER, encoding="utf-8").read():
+            violations.append(
+                f"{COMMAND_LAYER}: the relay rule is missing. D2 puts the "
+                f"translation at this boundary; without it stated here, the "
+                f"tools' CLI hints reach a Claude Code reader verbatim.")
+
+    if violations:
+        print("hint-surface violations (spec-short-command-surface D2):",
+              file=sys.stderr)
+        for v in violations:
+            print(f"  {v}", file=sys.stderr)
+        return 1
+    print("hint-surface: clean — every hint names one command, runnable where "
+          "it is read")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
