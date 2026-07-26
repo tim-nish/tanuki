@@ -169,7 +169,15 @@ spec-tanuki-trajectory §2b consumes:
   authorized), and no tool mutates the matrix.
 - Coverage is independent of yield (a short-circuited run may still yield
   findings) and never enters the scheduler's yield/streak/demotion
-  arithmetic in v1.
+  arithmetic in v1. **Absence verification and quiet-accounting are the
+  exception, ratified 2026-07-26 (issue #299):** an execution that did not
+  reach the subject is not evidence of the subject's absence, so those two
+  consumers — and only those two — read reach. A scenario whose execution
+  shows the plugin flow was never entered is recorded `unreached`; it does not
+  advance an accepted finding's unseen-runs counter, and a cycle whose verify
+  set went unreached is not quiet. Yield, streaks and demotion still ignore
+  coverage entirely: a short-circuited run that surfaced friction is still a
+  productive run.
 
 ### Per-scenario state machine (deterministic, tool-owned)
 State lives in `~/.tanuki/<target>/scheduler.json`, owned by the new
