@@ -25,8 +25,13 @@ This is a working vertical slice, not a framework.
   `/tanuki-loop` writes only to its own integration branch inside a dedicated
   worktree, never `main`, never the operator's working tree — merge happens
   only at the attended morning gate (spec-tanuki-loop).
-- **Isolation = run against clones, never the real repos**; verify
-  pollution after every run (snapshot-diff-discard).
+- **Isolation = run against clones, never the real repos, with no inherited
+  ambient authority**; verify pollution after every run
+  (snapshot-diff-discard). A driven session gets a disposable filesystem AND a
+  scrubbed environment: it must not be able to authenticate as the operator to
+  any service. A scenario that needs a credentialed service's behaviour gets a
+  fixture (a shim on `PATH`) or an explicitly provisioned scoped credential —
+  never the operator's own.
 - **Model routing** (refined after early prototype runs): route
   by determinism first, then by judgment density — see the tier table below.
   A cheaper driver is not just cheaper, it is a **more sensitive instrument**:
@@ -102,9 +107,16 @@ without that approval step (§"The plan gate confirms execution", loop exempt).
 ## Prototype deviations (explicit, to revisit before any generalization)
 
 - **No container / network-egress policy.** Isolation is clone + disposable
-  workspace + post-run `git status` pollution check only. Acceptable because
-  the target plugin is our own and read-mostly; not acceptable for third-party
-  targets.
+  workspace + post-run `git status` pollution check, plus environment scrubbing
+  at launch (see the isolation invariant above). No container, and no egress
+  filtering. The pre-2026-07-26 rationale — "acceptable because the target
+  plugin is our own and read-mostly" — was **falsified and is retired**: it
+  reasoned about the *target's* trustworthiness, while the observed escape came
+  from the *driven session's inherited authority over a third party*. On
+  2026-07-26 a driven scenario created a real repository on the operator's
+  GitHub account and could not delete it (issue #300); the target's
+  read-mostliness had no bearing on it. Egress filtering remains unaddressed
+  and is not acceptable for third-party targets.
 - **Ledger lives in `~/.tanuki/<target>/`**, not the den. Consolidator output
   *proposes* lesson candidates for the user's knowledge hub. ~~a human moves
   them~~ (SUPERSEDED 2026-07-19: `specs/spec-den-distill/SPEC.md` ratifies a
