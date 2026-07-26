@@ -1,16 +1,16 @@
 ---
-story: 2.3
-epic: 2
-title: "Story 2.3: record an unreached scenario execution as unreached in the manifest"
+story: 5.3
+epic: 5
+title: "Story 5.3: record an unreached scenario execution as unreached in the manifest"
 status: ready
 umbrella: 299
 ---
 
-# Story 2.3: An execution that never reached the subject is recorded `unreached`
+# Story 5.3: An execution that never reached the subject is recorded `unreached`
 
 Umbrella: [#299](https://github.com/tim-nish/tanuki/issues/299). This story is
 the first half of that issue's decomposition; the accounting change that
-consumes this record is story 2.4.
+consumes this record is story 5.4.
 
 ## Story
 

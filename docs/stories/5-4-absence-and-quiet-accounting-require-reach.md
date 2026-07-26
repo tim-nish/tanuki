@@ -1,16 +1,16 @@
 ---
-story: 2.4
-epic: 2
-title: "Story 2.4: absence verification and quiet-accounting require reach"
+story: 5.4
+epic: 5
+title: "Story 5.4: absence verification and quiet-accounting require reach"
 status: ready
 umbrella: 299
-depends_on: [2.3]
+depends_on: [5.3]
 ---
 
-# Story 2.4: Absence and quiet-accounting require reach
+# Story 5.4: Absence and quiet-accounting require reach
 
 Umbrella: [#299](https://github.com/tim-nish/tanuki/issues/299). Second half of
-that issue's decomposition; consumes the `unreached` record story 2.3 writes.
+that issue's decomposition; consumes the `unreached` record story 5.3 writes.
 
 ## Story
 
@@ -74,5 +74,5 @@ invariant is easier to misapply than a blanket one.
   reason (F178). Whether to recompute historical counters, or only apply the
   rule forward, was **not** decided at the gate.
 - Should `unreached` also feed the dashboard's convergence section as a named
-  blocker? Story 2.3's AC4 covers the run summary; the convergence section was
+  blocker? Story 5.3's AC4 covers the run summary; the convergence section was
   not specified.
