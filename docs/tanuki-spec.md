@@ -30,8 +30,9 @@ This is a working vertical slice, not a framework.
   (snapshot-diff-discard). A driven session gets a disposable filesystem AND a
   scrubbed environment: it must not be able to authenticate as the operator to
   any service. A scenario that needs a credentialed service's behaviour gets a
-  fixture (a shim on `PATH`) or an explicitly provisioned scoped credential —
-  never the operator's own.
+  fixture (a shim on `PATH` — see `tools/fixtures/README.md`) or an explicitly
+  provisioned scoped credential (`driven_env_passthrough`, announced per
+  scenario) — never the operator's own.
 - **Model routing** (refined after early prototype runs): route
   by determinism first, then by judgment density — see the tier table below.
   A cheaper driver is not just cheaper, it is a **more sensitive instrument**:

@@ -84,7 +84,78 @@ CONFIG_DEFAULTS = {
     "max_turns": 40,
     "timeout_s": 900,
     "est_cost_per_scenario_usd": 1.5,
+    # story 5.1 / issue #300: names deliberately admitted into the driven
+    # session's otherwise-scrubbed environment. Empty by default — reaching a
+    # real credentialed service is never implicit.
+    "driven_env_passthrough": [],
 }
+
+# --- driven-session environment (story 5.1 / issue #300) ---------------------
+# The driven session runs with --dangerously-skip-permissions, so whatever its
+# environment can reach, it can use. Isolation is therefore an ALLOWLIST, not a
+# denylist: the child gets what it needs to run and nothing that authenticates
+# as the operator. Passing os.environ through wholesale (the pre-2026-07-26
+# behaviour) let a scenario run `gh repo create` on the operator's own account
+# and orphan the result when its cleanup hit a missing scope (#300).
+#
+# `docs/tanuki-spec.md` states the invariant this implements: isolation is
+# clones + a disposable workspace + **no inherited ambient authority**.
+DRIVEN_ENV_ALLOW = (
+    # process basics
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "TMPDIR",
+    # locale / time
+    "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+    # the driver's OWN model credentials — without these nothing runs at all.
+    # These authenticate to Anthropic, not to the operator's forge or hosts.
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+    "AWS_REGION", "AWS_PROFILE", "CLOUD_ML_REGION",
+    # tanuki's own namespace, so a nested tool resolves the same root
+    "TANUKI_ROOT",
+)
+
+# Never inherited, and named explicitly so the intent survives a future edit to
+# the allowlist: these are exactly the credentials the #300 escape used.
+DRIVEN_ENV_DENIED = (
+    "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
+    "SSH_AUTH_SOCK", "GH_CONFIG_DIR", "GIT_ASKPASS", "GIT_CONFIG_GLOBAL",
+)
+
+
+def driven_env(ws, passthrough=()):
+    """Build the environment for one driven session.
+
+    Allowlist first, then forced settings that close the paths an allowlisted
+    variable would otherwise reopen:
+
+    - `HOME` must be passed (the driver reads its own config there), but that
+      also makes `~/.config/gh/hosts.yml` reachable — so `GH_CONFIG_DIR` is
+      pointed at an empty directory inside the run's workspace, which defeats
+      the HOME-based lookup and leaves `gh` unauthenticated.
+    - git is told never to prompt and never to reach for an agent or a default
+      key, so a push cannot silently succeed on the operator's identity.
+
+    `passthrough` is the explicit opt-in (config `driven_env_passthrough`): it
+    is applied LAST so a deliberately provisioned credential genuinely wins over
+    the forced settings. It is never implicit, and the caller announces it.
+
+    Residual, stated rather than implied: `HOME` is still readable, so key
+    material under it is not made unreachable — only unused by the standard
+    tools. Closing that needs a fake HOME or a container, which the spec still
+    lists as an unaddressed prototype deviation.
+    """
+    env = {k: os.environ[k] for k in DRIVEN_ENV_ALLOW if k in os.environ}
+    gh_dir = os.path.join(ws, ".gh-empty")
+    os.makedirs(gh_dir, exist_ok=True)
+    env["GH_CONFIG_DIR"] = gh_dir
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_ASKPASS"] = "/bin/false"
+    env["GIT_SSH_COMMAND"] = ("ssh -o BatchMode=yes -o IdentityAgent=none "
+                              "-o IdentitiesOnly=yes -o IdentityFile=/dev/null")
+    for name in passthrough or ():
+        if name in os.environ:
+            env[name] = os.environ[name]
+    return env
 
 # Launchable tiers. Fable/Mythos-class is deliberately absent: above every
 # ceiling. Unknown names fail closed (treated as above the ceiling).
@@ -1002,6 +1073,13 @@ def drive_scenario(args, scenario, run_dir, cfg, prog=None):
                                            args.max_turns or cfg["max_turns"])),
            "--dangerously-skip-permissions"]
     timeout = args.timeout or cfg["timeout_s"]
+    # story 5.1: the opt-in is announced, never silent — a run that admits a
+    # credential into the sandbox says so on the operator's screen.
+    _passthrough = cfg.get("driven_env_passthrough") or []
+    if _passthrough:
+        print(f"  [{sid}] driven_env_passthrough: {', '.join(_passthrough)} "
+              f"(deliberately admitted into the scrubbed environment)",
+              flush=True)
     t0 = time.time()
     status = "ok"
     stage("scenario running")
@@ -1011,8 +1089,12 @@ def drive_scenario(args, scenario, run_dir, cfg, prog=None):
     # a file, not a pipe, to avoid deadlock on a full pipe buffer.
     with open(raw_path, "w", encoding="utf-8") as out, \
          open(stderr_path, "w", encoding="utf-8") as err:
+        # story 5.1 / issue #300: an explicit, allowlisted environment — never
+        # os.environ. Without env= the child inherited every credential in
+        # scope, which is how a scenario reached the operator's real account.
         proc = subprocess.Popen(cmd, cwd=host_clone, stdout=out, stderr=err,
-                                text=True, stdin=subprocess.DEVNULL)
+                                text=True, stdin=subprocess.DEVNULL,
+                                env=driven_env(ws, _passthrough))
         while True:
             try:
                 proc.wait(timeout=20)
