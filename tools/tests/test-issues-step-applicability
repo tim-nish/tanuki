@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# Fixture for the declared applicability of the delivery sequence's issues
+# step (story 5.5 / issue #301).
+#
+# gate_progress reported next_step: issues on every landed target, because the
+# derivation cannot know whether issue tooling exists (the code said so in a
+# comment). Both candidate signals were checked at triage and BOTH are
+# unsound: gate mode describes delivery rather than tracking, and hostlessness
+# does not imply tracklessness — this very repo is hostless and has a tracker.
+# So applicability is declared; undeclared is cannot-determine.
+#
+# Asserts:
+#   1. declared-false skips the issues step (AC2) and adds no note — nothing
+#      is undetermined;
+#   2. declared-true names the step plainly, with no note (AC3);
+#   3. undeclared carries the undetermined state as a FIRST-CLASS value and
+#      names the declaration that resolves it (AC4);
+#   4. NO INFERENCE: a branch-gate target that declares a tracker still gets
+#      the issues step — the assertion that fails if someone reintroduces the
+#      gate-mode shortcut (AC6);
+#   5. doctor surfaces an undeclared target once, informationally, without
+#      failing readiness (AC5).
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+loop="$here/tanuki-loop"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+
+# --- 1-4: unit-check the derivation ------------------------------------------
+python3 - "$loop" <<'PY' || fail "gate_progress applicability"
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("tl", sys.argv[1])
+spec = importlib.util.spec_from_loader("tl", loader)
+tl = importlib.util.module_from_spec(spec); loader.exec_module(tl)
+
+landed = {"gate_mode": "pr", "last_test": {"ok": True},
+          "delivered": True, "finished": {"reason": "cap"}}
+
+# 1. declared-false: the step leaves the sequence, and nothing is undetermined
+p = tl._gate_progress(dict(landed, issue_tracker=False), reachable=True)
+assert p["next_step"] != "issues", p
+assert "next_step_note" not in p, "a declared target has nothing undetermined to report"
+assert "issues_applicable" not in p, p
+
+# 2. declared-true: named plainly, no note
+p = tl._gate_progress(dict(landed, issue_tracker=True), reachable=True)
+assert p["next_step"] == "issues", p
+assert "next_step_note" not in p, p
+
+# 3. undeclared: first-class undetermined value + the resolving declaration
+p = tl._gate_progress(dict(landed), reachable=True)
+assert p.get("issues_applicable") == "cannot-determine", p
+assert "issue_tracker" in p.get("next_step_note", ""), \
+    "the note must name the declaration that resolves it"
+
+# 4. NO INFERENCE (AC6). If this fails, someone re-derived applicability from
+#    the gate mode — the shortcut triage rejected, because a branch-gate
+#    target may still file issues.
+p = tl._gate_progress(dict(landed, gate_mode="branch", issue_tracker=True),
+                      reachable=True)
+assert p["next_step"] == "issues", \
+    f"gate mode was read as a tracker signal: {p}"
+#    ...and the converse: a pr-gate target that declares no tracker skips.
+p = tl._gate_progress(dict(landed, gate_mode="pr", issue_tracker=False),
+                      reachable=True)
+assert p["next_step"] != "issues", \
+    f"gate mode overrode an explicit declaration: {p}"
+PY
+pass "declared applicability drives the issues step; no inference from the gate mode"
+
+# --- 5. doctor surfaces an undeclared target, without failing readiness ------
+git init -q "$tmp/r" && git -C "$tmp/r" config user.email t@e \
+  && git -C "$tmp/r" config user.name t
+git -C "$tmp/r" checkout -qb main && echo x > "$tmp/r/x" \
+  && git -C "$tmp/r" add -A && git -C "$tmp/r" commit -qm base
+cat > "$tmp/sc.json" <<'EOF'
+{"loop": {"test_cmd": "true", "iterations": 1, "wall_time_s": 60,
+          "token_budget": 100, "attempt_cap": 1},
+ "scenarios": [{"id": "s", "charter": "c", "prompt": "p"}]}
+EOF
+export TANUKI_ROOT="$tmp/root"
+"$loop" --target d doctor --loop-repo "$tmp/r" --scenarios "$tmp/sc.json" \
+  2>/dev/null > "$tmp/doc.json" || true
+python3 - "$tmp/doc.json" <<'PY' || fail "doctor issue-tracker-declared"
+import json, sys
+d = json.load(open(sys.argv[1]))
+c = [x for x in d["checks"] if x["check"] == "issue-tracker-declared"]
+assert c, "doctor does not surface the declaration state at all"
+assert c[0]["ok"] is True, "cannot-determine is a state, not a misconfiguration"
+assert "issue_tracker" in c[0]["detail"], c[0]
+PY
+pass "doctor names the undeclared state once, informationally"
+
+# declared: doctor says so instead
+python3 - "$tmp/sc.json" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p))
+d["loop"]["issue_tracker"] = False
+json.dump(d, open(p, "w"))
+PY
+"$loop" --target d2 doctor --loop-repo "$tmp/r" --scenarios "$tmp/sc.json" \
+  2>/dev/null > "$tmp/doc2.json" || true
+python3 - "$tmp/doc2.json" <<'PY' || fail "declared tracker not reflected in doctor"
+import json, sys
+c = [x for x in json.load(open(sys.argv[1]))["checks"]
+     if x["check"] == "issue-tracker-declared"][0]
+assert "declared: false" in c["detail"], c
+assert "skipped" in c["detail"], c
+PY
+pass "a declared target reads back as declared"
+
+echo "all checks passed"
