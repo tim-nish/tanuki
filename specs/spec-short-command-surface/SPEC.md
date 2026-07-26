@@ -145,10 +145,43 @@ is patched string logic. Replace it with a derivation over an explicit,
 closed enumeration of ledger states — at minimum: no ledger / events but no
 findings / findings all below bar / proposed awaiting decision / accepted
 awaiting fix-verification / all findings tombstoned or decided — each
-mapping to exactly one next command (a `/tanuki` form where one exists, the
-tool form otherwise). One test fixture per state in `tools/tests/`, so a new
-state or a regression fails visibly. `status` prints the derived line;
-a `next` subcommand exposes the same derivation alone.
+mapping to exactly one next command. One test fixture per state in
+`tools/tests/`, so a new state or a regression fails visibly. `status` prints
+the derived line; a `next` subcommand exposes the same derivation alone.
+
+**Which command, and who translates (AMENDED 2026-07-26 — issue #311).** The
+original clause read "a `/tanuki` form where one exists, the tool form
+otherwise". That fixed the *form* and left the *addressee* open, and six
+successive fixes oscillated in the gap: F84 (the hint named a `/tanuki` command
+this CLI does not implement — a dead end from a shell), its fix F90 (now naming
+a sibling tool `--help` never mentions — a different dead end), then F130/F120
+from the other side. Each fix traded one unreachable reference for another
+because nothing said *who the hint is talking to*.
+
+- **Exactly one command per hint.** Not a ranked pair, not a command plus a
+  parenthetical alternative. A signal with two actions is emphasis, not
+  structure, and decays to noise.
+- **Each layer names the command runnable on its own surface.**
+  `tanuki-ledger` and its sibling tools emit the **CLI form** — their own
+  surface's truth, runnable in the shell the output is read in. This is what
+  F84's fix was reaching for and it is hereby ratified, not treated as a
+  violation.
+- **The command layer translates.** When `/tanuki` relays a hint to a Claude
+  Code user, it renders the equivalent **`/tanuki` form** rather than quoting
+  the tool's CLI string. The translation belongs where the reader lacks the
+  substrate's context — at the boundary, once, not duplicated into every tool.
+  Relaying raw tool output to a Claude Code user is the defect this rule names.
+- **Nothing presented as runnable carries an unresolved placeholder.** Every
+  argument a tool can derive from state is derived; where a value genuinely
+  cannot be, the hint describes the act instead of emitting a command line that
+  only looks pasteable. A command naming a scope absent from the target's own
+  matrix is not runnable and is never emitted as one.
+- **Mechanically checked.** A lint over the tracked tree fails a hint string
+  that names a bare sibling tool where the command layer owns the surface, or
+  that contains an unresolved `<placeholder>` in a presented command
+  (`tools/check-publication-boundary` is the shipped precedent for such a
+  check). The oscillation persisted because the rule was never enforced by
+  anything but attention.
 
 ### D3 — help text carries the contract (fixes F20, F33, F60, F62, F66, F68, F72)
 
