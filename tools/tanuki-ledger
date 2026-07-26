@@ -1093,6 +1093,28 @@ ABSENT_WITH_EVIDENCE = "absent-with-evidence"
 CANNOT_DETERMINE = "cannot-determine"
 
 
+def resolving_action(f, target=None):
+    """Name the concrete act that would make a CANNOT-DETERMINE finding
+    measurable (F243).
+
+    A cannot-determine verdict is only actionable if the operator learns WHICH
+    scenario to drive. The finding already carries its scope in `scenarios`;
+    every surface previously stopped at the finding id, leaving the operator to
+    hand-trace evidence pointers to recover a fact the ledger already holds.
+    The reserved `ingest` pseudo-scenario is not drivable, so it never appears
+    in the suggested set.
+    """
+    scen = sorted(set(f.get("scenarios") or []) - {"ingest"})
+    if not scen:
+        return ("no drivable scenario is recorded for this finding (evidence "
+                "is manual/ingest only) — absence cannot be measured until it "
+                "is seen in a driven scenario")
+    t = f" --target {target}" if target else " --target <t>"
+    return (f"drive {', '.join(scen)} to make absence measurable: "
+            f"`tanuki-drive{t} --plugin <repo> --scenarios <file> "
+            f"--run <run> --only {','.join(scen)}`")
+
+
 def absence_verdict_fn(target):
     """Build the three-valued absence classifier for <target> (issue #290 /
     story 1.58; spec-tanuki-scenario-lifecycle "Absence verification is
@@ -1320,7 +1342,8 @@ def cmd_compact(args, ledger):
                            "no runs recorded for this target at all")
                     tail = (f"CANNOT-DETERMINE — {why}, so the {k}/{n} counter "
                             f"says nothing about the fix; this is not progress "
-                            f"toward the bar")
+                            f"toward the bar. Resolve it: "
+                            f"{resolving_action(f, args.target)}")
                 elif scen:
                     real_blocked += 1
                     tail = (f"{ABSENT_WITH_EVIDENCE}: {k}/{n} driven-and-absent "
@@ -1333,7 +1356,13 @@ def cmd_compact(args, ledger):
                             f"driven or manual")
                 machine.append({"id": f["id"], "status": "accepted",
                                 "absence": v, "count": k, "threshold": n,
-                                "real_scenario": bool(scen)})
+                                "real_scenario": bool(scen),
+                                # F243: the resolving scope, machine-readable —
+                                # a consumer should not have to parse prose or
+                                # re-walk evidence pointers to learn it.
+                                "resolving_scenarios": (
+                                    sorted(scen) if v == CANNOT_DETERMINE
+                                    else None)})
                 reasons.append(f"  {f['id']}: accepted, {tail}")
             elif status == "dismissed":
                 k = runs_since(f.get("last_seen_run"))
@@ -1645,9 +1674,21 @@ def cmd_status(args, ledger):
     awaiting = [f for f in by["accepted"] if not f.get("tombstone")]
     if awaiting:
         print("\n  ACCEPTED — awaiting fix verification (should stop recurring):")
+        # F242: every row used to render identically, so a cannot-determine
+        # finding — one whose absence counter carries no evidence either way —
+        # was indistinguishable from a below-threshold one that had really been
+        # replayed. The three-valued fact only appeared in the trailing prose,
+        # which a reader scanning the list never reaches. Mark the row itself.
+        _verdict_of = absence_verdict_fn(args.target)
         for f in awaiting:
-            print(f"    {f['id']} rec:{f['recurrence']} — {f['title'][:90]}"
+            _v = _verdict_of(f)
+            _cd = _v == CANNOT_DETERMINE
+            print(f"    {f['id']} rec:{f['recurrence']}"
+                  + ("  [CANNOT-DETERMINE]" if _cd else "")
+                  + f" — {f['title'][:90]}"
                   + (" [contributed]" if f.get("contributed") else ""))
+            if _cd:
+                print(f"      -> {resolving_action(f, args.target)}")
         hint = compaction_hint(awaiting, args.target)
         if hint not in nxt:
             print(f"    hint: {hint}")
@@ -1815,7 +1856,9 @@ def cmd_distill(args, ledger):
                    "contribute-back-intake.README.md, which is never "
                    "rendered) — (per-target only; the "
                    'machine-wide ~/.tanuki/config.json is NOT read, issue '
-                   '#241)')
+                   '#241). For <template file>, copy the bundled example '
+                   'templates/contribute-back-intake.example.md — it carries '
+                   'every substitution token with its meaning (F246)')
             if global_ignored_note:
                 msg += ". NOTE: " + global_ignored_note
             print(msg, file=sys.stderr)
