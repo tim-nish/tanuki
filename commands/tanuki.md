@@ -240,6 +240,17 @@ exists to fix. Each view names its substrate — run it, render its output:
   short-command-surface D2 derivation; never recomputed here), and
   `tanuki-scheduler --target <t> status` for `advisories` (#168 —
   rendered verbatim, one line per signal).
+  **Translate the hint, never quote it (D2, AMENDED 2026-07-26 — issue #311).**
+  The tools emit hints in the **CLI form**, because that is what runs in the
+  shell *they* are read in. You are relaying to a reader in Claude Code, where
+  that form is not what they should type — so render the equivalent `/tanuki`
+  act instead of pasting the tool's string: `tanuki-drive … then ingest` is
+  **`/tanuki <t>`**; `findings --status proposed` then `set-status` per finding
+  is **`/tanuki <t> decide`**; `promote` then decide is **`/tanuki <t> decide`**.
+  A number, verdict or path inside the hint is still rendered verbatim
+  (render-don't-compute is unchanged) — only the *named command* is translated.
+  Quoting the raw CLI hint to a Claude Code user is the defect this rule names,
+  and it is the one this surface has actually committed.
 - **`live`** — the loop dashboard **of an actively running loop**: health
   verdict, latest drive, this run, scheduler decisions, convergence,
   why-stopped/NEXT.

@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# Fixture for tools/check-hint-surface (story 5.2 / issue #311).
+#
+# The lint exists because six findings (F24, F36, F76, F84, F90, F130/F120)
+# oscillated over which surface a hint may address while nothing but attention
+# was checking. A lint nobody proves can FAIL is the same class of defect, so
+# this fixture asserts both directions — and asserts the scope boundary, since
+# the lint must NOT flag what D3 requires (`--help` naming the command layer).
+#
+# Asserts:
+#   1. the tracked tree is clean under the lint;
+#   2. a hint interpolating a /tanuki command FAILS it;
+#   3. a hint presenting an unresolved <placeholder> as runnable FAILS it;
+#   4. removing the command layer's relay rule FAILS it (D2's translation half
+#      must have a home);
+#   5. a module docstring naming `/tanuki` does NOT fail it — D3 requires help
+#      text to carry the contract, and a lint that forbade it would pit two
+#      deliverables against each other.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"          # tools/
+root="$(cd "$here/.." && pwd)"                    # repo
+lint="$here/check-hint-surface"
+
+# Restore from BACKUPS, never `git checkout --`: this fixture mutates tracked
+# files, and a checkout would discard any UNCOMMITTED work in them — which is
+# exactly what it did the first time this test ran, wiping the story's own
+# in-progress edits. A test must not be able to destroy the tree it runs in.
+bak="$(mktemp -d)"
+cp "$root/tools/tanuki-ledger" "$bak/tanuki-ledger"
+cp "$root/commands/tanuki.md" "$bak/tanuki.md"
+restore() {
+  cp "$bak/tanuki-ledger" "$root/tools/tanuki-ledger"
+  cp "$bak/tanuki.md" "$root/commands/tanuki.md"
+}
+trap 'restore; rm -rf "$bak"' EXIT
+
+# --- 1. clean tree passes -----------------------------------------------------
+(cd "$root" && "$lint" >/dev/null) || fail "the tracked tree does not pass its own lint"
+pass "clean tree passes"
+
+# --- 2. an interpolated slash command in a hint fails -------------------------
+python3 - "$root/tools/tanuki-ledger" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+needle = '            f"item(s) stop recurring: `tanuki-drive` (a sibling tool beside "'
+assert s.count(needle) == 1, "fixture anchor moved; update this test"
+s = s.replace(needle,
+              '            f"item(s) stop recurring: run /tanuki {target} in Claude Code, or "\n' + needle, 1)
+open(p, "w").write(s)
+PY
+(cd "$root" && "$lint" >/dev/null 2>&1) && fail "lint passed a hint naming a /tanuki command"
+pass "a hint interpolating /tanuki fails the lint"
+restore
+
+# --- 3. an unresolved placeholder in a runnable hint fails --------------------
+python3 - "$root/tools/tanuki-ledger" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+needle = '            f"item(s) stop recurring: `tanuki-drive` (a sibling tool beside "'
+assert s.count(needle) == 1, "fixture anchor moved; update this test"
+s = s.replace(needle,
+              '            f"item(s) stop recurring: `tanuki-drive --target <t> --only <scenario>` "\n' + needle, 1)
+open(p, "w").write(s)
+PY
+(cd "$root" && "$lint" >/dev/null 2>&1) && fail "lint passed a runnable hint with unresolved placeholders"
+pass "an unresolved <placeholder> in a runnable hint fails the lint"
+restore
+
+# --- 4. the command layer must state the relay rule ---------------------------
+python3 - "$root/commands/tanuki.md" <<'PY'
+import sys
+p = sys.argv[1]; s = open(p).read()
+marker = "Translate the hint, never quote it"
+assert marker in s, "relay rule missing before the test even ran"
+open(p, "w").write(s.replace(marker, "Relay the hint", 1))
+PY
+(cd "$root" && "$lint" >/dev/null 2>&1) && fail "lint passed with the relay rule removed from the command layer"
+pass "removing the command layer's relay rule fails the lint"
+restore
+
+# --- 5. scope: --help naming the command layer is REQUIRED, never flagged -----
+# D3 says help text carries the contract; the module docstring names /tanuki on
+# purpose so a CLI reader can find the guided path (closing F84 from the other
+# side). The lint reads only the hint derivation, so this must still pass.
+grep -q "/tanuki <target>" "$root/tools/tanuki-ledger" \
+  || fail "the module docstring no longer names the command layer (D3/AC5)"
+(cd "$root" && "$lint" >/dev/null) \
+  || fail "lint flagged the docstring that D3 requires — scope boundary broken"
+pass "a docstring naming /tanuki is not flagged (D3 and D2 do not collide)"
+
+echo "all checks passed"
