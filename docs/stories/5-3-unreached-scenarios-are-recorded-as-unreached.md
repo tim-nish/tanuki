@@ -2,7 +2,8 @@
 story: 5.3
 epic: 5
 title: "Story 5.3: record an unreached scenario execution as unreached in the manifest"
-status: ready
+status: published
+issue: 315
 umbrella: 299
 ---
 
