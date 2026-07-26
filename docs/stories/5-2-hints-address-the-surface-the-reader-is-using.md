@@ -12,56 +12,66 @@ umbrella: 311
 Canonical discussion record: [#311](https://github.com/tim-nish/tanuki/issues/311).
 On conflict, the issue wins.
 
+> **Revised 2026-07-26** after #311 was re-triaged through the spec lane. The
+> first draft assumed D2 already settled this and read the current code as a
+> plain violation. It did not: D2 fixed the *form* and left the *addressee*
+> open, and the code's ordering was F84's deliberate fix. D2 has since been
+> amended with the addressee rule, and the criteria below implement that
+> amendment — the direction of AC1 is inverted from the first draft.
+
 ## Story
 
 As **an operator following Tanuki's own guidance**,
-I want **every hint to name an act on the surface I am actually using**,
+I want **every hint to name one command that runs where I am standing**,
 so that **following the tool's advice never dead-ends on a command I cannot
-find or cannot run as written.**
+find, cannot run, or must fill in by hand.**
 
-## Context — the rule already exists
+## Context
 
-The issue proposes settling a contract. It is already settled, and the code does
-not conform:
+Six recorded findings oscillated over this: F24 (rec 8) made the hint adaptive;
+F84 found it naming a `/tanuki` command the CLI does not implement — a dead end
+from a shell; F90 found its fix naming a sibling tool `tanuki-ledger --help`
+never mentions — a different dead end; F130/F120 hit it from the other side.
+Each fix traded one unreachable reference for another because nothing said who
+the hint was addressed to.
 
-> Replace it with a derivation over an explicit, closed enumeration of ledger
-> states … each mapping to exactly one next command (**a `/tanuki` form where
-> one exists, the tool form otherwise**). One test fixture per state in
-> `tools/tests/`, so a new state or a regression fails visibly.
-> — `specs/spec-short-command-surface/SPEC.md:141` (D2)
-
-The discoverability half is likewise ratified: D3, "help text carries the
-contract" (`specs/spec-short-command-surface/SPEC.md:153`).
-
-So this story is **conformance work, not a contract change** — which is why the
-lint is the load-bearing part: six recorded findings (F24 rec 8, F36, F76, F84,
-F90, F130/F120) oscillated *against* an existing rule, each fix trading one
-unreachable reference for another. Nothing mechanical was checking it.
+`specs/spec-short-command-surface/SPEC.md` D2 now says
+(AMENDED 2026-07-26 — issue #311): exactly one command per hint; each layer
+names the command runnable on its own surface; the command layer translates
+when it relays; nothing presented as runnable carries an unresolved
+placeholder; and a lint enforces it.
 
 ## Acceptance criteria
 
-**AC1 — every enumerated state names its `/tanuki` form where one exists.**
-Given a ledger state whose next act is reachable through the command surface,
+**AC1 — a tool's hint names exactly one command, in CLI form.**
+Given any enumerated ledger state,
 When `next` or `status` renders its hint,
-Then the `/tanuki` form is the named command, not a parenthetical. Two states
-violate this today: `tools/tanuki-ledger:1519` and `tools/tanuki-ledger:1542`
-both lead with `tanuki-drive` and demote `/tanuki` to a trailing aside.
+Then it names exactly one command, in the form runnable in the shell the output
+is read in — no ranked pair, no parenthetical alternative. Two states name a
+`/tanuki` form alongside the CLI form today (`tools/tanuki-ledger:1519` and
+`:1542`); after this story each names one.
 
-**AC2 — nothing presented as runnable carries unresolved placeholders.**
+**AC2 — the command layer translates rather than quoting.**
+Given `/tanuki` relays a hint to a Claude Code user,
+When the hint names a CLI command,
+Then the command layer renders the equivalent `/tanuki` form instead of quoting
+the tool's string. `commands/tanuki.md` carries this relay rule where the
+command layer reads it.
+
+**AC3 — nothing presented as runnable carries an unresolved placeholder.**
 Given a hint renders a command line,
 When the operator copies it,
-Then it runs as written — every argument the tool can derive from state is
-derived (the target is known; the scenarios path is canonical). Where a value
-genuinely cannot be derived, the hint describes the act instead of presenting a
-command that only looks pasteable.
+Then it runs as written: every argument derivable from state is derived, and
+where a value cannot be derived the hint describes the act instead of emitting
+a command that only looks pasteable.
 *Known instance, not on `main`:* commit `1d0b680` on branch
-`tanuki-loop/tanuki/20260726-204018` prints
-`tanuki-drive --target <t> --plugin <repo> --scenarios <file> --run <run> --only …`
-per cannot-determine finding. That commit is undelivered, so this criterion is
-satisfied either by amending it before delivery or by correcting it after.
+`tanuki-loop/tanuki/20260726-204018` emits
+`tanuki-drive --target <t> --plugin <repo> --scenarios <file> --run <run> --only …`.
+That branch is undelivered, so this is satisfied by amending it before delivery
+or correcting it after.
 
-**AC3 — a foreign scenario is never suggested as a drive target.**
-Given an accepted finding's evidence names a scenario absent from this target's
+**AC4 — a scope outside this target's matrix is never emitted as a drive target.**
+Given an accepted finding's evidence names a scenario absent from the target's
 matrix,
 When a hint states how to resolve it,
 Then it says the scenario is not in this target's matrix rather than emitting a
@@ -69,39 +79,42 @@ Then it says the scenario is not in this target's matrix rather than emitting a
 (`draft-postmortem-f2`, `draft-survey`) belong to the `writing-assistant`
 matrix.
 
-**AC4 — `--help` names the wrapper it assumes.**
-Given a hint names a `/tanuki` form,
+**AC5 — `--help` names the wrapper it assumes.**
+Given D3 requires help text to carry the contract,
 When the operator reads `tanuki-ledger --help`,
-Then the slash-command surface is named there, per D3 — closing F84's original
-dead end rather than re-creating it.
+Then the `/tanuki` command layer is named there — so a CLI reader who wants the
+guided path can find it, closing F84's dead end from the other direction.
 
-**AC5 — a lint enforces AC1–AC3 mechanically.**
-Given the repo's tracked tree,
+**AC6 — a lint enforces AC1, AC3 and AC4.**
+Given the tracked tree,
 When the lint runs in CI,
-Then a hint string that names a bare sibling tool where a `/tanuki` form exists,
-or that contains an unresolved `<placeholder>` in a presented command, fails the
-check. `tools/check-publication-boundary` is the shipped precedent for a
-mechanical rule over the tracked tree.
+Then a hint string naming a bare sibling tool where the command layer owns the
+surface, or containing an unresolved `<placeholder>` in a presented command,
+fails the check. `tools/check-publication-boundary` is the shipped precedent for
+a mechanical rule over the tracked tree.
 
-**AC6 — the per-state fixtures are updated, not worked around.**
-Given `tools/tests/test-ledger-next` currently pins the violating prose,
+**AC7 — the per-state fixtures are updated, not worked around.**
+Given `tools/tests/test-ledger-next` currently pins the two-command prose,
 When AC1 lands,
-Then those fixtures are updated to pin the conforming text — a fixture that
-pins prose this story legitimately improves is a fixture to update.
+Then those fixtures pin the conforming single-command text.
 
 ## Story questions (unverified — not acceptance criteria)
 
-- How many enumerated states name a tool form where a `/tanuki` form exists?
-  Two were located by inspection (`:1519`, `:1542`); the full enumeration was
-  **not** walked this sitting (cannot-determine — not read). Additional
-  tool-form mentions exist at `tools/tanuki-ledger:1348`, `:1356` and `:2330`
-  in absence/compaction prose and need judging individually.
+- How many enumerated states name more than one command? Two were located by
+  inspection (`:1519`, `:1542`); the full enumeration was **not** walked
+  (cannot-determine — not read). Further tool-form mentions at
+  `tools/tanuki-ledger:1348`, `:1356` and `:2330` sit in absence/compaction
+  prose and need judging individually.
+- Can a lint catch a command-layer relay that pastes raw tool output? AC6
+  covers the tool's strings; the relay side is prose in `commands/tanuki.md`
+  and may not be mechanically checkable. This is the counter-argument recorded
+  at the decision gate and is **not** resolved here.
 - Should the lint cover `tanuki-loop` and `tanuki-scheduler` output too? F174
-  (dashboard naming a nonexistent `reconcile` subcommand) suggests yes, but the
-  scope was not decided.
+  (dashboard naming a nonexistent `reconcile` subcommand) suggests yes; scope
+  undecided.
 
 ## Out of scope
 
-- Whether `tanuki-ledger` may name a `/tanuki` form at all. D2 already answers
-  it ("a `/tanuki` form where one exists, the tool form otherwise"); this story
-  conforms to that answer rather than reopening it.
+- Whether the CLI form or the `/tanuki` form is "primary". D2's amendment
+  settles it per layer: each names what runs on its own surface, and the
+  translation happens once at the boundary.
