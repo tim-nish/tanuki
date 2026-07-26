@@ -1777,7 +1777,10 @@ def cmd_distill(args, ledger):
             msg = ('error: contribute_back is not configured for this target '
                    '— to enable, set contribute_back {"path": <staging dir>, '
                    '"schema": <template file>} under the "defaults" block of '
-                   "this target's scenarios file (per-target only; the "
+                   # F35/#302: naming the block without the path left the
+                   # operator to discover the file by failing once.
+                   f'{os.path.join(TANUKI_ROOT, "scenarios", f"{args.target}.scenarios.json")}'
+                   " (per-target only; the "
                    'machine-wide ~/.tanuki/config.json is NOT read, issue '
                    '#241)')
             if global_ignored_note:
@@ -1838,7 +1841,10 @@ def cmd_distill(args, ledger):
                       'candidates are listed but nothing can be emitted; to '
                       'enable, set contribute_back {"path": <staging dir>, '
                       '"schema": <template file>} under the "defaults" block '
-                      "of this target's scenarios file (per-target only; the "
+                      # F35/#302: name the file, not just the block.
+                      "of "
+                      f'{os.path.join(TANUKI_ROOT, "scenarios", f"{args.target}.scenarios.json")}'
+                      " (per-target only; the "
                       "machine-wide ~/.tanuki/config.json is NOT read)")
             print(f"note: {notice}", file=sys.stderr)
         # issue #241 / F198: flag an ignored global-scope block on --list too.
