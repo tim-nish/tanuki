@@ -88,6 +88,10 @@ CONFIG_DEFAULTS = {
     # session's otherwise-scrubbed environment. Empty by default — reaching a
     # real credentialed service is never implicit.
     "driven_env_passthrough": [],
+    # story 5.3 / issue #299: turns below which an execution with no declared
+    # probe is judged not to have entered the plugin flow. Configurable
+    # because the observed degenerate run is evidence, not a threshold.
+    "reach_min_turns": 5,
 }
 
 # --- driven-session environment (story 5.1 / issue #300) ---------------------
@@ -844,6 +848,45 @@ def prog_done(prog, run_dir, r):
         save_progress(run_dir, prog)
 
 
+def evaluate_reach(scenario, events, probe, num_turns, cfg):
+    """Did this execution reach the subject at all? (story 5.3 / issue #299)
+
+    A THIRD fact, beside `status` and `probe` — never merged into either. The
+    two-axis rule keeps `status: ok` from *reading* healthy on a scenario that
+    short-circuited, but `record-run` yield and `record-cycle` quiet-accounting
+    consume status and yield only, so an execution that never entered the
+    plugin flow still counted as a valid one. Observed on
+    `loop-20260726-201337`: 4 of 5 verify-set scenarios short-circuited at
+    3–13 turns, produced no absence signal, and nothing distinguished that
+    from a verified fix.
+
+    Deterministic, over data the manifest already records — never a model, and
+    never driver self-report:
+
+    - a declared probe answers it: `reached` iff its required predicate
+      matched, `unreached` iff it did not (the charter itself named what
+      counts as entering the flow);
+    - with no probe, a turns floor stands in — an execution below
+      `reach_min_turns` never got far enough to exercise anything. The floor
+      is CONFIGURABLE because the observed run is one run's evidence, not a
+      threshold: 3/3/9/13 turns short-circuited against 34 that reached.
+
+    Returns `reached` | `unreached`. Absence verification and quiet-accounting
+    read it (spec-tanuki-scenario-lifecycle, AMENDED 2026-07-26); yield,
+    streaks and demotion still ignore coverage entirely.
+    """
+    if probe == "reached":
+        return "reached"
+    if probe == "short_circuited":
+        return "unreached"
+    floor = cfg.get("reach_min_turns", CONFIG_DEFAULTS["reach_min_turns"])
+    if num_turns is None:
+        # No turn count recorded (the scenario failed before the driver
+        # reported). Nothing was exercised.
+        return "unreached"
+    return "reached" if num_turns >= floor else "unreached"
+
+
 def evaluate_probe(scenario, events, raw_path):
     """Probe coverage (story 1.25 / #165; spec-tanuki-trajectory §2b): the
     SECOND, independent per-scenario result axis — `status` stays driver
@@ -907,6 +950,18 @@ def render_probe(r):
     return txt
 
 
+def render_reach(r):
+    """Reach-axis rendering (story 5.3 / issue #299): a THIRD fact beside
+    status and probe, never merged into either. Silence must not read as a
+    clean result — an execution that never entered the plugin flow is marked
+    on the same line as its status, so the operator sees it without opening
+    the manifest."""
+    if (r.get("reach") or "reached") == "unreached":
+        return ("  UNREACHED — the plugin flow was never entered; this "
+                "execution is not absence evidence")
+    return ""
+
+
 def result_stats(events):
     """(cost_usd, num_turns) from the run's result event. cost_usd is kept as
     manifest data for estimate history; user-facing output shows turns/time."""
@@ -951,7 +1006,7 @@ def drive_scenario(args, scenario, run_dir, cfg, prog=None):
         probe, probe_checkpoints = evaluate_probe(scenario, events, None)
         return {"scenario": sid,
                 "status": "host-escape: host_setup touched the clone-source path",
-                "probe": probe,
+                "probe": probe, "reach": "unreached",
                 **({"checkpoints": probe_checkpoints} if probe_checkpoints
                    is not None else {}),
                 "events": len(events), "model": model, "cost_usd": None,
@@ -991,7 +1046,7 @@ def drive_scenario(args, scenario, run_dir, cfg, prog=None):
             return {"scenario": sid,
                     "status": (f"entry-fixture-missing: '{recipe['name']}' "
                                f"absent from the host clone: {missing}"),
-                    "probe": probe,
+                    "probe": probe, "reach": "unreached",
                     **({"checkpoints": probe_checkpoints} if probe_checkpoints
                        is not None else {}),
                     "events": len(events), "model": model, "cost_usd": None,
@@ -1164,8 +1219,11 @@ def drive_scenario(args, scenario, run_dir, cfg, prog=None):
     # wrote. `status` above is byte-for-byte what it was — the axes are
     # recorded independently, never merged into one verdict.
     probe, probe_checkpoints = evaluate_probe(scenario, events, raw_path)
+    # Third axis (story 5.3): absence verification and quiet-accounting read
+    # this; yield/streak/demotion never do.
+    reach = evaluate_reach(scenario, events, probe, num_turns, cfg)
     return {"scenario": sid, "status": status, "events": len(events),
-            "probe": probe,
+            "probe": probe, "reach": reach,
             **({"checkpoints": probe_checkpoints} if probe_checkpoints
                is not None else {}),
             "model": model, "cost_usd": cost_usd, "num_turns": num_turns,
@@ -1429,14 +1487,15 @@ def main():
         except (RuntimeError, OSError) as e:
             probe, probe_cps = evaluate_probe(s, [], None)
             r = {"scenario": s["id"], "status": f"setup failed: {e}",
-                 "events": 0, "probe": probe,
+                 "events": 0, "probe": probe, "reach": "unreached",
                  **({"checkpoints": probe_cps} if probe_cps is not None
                     else {})}
         # Completion report (story 1.26): both axes on one line, side by
         # side, never merged — the exit code below stays status-only.
         print(f"  {r['status']}  ({r['events']} events, "
               f"{r.get('num_turns') or '?'} turns, "
-              f"{int(r.get('duration_s') or 0)}s)  {render_probe(r)}",
+              f"{int(r.get('duration_s') or 0)}s)  {render_probe(r)}"
+              + render_reach(r),
               flush=True)
         prog_done(prog, run_dir, r)
         return r
