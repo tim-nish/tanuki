@@ -2,9 +2,10 @@
 story: 5.4
 epic: 5
 title: "Story 5.4: absence verification and quiet-accounting require reach"
-status: ready
+status: published
+depends_on: ["5.3"]
+issue: 316
 umbrella: 299
-depends_on: [5.3]
 ---
 
 # Story 5.4: Absence and quiet-accounting require reach
