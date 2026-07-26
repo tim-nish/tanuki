@@ -333,9 +333,31 @@ def current_run(target):
 
 
 def load_state(target, run=None):
+    named = run
     run = run or current_run(target)
-    with open(os.path.join(loop_dir(target, run), "state.json"),
-              encoding="utf-8") as f:
+    p = os.path.join(loop_dir(target, run), "state.json")
+    # F244: a --run naming a run that does not exist used to reach open() and
+    # die with an unhandled FileNotFoundError traceback. `init` GENERATES the
+    # run id (it never adopts a --run value), so an operator who passed --run
+    # to init and reused that string here is the common way to get here —
+    # name the real run ids and the `current` pointer rather than a stack.
+    if not os.path.exists(p):
+        live = unfinished_runs(target)
+        known = [r for r, _ in live]
+        cur = None
+        cp = os.path.join(TANUKI_ROOT, target, "loop", "current")
+        if os.path.exists(cp):
+            with open(cp, encoding="utf-8") as f:
+                cur = f.read().strip()
+        out({"breaker": f"no such run '{run}' for target '{target}' — "
+                        + (f"live run(s): {', '.join(known)}. "
+                           if known else "no live runs. ")
+                        + (f"`current` -> {cur}. " if cur else "")
+                        + ("note: `init` generates the run id and ignores "
+                           "--run; take the id from init's output (F244)."
+                           if named else "run `init` first.")})
+        sys.exit(3)
+    with open(p, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -2513,6 +2535,18 @@ def cmd_init(args):
         warn_parts.append(
             f"base '{base}' is not the repo's default branch "
             f"('{default_branch}' per origin/HEAD)")
+    # F245: a remote-tracking base (`origin/main`) is accepted here and only
+    # bites at gate-pr, where GitHub refuses a non-branch PR base. The
+    # existing no-upstream warning fires for it but describes a DIFFERENT
+    # symptom, so the operator meets the real problem hours later. Name the
+    # consequence and the fix at init time, where re-running is cheap.
+    if git(repo, "rev-parse", "--verify", "--quiet",
+           f"refs/remotes/{base}")[0] == 0:
+        warn_parts.append(
+            f"base '{base}' is a remote-tracking ref, not a local branch — "
+            f"GitHub rejects it as a PR base ('Base ref must be a branch'), "
+            f"so `gate-pr` will fail at delivery (F128/F245). Re-init with "
+            f"--base {base.split('/', 1)[-1]} to deliver from this run")
     base_warning = None
     if warn_parts:
         base_warning = ("; ".join(warn_parts)
@@ -2628,12 +2662,21 @@ def cmd_init(args):
     # issue #258: a deliberate concurrent start is recorded so the audit shows
     # this run knowingly shares the `current` pointer with others — the reader
     # then knows every bare subcommand here is ambiguous and must pin --run.
+    # F247: this warning used to exist ONLY in the new run's audit.md — the
+    # session that will next issue a bare subcommand is a DIFFERENT session,
+    # which never reads this file. `current` has just been reseated out from
+    # under it, so the fact has to ride init's own output too.
+    concurrent_warning = None
     if live_before and args.allow_concurrent:
-        audit(state, "init WARNING: --allow-concurrent — starting alongside "
-                     f"{len(live_before)} other live run(s): "
-                     + ", ".join(r for r, _ in live_before)
-                     + " (issue #258; they share the machine-wide `current` "
-                       "pointer, so pin --run on every subcommand)")
+        concurrent_warning = (
+            "--allow-concurrent — starting alongside "
+            f"{len(live_before)} other live run(s): "
+            + ", ".join(r for r, _ in live_before)
+            + f" (issue #258). The machine-wide `current` pointer now names "
+              f"THIS run ({run}); any other session's bare subcommand would "
+              f"resolve here, so pin --run on every subcommand in every "
+              f"session.")
+        audit(state, f"init WARNING: {concurrent_warning}")
     # issue #200 / story 1.56: the cross-target case is recorded separately —
     # a different slug on the same checkout races on the git repo itself, not
     # on the `current` pointer, so the reader needs both facts named.
@@ -2669,6 +2712,7 @@ def cmd_init(args):
     out({"run": run, "integration_branch": integration, "worktree": worktree,
          "base": base, "base_sha": base_sha, "base_upstream": upstream,
          "base_behind": n_behind, "warning": base_warning,
+         "concurrent_warning": concurrent_warning,
          "ledger_reuse": ledger_reuse,
          "branch_cleanup": cleaned,
          "host_fixture_path": host_fixture_path, "host_base_sha": host_base_sha,
