@@ -35,8 +35,14 @@ EOF
 chmod +x "$tmp/bin/claude"
 export PATH="$tmp/bin:$PATH"
 
+# ESCAPE_TARGET is how this fixture tells the stub driver to escape, so it must
+# reach the driven session — which since story 5.1 means declaring it, because
+# the child's environment is an allowlist rather than the parent's (issue #300).
+# Naming it here keeps this fixture about escape DETECTION and doubles as
+# end-to-end coverage of the deliberate opt-in.
 cat > "$tmp/scenarios.json" <<'EOF'
-{"scenarios": [{"id": "solo", "charter": "c", "prompt": "p", "max_turns": 3}]}
+{"defaults": {"driven_env_passthrough": ["ESCAPE_TARGET"]},
+ "scenarios": [{"id": "solo", "charter": "c", "prompt": "p", "max_turns": 3}]}
 EOF
 
 manifest() { echo "$1/t/events/$2/manifest.json"; }

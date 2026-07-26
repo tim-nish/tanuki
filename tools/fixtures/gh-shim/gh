@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# A scripted stand-in for `gh`, for charters that must exercise a forge
+# response (story 5.1 / issue #300).
+#
+# Driven sessions run with a scrubbed environment and no forge credentials, so
+# a scenario can no longer reach a real account — which is the point: on
+# 2026-07-26 one did, created a real repository, and could not delete it. When
+# a charter genuinely needs GitHub's behaviour, put this directory on PATH and
+# script the responses:
+#
+#     export PATH="<plugin-clone>/tools/fixtures/gh-shim:$PATH"
+#     export GH_SHIM_DIR="$PWD/.gh-shim"          # where responses are read
+#     mkdir -p "$GH_SHIM_DIR"
+#     # one file per subcommand path, '.' replaced by '-'
+#     printf 'Base ref must be a branch\n' > "$GH_SHIM_DIR/pr-create.err"
+#     printf '3\n' > "$GH_SHIM_DIR/pr-create.exit"
+#
+# For each invocation the shim resolves a key from the first two arguments
+# (e.g. `gh pr create ...` -> `pr-create`), then:
+#   <key>.out    printed to stdout   (default: empty)
+#   <key>.err    printed to stderr   (default: an unscripted-call message)
+#   <key>.exit   the exit code       (default: 1)
+# Every call is appended to $GH_SHIM_DIR/calls.log, so a scenario can assert on
+# what was attempted.
+#
+# Unscripted calls fail loudly and are never silently successful: a shim that
+# invents a success is worse than no shim, because the scenario then reports a
+# behaviour the forge never produced.
+
+set -uo pipefail
+
+dir="${GH_SHIM_DIR:-}"
+if [ -z "$dir" ]; then
+  echo "gh (tanuki shim): GH_SHIM_DIR is not set — nothing is scripted, so this call cannot be answered. See tools/fixtures/README.md." >&2
+  exit 1
+fi
+mkdir -p "$dir"
+
+key="$1"
+if [ $# -ge 2 ] && [ "${2#-}" = "$2" ]; then
+  key="$1-$2"
+fi
+
+printf '%s\n' "$*" >> "$dir/calls.log"
+
+[ -f "$dir/$key.out" ] && cat "$dir/$key.out"
+if [ -f "$dir/$key.err" ]; then
+  cat "$dir/$key.err" >&2
+elif [ ! -f "$dir/$key.out" ] && [ ! -f "$dir/$key.exit" ]; then
+  echo "gh (tanuki shim): unscripted call '$*' — script it as $dir/$key.{out,err,exit}" >&2
+fi
+
+if [ -f "$dir/$key.exit" ]; then
+  exit "$(cat "$dir/$key.exit")"
+fi
+[ -f "$dir/$key.out" ] && exit 0
+exit 1

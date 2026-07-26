@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# Fixture for the driven session's environment (story 5.1 / issue #300).
+#
+# A driven session runs with --dangerously-skip-permissions, so its environment
+# IS its authority. Before this fixture existed, tanuki-drive passed no env= to
+# Popen and the child inherited every credential in scope; a scenario used them
+# to create a real repository on the operator's GitHub account and could not
+# delete it.
+#
+# Asserts:
+#   1. driven_env() is an allowlist — the forge/agent credentials named in
+#      DRIVEN_ENV_DENIED never survive, even when set in the parent;
+#   2. GH_CONFIG_DIR points at an empty directory inside the run workspace, so
+#      the HOME-based `gh` hosts.yml lookup finds nothing (HOME must be passed
+#      for the driver's own config, which is exactly why this is needed);
+#   3. git is told not to prompt and not to reach for an agent or default key;
+#   4. the driver's own model credentials DO survive — scrubbing that would
+#      mean nothing runs at all;
+#   5. the explicit opt-in (driven_env_passthrough) wins over the forced
+#      settings, because a deliberately provisioned credential must be usable;
+#   6. the real launch passes env= at all — a regression that dropped the
+#      argument would restore wholesale inheritance while every unit assertion
+#      above still passed.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+drive="$here/tanuki-drive"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+
+# 1-5: unit-check driven_env by importing the module (no .py extension).
+GH_TOKEN=secret-forge-token \
+GITHUB_TOKEN=secret-forge-token-2 \
+SSH_AUTH_SOCK=/tmp/agent.sock \
+GH_CONFIG_DIR=/home/someone/.config/gh \
+ANTHROPIC_API_KEY=driver-key \
+HOME=/home/someone \
+DELIBERATE_TOKEN=opted-in \
+python3 - "$drive" "$tmp/ws" <<'PY' || fail "driven_env allowlist"
+import importlib.machinery, importlib.util, os, sys
+loader = importlib.machinery.SourceFileLoader("td", sys.argv[1])
+spec = importlib.util.spec_from_loader("td", loader)
+td = importlib.util.module_from_spec(spec); loader.exec_module(td)
+ws = sys.argv[2]
+
+env = td.driven_env(ws)
+
+# 1. every denied name is absent, though all were set in the parent
+for name in ("GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK"):
+    assert name in os.environ, f"test setup: {name} must be set in the parent"
+    assert name not in env, f"{name} survived into the driven environment"
+
+# 2. GH_CONFIG_DIR is redirected into the workspace, not inherited
+assert env["GH_CONFIG_DIR"] != os.environ["GH_CONFIG_DIR"], "GH_CONFIG_DIR inherited"
+assert env["GH_CONFIG_DIR"].startswith(ws), env["GH_CONFIG_DIR"]
+assert os.path.isdir(env["GH_CONFIG_DIR"]), "the empty gh config dir is not created"
+assert os.listdir(env["GH_CONFIG_DIR"]) == [], "the gh config dir is not empty"
+# HOME is passed on purpose — that is precisely why the redirect is needed
+assert env["HOME"] == "/home/someone"
+
+# 3. git cannot prompt, cannot use an agent, cannot use a default key
+assert env["GIT_TERMINAL_PROMPT"] == "0"
+assert env["GIT_ASKPASS"] == "/bin/false"
+assert "IdentityAgent=none" in env["GIT_SSH_COMMAND"], env["GIT_SSH_COMMAND"]
+assert "IdentitiesOnly=yes" in env["GIT_SSH_COMMAND"], env["GIT_SSH_COMMAND"]
+
+# 4. the driver's own credentials survive, or nothing runs
+assert env["ANTHROPIC_API_KEY"] == "driver-key"
+
+# 5. the explicit opt-in wins, and only for what was named
+opted = td.driven_env(ws, ["DELIBERATE_TOKEN"])
+assert opted["DELIBERATE_TOKEN"] == "opted-in", "passthrough did not admit the name"
+assert "GH_TOKEN" not in opted, "passthrough must not admit unnamed credentials"
+forced = td.driven_env(ws, ["GH_TOKEN"])
+assert forced["GH_TOKEN"] == "secret-forge-token", "an explicit opt-in must win"
+PY
+pass "driven_env allowlists, redirects gh config, disarms git, keeps driver creds, honours opt-in"
+
+# --- 6. the launch actually passes env= --------------------------------------
+# Unit assertions cannot see a dropped env= argument. Drive a real scenario with
+# a stub claude that reports whether a forge credential reached it.
+git init -q "$tmp/plugin" && git -C "$tmp/plugin" config user.email t@e \
+  && git -C "$tmp/plugin" config user.name t
+git -C "$tmp/plugin" checkout -qb main && echo x > "$tmp/plugin/x" \
+  && git -C "$tmp/plugin" add -A && git -C "$tmp/plugin" commit -qm base
+
+mkdir -p "$tmp/bin"
+cat > "$tmp/bin/claude" <<'EOF'
+#!/bin/sh
+printf '%s' "${GH_TOKEN:-ABSENT}" > "$LEAK_REPORT"
+cat <<'JSON'
+{"type":"result","subtype":"success","num_turns":1,"duration_ms":10,"total_cost_usd":0.001,"is_error":false,"result":"done"}
+JSON
+EOF
+chmod +x "$tmp/bin/claude"
+export PATH="$tmp/bin:$PATH"
+
+cat > "$tmp/scenarios.json" <<'EOF'
+{"scenarios": [{"id": "solo", "charter": "c", "prompt": "p", "max_turns": 3}]}
+EOF
+
+export TANUKI_ROOT="$tmp/root"
+# LEAK_REPORT must reach the stub, so it is opted in deliberately — which also
+# proves the passthrough path works end to end through a real drive.
+cat > "$tmp/scenarios-pass.json" <<'EOF'
+{"defaults": {"driven_env_passthrough": ["LEAK_REPORT"]},
+ "scenarios": [{"id": "solo", "charter": "c", "prompt": "p", "max_turns": 3}]}
+EOF
+export LEAK_REPORT="$tmp/leak.txt"
+GH_TOKEN=secret-forge-token "$drive" --target t --plugin "$tmp/plugin" \
+  --scenarios "$tmp/scenarios-pass.json" --run renv --timeout 60 >/dev/null \
+  || fail "drive exited non-zero"
+[ -f "$tmp/leak.txt" ] || fail "stub claude never ran (passthrough did not reach it)"
+got="$(cat "$tmp/leak.txt")"
+[ "$got" = "ABSENT" ] || fail "GH_TOKEN reached the driven session: '$got'"
+pass "a real drive launches with the scrubbed environment (GH_TOKEN absent in the child)"
