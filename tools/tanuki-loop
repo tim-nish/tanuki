@@ -1962,6 +1962,16 @@ def resolve_loop_config(args):
         # operator opts back into a Draft via the loop block's
         # gate_pr_draft:true (or the per-run `gate-pr --draft` override).
         "gate_pr_draft": bool(loopcfg.get("gate_pr_draft")),
+        # Story 5.5 / issue #301: does the delivery sequence's issues step
+        # apply to this target? DECLARED, never inferred
+        # (spec-tanuki-loop, "Applicability is DECLARED"). Absent => None =>
+        # cannot-determine: the step is reported as undetermined rather than
+        # asserted applicable or silently skipped. Neither `gate` mode nor
+        # host presence may stand in — gate describes delivery, not tracking,
+        # and this repo is hostless WITH a tracker.
+        "issue_tracker": (loopcfg["issue_tracker"]
+                          if isinstance(loopcfg.get("issue_tracker"), bool)
+                          else None),
     }
 
 
@@ -2579,6 +2589,7 @@ def cmd_init(args):
         "integration_branch": integration, "worktree": worktree,
         "phase": args.phase, "cap": cap, "attempt_cap": attempt_cap,
         "gate_mode": cfg["gate"], "gate_pr_draft": cfg["gate_pr_draft"],
+        "issue_tracker": cfg["issue_tracker"],
         "wall_start": time.time(), "wall_limit_s": wall,
         "token_budget": tokens, "test_cmd": test_cmd,
         "iterations": [], "attempts": {}, "frozen": [], "deferred": [],
@@ -3186,6 +3197,27 @@ def cmd_doctor(args):
                                  "needed; the loop leaves the integration "
                                  "branch in place and never merges (the human "
                                  "opens the PR or merges the branch)"})
+
+    # Story 5.5 / issue #301: applicability of the delivery sequence's issues
+    # step is DECLARED, never inferred. Surface an undeclared target ONCE,
+    # here, so the operator closes it in one place rather than meeting the
+    # undetermined state at every gate. Informational — never fails `ready`:
+    # cannot-determine is a legitimate state, not a misconfiguration.
+    _tracker = cfg.get("issue_tracker")
+    checks.append({
+        "check": "issue-tracker-declared", "ok": True,
+        "detail": (
+            "issue_tracker is not declared — whether the delivery sequence's "
+            "issues step applies to this target is UNDETERMINED, and "
+            "gate-check reports it as such. Declare `issue_tracker: "
+            "true|false` in the scenarios file's `loop` block to resolve it. "
+            "Not inferred from the gate mode or hostlessness: a branch-gate "
+            "target may still file issues, and a hostless target may still "
+            "have a tracker."
+            if _tracker is None else
+            f"issue_tracker declared: {str(_tracker).lower()} — the issues "
+            f"step {'applies' if _tracker else 'is skipped'} for this "
+            f"target")})
 
     # issue #258: one active run per target. A live unfinished run for this
     # target means a headless START would steal its `current` pointer (bare
@@ -3857,7 +3889,18 @@ def _gate_progress(state, reachable, base_missing=False):
         "issues": bool(state.get("materialized")),
         "cleanup": bool(state.get("finished")),
     }
-    order = ("final-tests", "deliver", "landed", "issues", "cleanup")
+    # Story 5.5 / issue #301: applicability is DECLARED, never inferred
+    # (spec-tanuki-loop, "Applicability is DECLARED"). A target that declares
+    # no tracker skips the issues step outright, so it leaves the sequence.
+    # Undeclared stays in the sequence but is reported as undetermined below —
+    # a derivation that cannot know a fact says so rather than picking the
+    # likelier answer.
+    tracker = state.get("issue_tracker")
+    if tracker is False:
+        order = ("final-tests", "deliver", "landed", "cleanup")
+        evidence.pop("issues", None)
+    else:
+        order = ("final-tests", "deliver", "landed", "issues", "cleanup")
     # last_completed_step is the end of the contiguous completed PREFIX, not
     # the globally-last step that happens to carry evidence (F224): an
     # overnight `finish --reason cap` sets state["finished"], which maps to
@@ -3876,11 +3919,19 @@ def _gate_progress(state, reachable, base_missing=False):
     # F234: this derivation cannot know whether issue tooling exists for the
     # target, and the doc's issue steps are skipped entirely on a trackerless
     # target — say so instead of nudging every operator toward `issues`.
-    if progress["next_step"] == "issues":
+    # AC3/AC4: a declared tracker names the step plainly (no note — nothing is
+    # undetermined); undeclared carries the undetermined state as a
+    # FIRST-CLASS value plus the declaration that would resolve it, rather
+    # than an `issues` position that reads as applicable.
+    if progress["next_step"] == "issues" and tracker is None:
+        progress["issues_applicable"] = "cannot-determine"
         progress["next_step_note"] = (
-            "the issues step applies only where forge/tracker tooling is "
-            "configured for this target — a hostless/trackerless target "
-            "skips it and proceeds to cleanup")
+            "whether the issues step applies to this target is UNDETERMINED: "
+            "no tracker is declared. Declare `issue_tracker: true|false` in "
+            "the scenarios file's `loop` block to resolve it — `false` skips "
+            "the step and proceeds to cleanup. Neither the gate mode nor "
+            "hostlessness is read as a substitute (a branch-gate target may "
+            "still file issues; a hostless target may still have a tracker).")
     if base_missing:
         # F61: never report "not landed yet" for a question we could not ask —
         # an unresolvable base makes landing UNDETERMINED, not negative.
