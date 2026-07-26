@@ -779,6 +779,30 @@ it **never** merges `integration → main` itself (AMENDED 2026-07-21, triage of
    any earlier cleanup. `finish --reason gate-ratified` survives as a
    compatibility mechanism only; no workflow instructs it.
 
+**Applicability is DECLARED, never inferred (ADDED 2026-07-26 — issue #301).**
+Step 3 applies only where an issue tracker is configured; a trackerless target
+skips it and proceeds to cleanup, its landed batch already recorded in the
+merge commit and the audit trail. **The target declares this** in the scenarios
+`loop` block. Undeclared is **cannot-determine**: the step is reported as
+undetermined — never asserted applicable, never silently skipped — exactly as
+absence verification reports a scope no run drove rather than scoring it.
+
+Neither available signal may stand in for the declaration, because both are
+unsound:
+
+- **`gate` mode describes delivery, not tracking.** A `branch`-gate target
+  merges by hand yet may still file issues; inferring "no forge, therefore no
+  tracker" trades a wrong nudge for a wrong omission, and the omission is worse
+  because it is silent.
+- **Hostlessness does not imply tracklessness.** This repository is hostless
+  and has a tracker, so the parenthetical example that once read
+  "(e.g. a hostless target)" was never a criterion.
+
+A derivation that cannot know a fact says so; it does not pick the likelier
+answer. Any surface reporting the operator's position in the sequence carries
+the undetermined state as a first-class value rather than emitting a position
+that reads as applicable.
+
 **Idempotent retry:** before creating an issue, search for its `<run-id>`
 marker (plus a per-problem key); an existing one is reused, never duplicated.
 Re-running the post-merge materialization creates only the missing issues. The
