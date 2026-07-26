@@ -576,6 +576,43 @@ def ledger_reuse_note(target):
             f"an unused slug; this run will draw on the inherited findings")
 
 
+def iteration_verify_reached(state, it):
+    """Did this iteration's VERIFY-set scenarios reach the plugin flow?
+    (story 5.4 / issue #299)
+
+    Returns True (at least one verify scenario reached), False (verify
+    scenarios ran and none reached), or None (cannot determine — no persisted
+    plan, no manifest, or a manifest predating the reach axis). None is NOT
+    False: a run we cannot ask about never gets a negative verdict, the same
+    discipline absence verification applies to a scope no run drove.
+
+    Only quiet-accounting and absence verification read this. Yield, streaks
+    and demotion do not — see the conditional invariant in
+    spec-tanuki-scenario-lifecycle (AMENDED 2026-07-26).
+    """
+    plan = plan_record(state, it.get("n"))
+    verify = set((plan or {}).get("verify") or [])
+    if not verify:
+        return None                      # nothing was being verified
+    run = state.get("run")
+    target = state.get("target")
+    if not run or not target:
+        return None
+    mpath = os.path.join(TANUKI_ROOT, target, "events",
+                         f"{run}-iter{it.get('n')}", "manifest.json")
+    try:
+        with open(mpath, encoding="utf-8") as fh:
+            results = json.load(fh).get("results", [])
+    except (json.JSONDecodeError, OSError):
+        return None
+    seen = [r for r in results if r.get("scenario") in verify]
+    if not seen:
+        return None
+    if any("reach" not in r for r in seen):
+        return None                      # manifest predates the axis
+    return any(r.get("reach") == "reached" for r in seen)
+
+
 def plan_record(state, iter_n):
     """The persisted scheduler plan for this loop iteration's drive run
     (<run>-iterN), or None for runs/schedulers that predate persisted plans."""
@@ -3713,12 +3750,27 @@ def cmd_record_cycle(args):
     # convergence. No persisted plan (pre-scheduler runs) => not gated.
     plan = plan_record(state, it["n"])
     quota_met = plan.get("quota_met", True) if plan else True
-    quiet = new_actionable == 0 and not patched and quota_met
+    # Story 5.4 / issue #299: the sibling guard. `quota_met` stops a run that
+    # SKIPPED exploration from manufacturing convergence; this stops one that
+    # EXECUTED but never reached the subject. A verify set whose scenarios all
+    # short-circuited produced no absence signal, so the cycle is not quiet.
+    #
+    # This is ONE SIDE of a deliberately conditional invariant
+    # (spec-tanuki-scenario-lifecycle, AMENDED 2026-07-26): absence
+    # verification and quiet-accounting read reach; yield, streaks and
+    # demotion still ignore coverage entirely. Quiet-accounting is the SECOND
+    # of the two consumers that may read it — `record-run` yield, a few lines
+    # away in its own tool, is on the other side and must not.
+    reached_verify = iteration_verify_reached(state, it)
+    quiet = (new_actionable == 0 and not patched and quota_met
+             and reached_verify is not False)
     # State the formula inline (F2): quiet requires all three, so a landed patch
     # or an unmet quota defeats an otherwise-quiet cycle. Without this the JSON
     # shows the inputs but not why quiet is false.
     if quiet:
-        quiet_because = "no new actionable findings, no patch landed, quota met"
+        quiet_because = ("no new actionable findings, no patch landed, quota "
+                         "met" + (", verify set reached the plugin flow"
+                                  if reached_verify else ""))
     else:
         blockers = []
         if new_actionable != 0:
@@ -3727,6 +3779,9 @@ def cmd_record_cycle(args):
             blockers.append("a patch landed this cycle")
         if not quota_met:
             blockers.append("exploration quota not met")
+        if reached_verify is False:
+            blockers.append("the verify set ran but never reached the plugin "
+                            "flow — its non-recurrence is not evidence")
         quiet_because = "not quiet — " + "; ".join(blockers)
     state["quiet_streak"] = state["quiet_streak"] + 1 if quiet else 0
     converged = state["quiet_streak"] >= 2

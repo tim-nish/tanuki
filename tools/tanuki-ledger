@@ -1010,8 +1010,23 @@ def driven_scenarios_by_run(target):
         if manifest.get("override"):
             out[run] = set()
             continue
+        # Story 5.4 / issue #299: an execution that never entered the plugin
+        # flow is not a replay. This is ONE SIDE of a deliberately conditional
+        # invariant (spec-tanuki-scenario-lifecycle, AMENDED 2026-07-26):
+        # absence verification and quiet-accounting read reach; yield, streaks
+        # and demotion still ignore coverage entirely. This function feeds the
+        # FIRST group — a short-circuited run that surfaced findings is still
+        # productive, and `scenario-yield` must keep counting it. If you are
+        # here to make yield read reach, you are on the wrong side of the
+        # split.
+        #
+        # Filtering here rather than at the verdict is what makes the existing
+        # three-valued classifier produce `cannot-determine` for an
+        # all-unreached scope by itself: no driven runs recorded, so nothing
+        # to be absent from.
         out[run] = {r.get("scenario") for r in manifest.get("results", [])
-                    if r.get("scenario")}
+                    if r.get("scenario")
+                    and (r.get("reach") or "reached") != "unreached"}
     return out
 
 
