@@ -567,7 +567,10 @@ Sections:
   recurred findings, deferred/frozen with their reasons inline); every label
   is a ledger fact, never a commit count (`fixed` was retired — it read as
   one); cumulative lifetime counts are a single pointer line to `--history`,
-  where they belong.
+  where they belong. The deferred/frozen listing — the queue's rendering at
+  the morning gate — is **capped (~10 visible) and ranked** by the ledger's
+  computed priority (ties by finding id), with a `+N more — full: queue.md`
+  marker when truncated; `queue.md` itself keeps every entry (#310).
 - **scheduler decisions** — from the iteration's persisted plan: what is
   being verified (replaying accepted fixes), what was picked for exploration,
   the active rotation, what is waiting for future iterations, and whether the

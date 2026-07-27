@@ -4841,6 +4841,36 @@ def _queue_reasons(state):
     return reasons
 
 
+#: Story 5.9 / issue #310: the morning queue's RENDERING is capped (~10
+#: visible) and ranked (spec-tanuki-loop "Morning gate"). The cap bounds
+#: presentation only — queue.md stays the full durable record, and the gate's
+#: discharge duty walks the whole file, never just the visible top.
+QUEUE_RENDER_CAP = 10
+
+
+def _queue_sort_key(findings):
+    """Deterministic rank for a morning-queue entry's finding id: the ledger's
+    computed priority first (mirrors tanuki-ledger's priority()/PRIORITY_LEGEND
+    — P1 = recurrence >= 3 or seen in >= 2 scenarios; P2 = recurrence 2, or
+    kind 'gap'; P3 = seen once), then the finding id as the tie-breaker, so
+    the visible set never depends on file or deferral order. Every queue entry
+    carries a finding id (`defer` requires one that already exists in the
+    ledger — F226 — and `attempt` freezes ledger ids); an id the ledger no
+    longer holds ranks after P3, still deterministically by id."""
+    by_id = {fd.get("id"): fd for fd in findings}
+
+    def key(fid):
+        fd = by_id.get(fid)
+        if fd is None:
+            return (4, fid)
+        if fd.get("recurrence", 1) >= 3 or len(fd.get("scenarios") or []) >= 2:
+            return (1, fid)
+        if fd.get("recurrence", 1) == 2 or fd.get("kind") == "gap":
+            return (2, fid)
+        return (3, fid)
+    return key
+
+
 def _probe_text(r):
     """Probe-axis rendering (story 1.26 / #166; spec-tanuki-trajectory §2b;
     spec-tanuki-view D3/D4): a mechanical copy of the drive-recorded values
@@ -5393,12 +5423,24 @@ def cmd_dashboard(args):
             if deltas["legacy"]:
                 lines.append("    (run predates status snapshots — "
                              "status→accepted/recurred not computable)")
-            for fid in state.get("deferred", []):
-                lines.append(f"    deferred {fid}: "
+            # Story 5.9 / #310: capped (~10 visible) and RANKED by the
+            # ledger's computed priority, ties by finding id — what to read
+            # first is a property of the surface, not of scroll position or
+            # deferral order. queue.md keeps every entry; a truncation states
+            # the hidden count and points at the full file, never silence.
+            key = _queue_sort_key(findings)
+            entries = sorted(
+                [("deferred", fid) for fid in state.get("deferred", [])]
+                + [("frozen", fid) for fid in state.get("frozen", [])],
+                key=lambda e: key(e[1]) + (e[0],))
+            for kind, fid in entries[:QUEUE_RENDER_CAP]:
+                label = f"deferred {fid}" if kind == "deferred" \
+                    else f"frozen {fid} (attempt cap)"
+                lines.append(f"    {label}: "
                              f"{_short(reasons.get(fid, 'see queue.md'), pointer='queue.md')}")
-            for fid in state.get("frozen", []):
-                lines.append(f"    frozen {fid} (attempt cap): "
-                             f"{_short(reasons.get(fid, 'see queue.md'), pointer='queue.md')}")
+            if len(entries) > QUEUE_RENDER_CAP:
+                lines.append(f"    +{len(entries) - QUEUE_RENDER_CAP} more "
+                             "— full: queue.md")
         else:
             body, _ = empty_state("run:no-iteration-started", state["target"])
             lines.append(f"  this run: {body}")
