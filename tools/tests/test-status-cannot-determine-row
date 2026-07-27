@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# Fixture for where the hand-ingest dead end is named
+# (story 5.6 / issue #307, owner ruling 2026-07-27).
+#
+# A finding scoped to a real scenario cannot reach `compact` through the
+# hand-ingest lifecycle: absence verification needs a `tanuki-drive`
+# re-verification, and hand-ingest never advances it. The ruling fixes `status`
+# as the EARLIEST REQUIRED surface for saying so — an operator must not first
+# learn it from `compact`, at the end of the documented walk.
+#
+# Asserts:
+#   1. an accepted finding no recorded run ever drove is marked
+#      cannot-determine ON ITS ROW, not only in trailing prose;
+#   2. the row names the scenario(s) to drive as one runnable command, and
+#      never suggests the reserved `ingest` pseudo-scenario;
+#   3. an accepted finding that HAS been driven and sits below the threshold is
+#      absent-with-evidence and is NOT warned about — the requirement binds
+#      cannot-determine only;
+#   4. `set-status` stays SILENT on canonical transitions. This is the half
+#      that gets "helpfully" undone: warning at `set-status --status accepted`
+#      is the natural-looking fix, it was implemented during loop run
+#      loop-20260726-204018, it tripped test-ledger-lifecycle-notice (a
+#      canonical transition is silent — story 1.5 / issue #67 / F63, spec
+#      decision 2026-07-17), and it was reverted. The 2026-07-27 ruling
+#      resolved that collision in the test's favour: the warning belongs to
+#      `status`. Do not add it to set-status.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
+export TANUKI_ROOT="$root"
+L=("$here/tanuki-ledger" --target t)
+
+seed_run() {   # <run> <scenario> — a reached execution, i.e. a real replay
+  mkdir -p "$root/t/events/$1"
+  printf '{"run":"%s","results":[{"scenario":"%s","status":"ok","reach":"reached"}]}\n' \
+    "$1" "$2" > "$root/t/events/$1/manifest.json"
+}
+
+"${L[@]}" init >/dev/null 2>&1
+
+# F1 — hand-ingested, scoped to a real scenario, never driven by any run.
+# The `ingest` evidence rides alongside a real scenario on purpose: it must
+# survive into the finding's scope without ever being SUGGESTED as drivable.
+"${L[@]}" upsert-finding --title "the hand-ingested one" --kind gap \
+  --evidence "r0/checkout#1,r0/ingest#1" >/dev/null
+
+# F2 — same shape, but its scenario really was driven in a recorded run.
+"${L[@]}" upsert-finding --title "the driven one" --kind gap \
+  --evidence "r1/billing#1" >/dev/null
+seed_run r1 billing
+
+for f in F1 F2; do
+  "${L[@]}" set-status --id "$f" --status accepted >/dev/null 2>&1
+done
+
+out="$("${L[@]}" status 2>/dev/null)"
+
+# --- 1. the never-driven row carries the verdict ------------------------------
+f1_row="$(printf '%s\n' "$out" | grep -E '^\s+F1 ' || true)"
+[ -n "$f1_row" ] || fail "F1 has no ACCEPTED row at all:
+$out"
+printf '%s' "$f1_row" | grep -qi "cannot-determine" \
+  || fail "the never-driven row is not marked on the row itself: $f1_row"
+pass "a never-driven accepted finding is marked cannot-determine on its row"
+
+# --- 2. the row names ONE runnable resolving command --------------------------
+# The resolving line is the line following F1's row.
+f1_next="$(printf '%s\n' "$out" | grep -A1 -E '^\s+F1 ' | tail -1)"
+printf '%s' "$f1_next" | grep -q "tanuki-drive" \
+  || fail "the row names no runnable command: $f1_next"
+printf '%s' "$f1_next" | grep -q "checkout" \
+  || fail "the resolving command does not name the scenario to drive: $f1_next"
+printf '%s' "$f1_next" | grep -q "ingest" \
+  && fail "the reserved 'ingest' pseudo-scenario was suggested as drivable: $f1_next"
+pass "the row names the scenario to drive as a runnable command, and never 'ingest'"
+
+# --- 3. a driven, below-threshold finding is NOT warned about -----------------
+f2_row="$(printf '%s\n' "$out" | grep -E '^\s+F2 ' || true)"
+[ -n "$f2_row" ] || fail "F2 has no ACCEPTED row at all:
+$out"
+printf '%s' "$f2_row" | grep -qi "cannot-determine" \
+  && fail "a driven below-threshold finding was marked cannot-determine: $f2_row"
+f2_next="$(printf '%s\n' "$out" | grep -A1 -E '^\s+F2 ' | tail -1)"
+printf '%s' "$f2_next" | grep -q "tanuki-drive" \
+  && fail "a driven below-threshold finding got a resolving command: $f2_next"
+pass "absent-with-evidence is left alone — the requirement binds cannot-determine only"
+
+# --- 4. set-status stays silent on canonical transitions ----------------------
+# See the header: this is the assertion that fails if the reverted
+# warn-at-accept fix is re-attempted. The warning lives in `status` (above).
+"${L[@]}" upsert-finding --title "a third" --kind gap \
+  --evidence "r2/search#1" >/dev/null
+for step in proposed accepted; do
+  err="$("${L[@]}" set-status --id F3 --status "$step" 2>&1 >/dev/null)"
+  [ -z "$err" ] \
+    || fail "canonical -> $step printed on stderr; the hand-ingest warning belongs to \`status\`, not set-status (ruling 2026-07-27): $err"
+done
+pass "set-status stays silent on canonical transitions (the warning is status's job)"
+
+echo "PASS: $(basename "$0")"
