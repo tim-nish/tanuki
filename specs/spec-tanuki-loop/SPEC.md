@@ -208,7 +208,7 @@ judgment (classify, implement) and running the target's tests. The tool owns:
 worktree/branch/base-SHA setup (`init` — which also **guards base
 freshness**, below), the per-iteration start gate —
 cap / wall-time / external-modification breakers + start-SHA capture + a
-ledger snapshot (`iter-start`), the four-part integration invariant + end-SHA
+ledger snapshot (`iter-start`), the five-part integration invariant + end-SHA
 capture (`iter-verify`), rollback (`rollback` = `reset --hard` + `clean -fd` +
 verify), the deterministic test runner (`test` — runs the per-target
 `test_cmd` configured at init inside the worktree; failure is a breaker),
@@ -532,7 +532,7 @@ continue the loop; a frozen finding no longer counts as a new actionable one.
 
 **Immediate stop** (freeze the integration branch, write the audit artifact,
 report): test failure · implementation-command failure · commit failure ·
-integration-invariant violation (the four-part check in step 6) · iteration
+integration-invariant violation (the five-part check in step 6) · iteration
 cap reached · wall-time limit · token budget exceeded · **external
 modification of the integration worktree** (detected by comparing the recorded
 end SHA / worktree cleanliness at the top of each iteration).
