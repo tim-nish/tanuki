@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# Fixture for contribute_back as dotted-path scalar catalog entries (story
+# 5.11 / issue #306, spec-den-distill §2 "the block enters the catalog as
+# dotted-path scalars"). Asserts: `contribute_back.path` and
+# `contribute_back.schema` are typed scalar catalog entries, each with its
+# own doctor (AC1); `set` assembles the nested defaults.contribute_back
+# block — the storage shape the ledger consumer reads unchanged — and
+# --dry-run renders the change first (AC2); a half-configured block is
+# flagged both-or-neither by the doctor, never blocked (AC3); a machine-wide
+# contribute_back is ignored for resolution and flagged by the doctor
+# (AC4, issue #241 / F198); the doctors block bad values (non-directory
+# path, non-file schema); dotted names ride the existing suppression path.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+cfg="$here/tanuki-config"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+C=("$cfg" --target t)
+
+stage="$tmp/staging"; mkdir -p "$stage"
+template="$tmp/intake.md"; echo "{slug}" > "$template"
+
+canon="$TANUKI_ROOT/scenarios/t.scenarios.json"
+mkdir -p "$(dirname "$canon")"
+cat > "$canon" <<EOF
+{"target":"t","plugin":"$tmp/plugin",
+ "scenarios":[{"id":"s1","charter":"c","prompt":"p"}]}
+EOF
+
+# --- AC1: two typed scalar entries, each with its own doctor -------------------
+"${C[@]}" show --json | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+by = {f["field"]: f for f in d["declared"]}
+for leaf in ("path", "schema"):
+    f = by["contribute_back." + leaf]
+    assert f["type"] == "path", f
+    assert f["declaration"] == "built-in input", f
+    assert f["binds"] == "defaults.contribute_back." + leaf, f
+    assert f["scope"] == "per-target", f
+' || fail "both contribute_back leaves must list as typed scalar entries"
+dp="$("${C[@]}" set --field contribute_back.path --value "$stage" --dry-run)"
+ds="$("${C[@]}" set --field contribute_back.schema --value "$template" \
+      --dry-run)"
+python3 -c '
+import json, sys
+p, s = (json.loads(a) for a in sys.argv[1:3])
+assert p["doctor"] and s["doctor"], "each entry must carry a doctor"
+assert p["doctor"] != s["doctor"], "each leaf must have ITS OWN doctor"
+' "$dp" "$ds" || fail "each catalog entry must name its own doctor"
+pass "AC1: contribute_back.path/.schema are typed scalars, each with a doctor"
+
+# --- AC2: dry-run renders the change; set assembles the nested block ----------
+python3 -c '
+import json, sys
+r = json.loads(sys.argv[1])
+assert r["dry_run"] is True and r["old"] is None, r
+assert r["binds"] == "defaults.contribute_back.path", r
+assert r["path"].endswith("t.scenarios.json"), r
+' "$dp" || fail "dry-run must render old/new + binds + storage path"
+python3 -c '
+import json; d = json.load(open("'"$canon"'"))
+assert "defaults" not in d, "dry-run must write nothing"
+' || fail "dry-run must write nothing"
+"${C[@]}" set --field contribute_back.path --value "$stage" 2>"$tmp/err" \
+  > /dev/null || fail "setting the first leaf must land (flagged, not blocked)"
+# The doctor command line is echoed before it runs and itself contains the
+# warning text — anchor to line start to match only the RELAYED verdict.
+grep -q "^warning: contribute_back is half-configured" "$tmp/err" \
+  || fail "AC3: setting exactly one leaf must flag the half-configured block"
+grep -q "^warning: contribute_back is half-configured — contribute_back.schema is unset" \
+  "$tmp/err" || fail "the flag must name the missing counterpart leaf"
+"${C[@]}" set --field contribute_back.schema --value "$template" \
+  2>"$tmp/err" > /dev/null || fail "setting the second leaf must land"
+grep -q "^warning: contribute_back is half-configured" "$tmp/err" \
+  && fail "a completed block must not be flagged half-configured" || true
+python3 -c '
+import json; d = json.load(open("'"$canon"'"))
+cb = d["defaults"]["contribute_back"]
+assert cb == {"path": "'"$stage"'", "schema": "'"$template"'"}, cb
+' || fail "set must assemble the nested {path, schema} storage shape"
+pass "AC2+AC3: dry-run renders first; nested block assembled; half state flagged"
+
+# --- the existing consumer reads the assembled shape unchanged -----------------
+"$here/tanuki-ledger" --target t init > /dev/null 2>&1 || true
+"$here/tanuki-ledger" --target t distill --check > "$tmp/out" 2>/dev/null \
+  || fail "tanuki-ledger distill --check must accept the assembled block"
+python3 -c '
+import json; r = json.load(open("'"$tmp"'/out"))
+assert r["ok"] is True and r["path"] == "'"$stage"'", r
+' || fail "the ledger consumer must resolve the tanuki-config-written block"
+pass "consumer: tanuki-ledger reads the assembled block unchanged"
+
+# --- doctors block bad values by their own rule --------------------------------
+"${C[@]}" set --field contribute_back.path --value "$tmp/nope" 2>/dev/null \
+  && fail "a nonexistent path must fail typed validation" || true
+"${C[@]}" set --field contribute_back.path --value "$template" 2>"$tmp/err" \
+  && fail "a file (not a directory) must be blocked by the path doctor" || true
+grep -q "^contribute_back.path is not an existing directory" "$tmp/err" \
+  || fail "the path doctor must name the directory rule"
+"${C[@]}" set --field contribute_back.schema --value "$stage" 2>"$tmp/err" \
+  && fail "a directory must be blocked by the schema doctor" || true
+grep -q "^contribute_back.schema does not resolve to a file" "$tmp/err" \
+  || fail "the schema doctor must name the file rule"
+python3 -c '
+import json; d = json.load(open("'"$canon"'"))
+cb = d["defaults"]["contribute_back"]
+assert cb == {"path": "'"$stage"'", "schema": "'"$template"'"}, cb
+' || fail "doctor-blocked sets must leave the stored block untouched"
+pass "doctors: directory rule and file rule enforced, bad values never land"
+
+# --- AC4: machine-wide contribute_back ignored for resolution, flagged --------
+python3 -c '
+import json, os
+root = os.environ["TANUKI_ROOT"]
+json.dump({"contribute_back": {"path": "/evil", "schema": "/evil.md"},
+           "path": "/evil", "schema": "/evil.md"},
+          open(os.path.join(root, "config.json"), "w"))
+'
+"${C[@]}" show --json | python3 -c '
+import json, sys
+by = {f["field"]: f for f in json.load(sys.stdin)["declared"]}
+for leaf in ("path", "schema"):
+    f = by["contribute_back." + leaf]
+    assert f["source"] == "scenarios file", f
+    assert "/evil" not in str(f["value"]), f
+' || fail "the global tier must never participate in contribute_back (#241)"
+"${C[@]}" set --field contribute_back.path --value "$stage" 2>"$tmp/err" \
+  > /dev/null
+grep -q "^warning: a contribute_back block exists" "$tmp/err" \
+  || fail "the doctor must flag the ignored machine-wide block (#241)"
+rm -f "$TANUKI_ROOT/config.json"
+pass "AC4: machine-wide block ignored for resolution and flagged by doctor"
+
+# --- dotted names ride the existing suppression path ---------------------------
+python3 -c '
+import json; p = "'"$canon"'"; d = json.load(open(p))
+d["inputs"] = {"contribute_back.path": None}; json.dump(d, open(p, "w"))
+'
+"${C[@]}" show --json | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["suppressed"] == ["contribute_back.path"], d["suppressed"]
+' || fail "a dotted catalog name must suppress via null like any other"
+"${C[@]}" set --field contribute_back.path --value "$stage" 2>/dev/null \
+  && fail "set on a suppressed dotted field must be refused" || true
+pass "suppression: dotted catalog names behave like any catalog entry"
+
+echo "all checks passed"

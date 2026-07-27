@@ -98,12 +98,63 @@ BUILTIN_DEFAULTS = {"driver_model": "claude-sonnet-5", "model_ceiling": "sonnet"
                     "brief_max_proposals": 10, "issue_label_prefix": "tanuki"}
 TYPES = ("repo-path", "path", "string", "enum", "int")
 SCOPES = ("per-target", "per-run")
+
+
+def _cb_doctor(leaf, check, defect):
+    """Build the Tanuki-owned doctor command for one contribute_back leaf
+    (spec-den-distill §2 / issue #306). Zero-dep (python3 -c) and, like any
+    doctor, opaque to the runner: echoed, env-fed, output relayed verbatim.
+    Each leaf gets its own command: the value is re-checked (path: an
+    existing directory; schema: resolves to a file — mirroring the ledger's
+    cb_validate), a half-configured block is FLAGGED but never blocked
+    (both-or-neither is a block property; blocking would make the first
+    leaf unsettable), and a contribute_back block at machine-wide scope is
+    flagged as ignored (issue #241 / F198)."""
+    other = "schema" if leaf == "path" else "path"
+    code = (
+        'import json, os, sys\n'
+        'v = os.path.expanduser(os.environ["TANUKI_VALUE"])\n'
+        f'if not os.path.{check}(v):\n'
+        f'    print("contribute_back.{leaf} {defect}: " + v)\n'
+        '    sys.exit(1)\n'
+        'try:\n'
+        '    with open(os.environ["TANUKI_SCENARIOS"],'
+        ' encoding="utf-8") as f:\n'
+        '        cb = (json.load(f).get("defaults")'
+        ' or dict()).get("contribute_back") or dict()\n'
+        'except (OSError, ValueError):\n'
+        '    cb = dict()\n'
+        f'if not cb.get("{other}"):\n'
+        '    print("warning: contribute_back is half-configured — '
+        f'contribute_back.{other} is unset; the block is both-or-neither '
+        f'(spec-den-distill section 2) — set contribute_back.{other} '
+        'to complete it")\n'
+        'root = os.environ.get("TANUKI_ROOT")'
+        ' or os.path.expanduser("~/.tanuki")\n'
+        'try:\n'
+        '    with open(os.path.join(root, "config.json"),'
+        ' encoding="utf-8") as f:\n'
+        '        g = json.load(f)\n'
+        'except (OSError, ValueError):\n'
+        '    g = dict()\n'
+        'if isinstance(g, dict) and g.get("contribute_back") is not None:\n'
+        '    print("warning: a contribute_back block exists in '
+        '~/.tanuki/config.json but is IGNORED — contribute_back is resolved '
+        'per-target only (issue #241 / F198); it is likely a leftover from '
+        'another session")\n'
+    )
+    return "python3 -c '" + code + "'"
+
+
 # Built-in input catalog (issue #208 / story 1.37; spec table in
 # spec-tanuki-scenario-lifecycle "Host bindings & declared-input
 # configuration"). Tanuki-owned generic keys ONLY — the admission rule: a
 # field enters here only if Tanuki owns its semantics and can validate
 # values with zero target knowledge. `default` is the value rendered when
-# no stored layer binds one (source: "built-in input").
+# no stored layer binds one (source: "built-in input"). Catalog names may
+# be DOTTED PATHS (spec-den-distill §2, issue #306): still typed scalar
+# entries — the dots mirror the `binds` nesting, so `set` assembles the
+# nested storage shape; no nested-object catalog type exists.
 CATALOG = {
     "drive_model": {
         "type": "enum",
@@ -120,6 +171,31 @@ CATALOG = {
         "description": "Parallel scenario fan-out per drive (story 1.21). "
                        "1 = serial (the built-in default). tanuki-drive "
                        "coerces via int()."},
+    # contribute_back as dotted-path scalars (spec-den-distill §2, ruled
+    # 2026-07-27 / issue #306): two typed scalar entries assembling the
+    # nested defaults.contribute_back block — the storage shape every
+    # existing consumer (tanuki-ledger distill) reads unchanged. Per-target
+    # only; the machine-wide config.json never participates (#241 / F198).
+    "contribute_back.path": {
+        "type": "path", "scope": "per-target",
+        "binds": "defaults.contribute_back.path",
+        "doctor": _cb_doctor("path", "isdir",
+                             "is not an existing directory"),
+        "description": "Contribute-back staging directory — the emission "
+                       "workspace accepted lessons land in "
+                       "(spec-den-distill §2). Must be an existing "
+                       "directory; both-or-neither with "
+                       "contribute_back.schema. Per-target only, never "
+                       "machine-wide (issue #241)."},
+    "contribute_back.schema": {
+        "type": "path", "scope": "per-target",
+        "binds": "defaults.contribute_back.schema",
+        "doctor": _cb_doctor("schema", "isfile",
+                             "does not resolve to a file"),
+        "description": "Contribute-back intake template the hub declares "
+                       "(spec-den-distill §2). Must resolve to a file; "
+                       "both-or-neither with contribute_back.path. "
+                       "Per-target only, never machine-wide (issue #241)."},
 }
 
 
@@ -320,12 +396,18 @@ def effective(target, data, decl):
         # Catalog entries (and any declaration carrying one) render their
         # shipped default when no stored layer binds a value (#208).
         value, source = decl["default"], "built-in input"
-    key = binds.split(".")[-1]
-    if binds.startswith("defaults.") and key in BUILTIN_DEFAULTS:
-        value, source = BUILTIN_DEFAULTS[key], "built-in"
+    parts = binds.split(".")
+    # Only one-level `defaults.<key>` binds see the built-in and machine-wide
+    # tiers. Deeper defaults binds — the contribute_back leaves (spec-den-
+    # distill §2) — are per-target only: the global tier never participates
+    # (issue #241 / F198), so a machine-wide value can never leak in through
+    # a shared leaf key.
+    top_default = len(parts) == 2 and parts[0] == "defaults"
+    if top_default and parts[1] in BUILTIN_DEFAULTS:
+        value, source = BUILTIN_DEFAULTS[parts[1]], "built-in"
     g = read_json(os.path.join(TANUKI_ROOT, "config.json"), {})
-    if binds.startswith("defaults.") and key in g:
-        value, source = g[key], "~/.tanuki/config.json"
+    if top_default and parts[1] in g:
+        value, source = g[parts[1]], "~/.tanuki/config.json"
     v, found = get_path(data, binds)
     if found:
         value, source = v, "scenarios file"
