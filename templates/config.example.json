@@ -6,6 +6,8 @@
   "max_turns": 40,
   "timeout_s": 900,
   "est_cost_per_scenario_usd": 1.5,
+  "driven_env_passthrough": [],
+  "reach_min_turns": 5,
   "min_recurrence": 3,
   "min_scenarios": 2,
   "compaction_unseen_runs": 3,
