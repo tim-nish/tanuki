@@ -13,8 +13,8 @@ Canonical discussion record: [#310](https://github.com/tim-nish/tanuki/issues/31
 On conflict, the issue wins. Coupled decision with #309 (story 5.8): one
 2026-07-27 ruling (alternative A) covers both.
 
-Ruling: served policy, consulted at
-`product-lab@d261caee84c9e617818b5f92c8757fbb2decf1fa`: "QUEUE.md is itself a
+Ruling: served policy line, consulted 2026-07-27 (verbatim pin held in the
+private triage ledger): "QUEUE.md is itself a
 deferral generator, so it is capped (~10 visible) and RANKED"
 (topics/knowledge-architecture.md:98). The cap bounds presentation, never the
 discharge duty (story 5.8 walks the full file).

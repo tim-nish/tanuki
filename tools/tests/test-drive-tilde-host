@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Fixture for issue #328: a `~`-prefixed path in a multi-binding `hosts` map
+# reached `git clone` unexpanded and every scenario failed at clone + setup —
+# while tanuki-config validates repo-path values THROUGH expanduser, so the
+# config surface accepted what the driver could not clone. Asserts
+# prepare_workspace expands `~` where the value meets `git clone` (covering
+# every caller, including a config-authored hosts-map binding), and that the
+# CLI --host path — an already-shell-expanded absolute path — is unchanged.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+drive="$here/tanuki-drive"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+
+# A controlled HOME so `~` resolves inside the fixture, never the real one.
+export HOME="$tmp/home"
+mkdir -p "$HOME/work"
+
+# The host repo lives at a path only reachable through `~` expansion.
+git init -q "$HOME/work/host" && git -C "$HOME/work/host" config user.email t@e && git -C "$HOME/work/host" config user.name t
+git -C "$HOME/work/host" checkout -qb main
+echo hosted > "$HOME/work/host/h" && git -C "$HOME/work/host" add -A && git -C "$HOME/work/host" commit -qm h
+
+# A throwaway plugin repo (prepare_workspace clones both).
+git init -q "$tmp/src" && git -C "$tmp/src" config user.email t@e && git -C "$tmp/src" config user.name t
+git -C "$tmp/src" checkout -qb main
+echo plugin > "$tmp/src/f" && git -C "$tmp/src" add -A && git -C "$tmp/src" commit -qm p
+
+python3 - "$drive" "$tmp/src" "$tmp/ws" <<'PY' || fail "prepare_workspace tilde expansion"
+import importlib.machinery, importlib.util, os, sys
+loader = importlib.machinery.SourceFileLoader("td", sys.argv[1])
+td = importlib.util.module_from_spec(importlib.util.spec_from_loader("td", loader))
+loader.exec_module(td)
+src, ws = sys.argv[2:4]
+
+# A config-authored `~` value — exactly what hosts[host_binding] hands over —
+# must clone: the value tanuki-config validated is the value the driver uses.
+pc, hc = td.prepare_workspace(ws + "/tilde", src, "~/work/host", [])
+assert open(hc + "/h").read().strip() == "hosted", "tilde host not cloned"
+
+# A `~`-prefixed PLUGIN path gets the same treatment (same invariant: if the
+# config tool expands repo-path, every consumer does).
+pc2, _ = td.prepare_workspace(ws + "/tilde-plugin", "~/work/host", src, [])
+assert open(pc2 + "/h").read().strip() == "hosted", "tilde plugin not cloned"
+
+# The CLI --host path is unchanged: the shell already expanded `~` before
+# argparse saw it, so an absolute path clones exactly as before.
+_, hc3 = td.prepare_workspace(ws + "/abs", src,
+                              os.path.expanduser("~/work/host"), [])
+assert open(hc3 + "/h").read().strip() == "hosted", "absolute host regressed"
+
+# Hostless stays hostless: None must not be expanded into anything.
+_, hc4 = td.prepare_workspace(ws + "/hostless", src, None, [])
+assert os.path.isdir(hc4 + "/.git"), "hostless fabricated workspace regressed"
+assert not os.listdir(ws + "/hostless/host") or os.listdir(
+    ws + "/hostless/host") == [".git"], "hostless workspace must stay empty"
+PY
+pass "tilde hosts-map value clones; absolute --host and hostless unchanged"
+
+echo "all checks passed"
