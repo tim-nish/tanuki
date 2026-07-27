@@ -13,8 +13,8 @@ Canonical discussion record: [#309](https://github.com/tim-nish/tanuki/issues/30
 On conflict, the issue wins. Coupled decision with #310 (story 5.9): one
 2026-07-27 ruling (alternative A) covers both.
 
-Ruling: deferrals bind per emitted item — served policy, consulted at
-`product-lab@d261caee84c9e617818b5f92c8757fbb2decf1fa`: "A deferral is
+Ruling: deferrals bind per emitted item — served policy line, consulted
+2026-07-27 (verbatim pin held in the private triage ledger): "A deferral is
 legitimate only if the deferred work receives its tracking artifact
 (story/issue …) in the same sitting … a machine-generated gap list is a
 deferral generator that needs the rule to bind per emitted item"

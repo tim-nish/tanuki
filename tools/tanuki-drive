@@ -430,6 +430,14 @@ def prepare_workspace(ws, plugin_repo, host_repo, host_setup, plugin_ref=None):
     A self-contained plugin has no host — pass None and the scenario runs in a
     fabricated empty workspace (git-init'd so the isolation/pollution check
     still works), which is still never the user's real checkout."""
+    # `~`-prefixed repo paths (issue #328): tanuki-config validates repo-path
+    # values THROUGH expanduser, so a config-authored `~/...` — e.g. a
+    # multi-binding `hosts` map value (story 1.30) — is legitimate input.
+    # Expand here, where the value meets `git clone`, so every caller agrees
+    # with the config surface (the CLI --host path is unchanged: the shell
+    # already expanded it before argparse saw it).
+    plugin_repo = os.path.expanduser(plugin_repo) if plugin_repo else plugin_repo
+    host_repo = os.path.expanduser(host_repo) if host_repo else host_repo
     os.makedirs(ws, exist_ok=True)
     clones = {}
     for name, src in (("plugin", plugin_repo), ("host", host_repo)):
