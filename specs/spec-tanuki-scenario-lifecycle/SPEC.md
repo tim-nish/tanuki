@@ -576,10 +576,18 @@ folded here so the spec is self-contained; the issues carry the full design:
   if Tanuki owns its semantics and can validate values with zero target
   knowledge; growing the catalog means amending this table first.
 
-  | catalog field (v1)  | type | values                | binds                    |
-  |---------------------|------|-----------------------|--------------------------|
-  | `drive_model`       | enum | cheap tiers only      | `loop.drive_model`       |
-  | `drive_concurrency` | enum | `1`, `2`, `4`, `8`    | `loop.drive_concurrency` |
+  | catalog field (v1)       | type | values                | binds                             |
+  |--------------------------|------|-----------------------|-----------------------------------|
+  | `drive_model`            | enum | cheap tiers only      | `loop.drive_model`                |
+  | `drive_concurrency`      | enum | `1`, `2`, `4`, `8`    | `loop.drive_concurrency`          |
+  | `contribute_back.path`   | path | an existing directory | `defaults.contribute_back.path`   |
+  | `contribute_back.schema` | path | resolves to a file    | `defaults.contribute_back.schema` |
+
+  The `contribute_back.*` rows (added 2026-07-27 — issue #306) are
+  **dotted-path scalars** per spec-den-distill §2: two typed scalar
+  entries, each with its own doctor, assembling the nested
+  `defaults.contribute_back` storage block both-or-neither; no
+  nested-object catalog type is introduced.
 - **A one-shot per-run override never touches canonical state.** It expires
   after exactly one drive, the manifest records the effective resolved
   inputs, an active override renders loudly, and the run is excluded from

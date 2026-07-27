@@ -33,6 +33,9 @@ import json, sys
 d = json.load(sys.stdin)
 by = {f["field"]: f for f in d["declared"]}
 assert "drive_model" in by and "drive_concurrency" in by, sorted(by)
+# Story 5.11 / issue #306: contribute_back enters as dotted-path scalars.
+assert "contribute_back.path" in by and "contribute_back.schema" in by, \
+    sorted(by)
 assert by["drive_model"]["declaration"] == "built-in input", by["drive_model"]
 assert by["drive_model"]["value"] == "claude-sonnet-5" \
     and by["drive_model"]["source"] == "built-in input", by["drive_model"]
