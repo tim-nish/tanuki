@@ -245,6 +245,13 @@ below-bar finding straight off the watching list) and `accepted` → `open`
 transition, `set-status` prints a one-line notice naming the skipped state;
 it never rejects.
 
+A **canonical** transition stays **silent** — reaffirmed by the 2026-07-27 owner
+ruling (triage of issue #307) against a proposal to warn at
+`set-status --status accepted` that a hand-ingested finding cannot reach
+`compact`. That warning belongs to `status`, not to this transition; see
+`specs/spec-tanuki-scenario-lifecycle/SPEC.md` §"Absence verification is
+THREE-valued".
+
 **Priority** is deterministic display logic, not judgment: P1 = chronic
 (recurrence ≥3) or cross-scenario; P2 = recurrence 2 or kind `gap`; P3 =
 the rest.

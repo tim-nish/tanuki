@@ -430,6 +430,34 @@ search enters selection):**
   stayed absent but has not yet reached the threshold. The distinction is
   carried in the surfaces that report compaction, in a form a programmatic
   caller can consume — not prose alone.
+- **The dead end is named before compaction, and `status` is where (ADDED
+  2026-07-27, owner ruling, triage of issue #307).** A finding scoped to a real
+  scenario cannot reach `compact` through the hand-ingest lifecycle at all:
+  verification by absence requires a `tanuki-drive` re-verification, and
+  hand-ingest never advances it. An operator walking the documented path
+  (`ingest → upsert → promote → accept → compact`) must not first learn this
+  *from `compact` itself*, at the end of the walk — by then the walk is the
+  thing that failed.
+
+  The **earliest required surface is `status`**: every ACCEPTED row whose
+  verdict is `cannot-determine` carries the verdict on the row and names the
+  resolving act beneath it, as one runnable command. `status` is the surface an
+  operator reads to ask "where does this stand", so a warning placed there is
+  read where the question is asked (story 5.2). Surfaces *earlier* in the
+  lifecycle — `upsert-finding`, `promote` — **may** carry it and are not
+  required to; no other surface is obliged to repeat it.
+
+  **The canonical-transition silence rule is NOT relaxed** (`docs/tanuki-spec.md`
+  §"Finding lifecycle"; spec decision 2026-07-17, story 1.5 / issue #67 / F63).
+  `set-status` stays silent on a canonical transition, including
+  `open → accepted`; the warning does not live there. This was attempted once —
+  it tripped `tools/tests/test-ledger-lifecycle-notice` and was reverted — and
+  the ruling records that the collision is resolved in the test's favour, so it
+  is not attempted again.
+
+  Scope: the requirement binds `cannot-determine` findings only. A finding that
+  has really been driven and sits below the threshold is `absent-with-evidence`
+  and is already reported as such; `status` is not obliged to warn about it.
 
 **Consequences / invariants.**
 - `quota_met` can no longer be false while unexplored scenarios exist and
