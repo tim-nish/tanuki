@@ -1,5 +1,13 @@
 # Spec: doc/policy alignment fixes — publication boundary and internal consistency
 
+Status: **COMPLETED, superseded — non-normative** (marked 2026-07-27, triage
+of issue #346). This file is a stored audit *report* from 2026-07-16, kept as
+a record: its fixes landed in the files it names (e.g. the write-rule and
+label contract now live in `docs/tanuki-spec.md`; the before/after quotations
+below are historical, not current text). Nothing here governs behavior — for
+current contracts read the target files themselves and `docs/README.md`'s
+normativity map. Original header follows.
+
 Status: PROPOSED 2026-07-16 (alignment review of every tracked spec/doc against
 the operator's recorded policy; produced on the operator's order). Touches
 `README.md`, `docs/tanuki-spec.md`, `specs/spec-host-snapshot/SPEC.md`,
