@@ -268,6 +268,11 @@ one.
 
 ## 2. Morning gate (attended — invariant in every phase)
 
+Contract: `${CLAUDE_PLUGIN_ROOT}/specs/spec-tanuki-loop/SPEC.md` §"Morning
+gate". The passages below restate its promises for the operator's
+walk; **on any conflict the spec wins and this file is the defect**
+(docs/README.md "Derived-surface rules", ruled 2026-07-27 / #343).
+
 **Every `main` in this section is a placeholder** (F100/F103): the base
 branch's real name is `init`'s labeled `base` field (it may be `master` or
 anything else) — take `base`, `base_sha`, and `integration_branch` from
@@ -298,7 +303,8 @@ Do not end at "here is what ran." Present, for one review:
 — take them from there rather than hunting the run dir.
 
 **Every queue entry is discharged before the run closes (ADDED 2026-07-27,
-triage of #309).** The morning review queue is a deferral generator, so the
+triage of #309/#310; owning text: SPEC.md §"Morning gate", queue-discharge
+paragraph).** The morning review queue is a deferral generator, so the
 tracking-artifact rule binds **per emitted item**: walk every `queue.md` entry
 and record a disposition beside it, and do not complete the gate while any
 entry lacks one. The walk is attended — the tool presents, records, and
@@ -486,6 +492,11 @@ above) — **the loop never merges to `main` itself**:
    `.gitignore` entry prevents both the tracked and the untracked case.
 
 ### PR delivery (the default gate — `"gate": "pr"`)
+
+Contract: `${CLAUDE_PLUGIN_ROOT}/specs/spec-tanuki-loop/SPEC.md` §"PR
+delivery" (gate-pr idempotence, draft/ready default, the settlement
+enumeration `landed|pending|declined|unknown`, cleanup-follows-proof); on
+conflict the spec wins.
 
 **This is the default delivery (triage of #262/#263): the loop never merges to
 `main`, so the merge-first steps 2–4 above are removed and PR delivery replaces

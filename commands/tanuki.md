@@ -7,7 +7,9 @@ never auto-update specs. Contract: `${CLAUDE_PLUGIN_ROOT}/docs/tanuki-spec.md`.
 Every `tanuki-*` tool named below is the executable under
 `${CLAUDE_PLUGIN_ROOT}/tools/` (not on PATH — invoke by full path).
 
-**Target resolution** (this command and /tanuki-loop, fixed order): an
+**Target resolution** (this command and /tanuki-loop, fixed order; owning
+text: `${CLAUDE_PLUGIN_ROOT}/specs/spec-tanuki-scenario-lifecycle/SPEC.md`
+target-resolution ladder — on conflict the spec wins): an
 explicit `<target>` argument always wins (the contract for scripts and
 headless runs) → else the cwd's registered target
 (`tanuki-scheduler resolve --cwd $PWD` walks parent dirs over
@@ -164,7 +166,8 @@ Argument handling ($ARGUMENTS):
 ## Init (`/tanuki init` — the normal onboarding flow)
 
 Run from inside the plugin repo (contract:
-`${CLAUDE_PLUGIN_ROOT}/specs/spec-tanuki-scenario-lifecycle/SPEC.md`):
+`${CLAUDE_PLUGIN_ROOT}/specs/spec-tanuki-scenario-lifecycle/SPEC.md` §"Init"
+— steps restated here for the walk; on conflict the spec wins):
 1. Identify the repo (`git rev-parse --show-toplevel`); propose its directory
    name as the target slug; confirm with the user.
 2. Register it: `tanuki-scheduler --target <slug> register --repo <root>` —
@@ -204,7 +207,9 @@ unexplored pool, or on demand (same plan gate).
 
 ## Views (`/tanuki [target] view [name]` — the read-only surface)
 
-Contract: `${CLAUDE_PLUGIN_ROOT}/specs/spec-tanuki-view/SPEC.md`. The
+Contract: `${CLAUDE_PLUGIN_ROOT}/specs/spec-tanuki-view/SPEC.md` (catalog =
+D2, no-silent-nothing = D3, render-don't-compute = D4 — restated below; on
+conflict the spec wins). The
 principle: **every read-only view is reachable from one option-free command;
 the tools that compute the views remain the fully-optioned machine
 substrate.** This surface **reads and renders; it never computes** what a
