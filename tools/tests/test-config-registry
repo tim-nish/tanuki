@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# Config-key registry parity (story 5.16 / issue #340). The table in
+# docs/tanuki-spec.md "Configuration" is the canonical key registry for the
+# config chain (~/.tanuki/config.json + per-target defaults). This guard
+# fails when code grows a key the registry lacks, so the table cannot lag
+# the code again.
+#
+# Scope (stated per AC3): scenario-file "loop"-block keys (drive_model,
+# drive_concurrency, ... — a different file's contract) and non-defaults
+# CATALOG binds (e.g. `host`) are OUT of this registry's domain and are not
+# asserted here. The reverse direction (every row must have a built-in
+# default) is deliberately not enforced: rows like `policy_source` document
+# chain keys with no default.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+root="$(cd "$here/.." && pwd)"
+
+python3 - "$root" <<'PY' || fail "config-key registry parity"
+import ast, json, os, re, sys
+
+root = sys.argv[1]
+
+# --- registry rows from the docs table --------------------------------------
+spec = open(os.path.join(root, "docs", "tanuki-spec.md"),
+            encoding="utf-8").read()
+rows = set(re.findall(r"^\| `([a-z_]+)` \|", spec, re.M))
+if not rows:
+    print("no registry rows parsed from docs/tanuki-spec.md", file=sys.stderr)
+    sys.exit(1)
+
+# --- code keys: CONFIG_DEFAULTS / BUILTIN_DEFAULTS dict literals ------------
+def dict_keys(tool, names):
+    path = os.path.join(root, "tools", tool)
+    tree = ast.parse(open(path, encoding="utf-8").read())
+    out = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id in names
+                        for t in node.targets)
+                and isinstance(node.value, ast.Dict)):
+            for k in node.value.keys:
+                if isinstance(k, ast.Constant) and isinstance(k.value, str):
+                    out.add(k.value)
+    return out
+
+code_keys = {}
+for tool in ("tanuki-drive", "tanuki-ledger", "tanuki-scheduler",
+             "tanuki-loop", "tanuki-config"):
+    ks = dict_keys(tool, {"CONFIG_DEFAULTS", "BUILTIN_DEFAULTS"})
+    if ks:
+        code_keys[tool] = ks
+
+# --- CATALOG entries binding into defaults.* --------------------------------
+cfg_src = open(os.path.join(root, "tools", "tanuki-config"),
+               encoding="utf-8").read()
+catalog_defaults = set()
+for m in re.finditer(r'"binds":\s*"defaults\.([a-z_]+)', cfg_src):
+    catalog_defaults.add(m.group(1))
+
+# --- template keys ----------------------------------------------------------
+tmpl = json.load(open(os.path.join(root, "templates", "config.example.json"),
+                      encoding="utf-8"))
+tmpl_keys = {k for k in tmpl if not k.startswith("_")}
+
+failures = []
+for tool, ks in sorted(code_keys.items()):
+    missing = sorted(ks - rows)
+    if missing:
+        failures.append(f"{tool}: keys without a registry row: {missing}")
+missing = sorted(catalog_defaults - rows)
+if missing:
+    failures.append(f"tanuki-config CATALOG defaults.* without a registry "
+                    f"row: {missing}")
+missing = sorted(tmpl_keys - rows)
+if missing:
+    failures.append(f"templates/config.example.json keys without a registry "
+                    f"row: {missing}")
+
+if failures:
+    print("\n".join(failures), file=sys.stderr)
+    sys.exit(1)
+PY
+pass "code keys, CATALOG defaults.* binds, and template keys all have registry rows"

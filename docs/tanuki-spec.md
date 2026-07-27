@@ -77,9 +77,15 @@ overrides it; CLI flags override both. Built-in defaults apply when no file
 exists — Tanuki runs with zero configuration.
 
 This table is the **canonical key registry** (ruled 2026-07-27, issue #340):
-every key in any tool's `CONFIG_DEFAULTS` or the `tanuki-config` CATALOG has
-a row here, and the parity check (story 5.16) enforces it. A key added in
-code without a row is a defect.
+its domain is the config chain above (`~/.tanuki/config.json` and the
+per-target `defaults` block). Every key in any tool's `CONFIG_DEFAULTS`, in
+`tanuki-config`'s `BUILTIN_DEFAULTS`, or bound by a `tanuki-config` CATALOG
+entry into `defaults.*` has a row here; `tools/tests/test-config-registry`
+enforces it, and a key added in code without a row is a defect. Scenario-file
+`"loop"`-block keys (e.g. `drive_model`, `drive_concurrency` — a different
+file's contract, spec-tanuki-loop) are outside this registry. A row without
+a built-in default (e.g. `policy_source`) is legal — the registry documents
+the chain, not only the defaults.
 
 | key | default | used by | meaning |
 |---|---|---|---|
@@ -89,7 +95,6 @@ code without a row is a defect.
 | `max_turns` | `40` | drive | per-scenario turn cap (scenario `max_turns` overrides) |
 | `timeout_s` | `900` | drive | per-scenario wall-clock cap |
 | `est_cost_per_scenario_usd` | `1.5` | drive `--estimate` | fallback when no run history exists |
-| `drive_concurrency` | `1` | drive | parallel scenario fan-out per drive (story 1.21); `1` = serial; coerced via `int()` |
 | `driven_env_passthrough` | `[]` | drive | env-var names deliberately admitted into the driven session's otherwise-scrubbed environment (story 5.1 / #300); empty by default |
 | `reach_min_turns` | `5` | drive | turns below which an execution with no declared probe is judged not to have entered the plugin flow (story 5.3 / #299) |
 | `min_recurrence` | `3` | ledger promote | chronic threshold |
@@ -101,6 +106,7 @@ code without a row is a defect.
 | `low_yield_threshold` | `0` | scheduler | actionable findings at or below which a run counts as low-yield |
 | `brief_max_proposals` | `10` | command (consolidate) | ranked-proposal cap in the brief |
 | `issue_label_prefix` | `tanuki` | command (decide) | label namespace on filed issues: one kind label `<prefix>:<kind>` |
+| `contribute_back` | unset | ledger distill (via per-target `defaults` only) | opt-in `{path, schema}` block naming where accepted lesson candidates are emitted (spec-den-distill §2); both-or-neither; **per-target only — a machine-wide config.json copy is ignored** (#241 / F198) |
 | `policy_source` | unset | ledger policy-surface → command (consolidate + decide only) | opt-in advisory block `{path, files: [≤4 .md]}`: a local policy checkout read read-only and pinned at the brief/gate; never consulted at ingest/drive/extraction, never blocking (specs/spec-policy-advisory) |
 
 **Plan gate (scenario count + cost).** The user never has to pre-compute a
