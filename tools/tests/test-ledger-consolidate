@@ -135,4 +135,55 @@ d2="$("${M[@]}" consolidate 2>/dev/null)"
 [ "$d1" = "$d2" ] || fail "consolidate output is not deterministic across runs"
 pass "consolidate is deterministic (fixed tokenizer, fixed thresholds)"
 
+# --- typed factual signals (story 5.10 / issue #304, spec D2) -----------------
+# AC1: every group carries evidence_overlap / proposals_conflict / reframes as
+# facts the clustering computed; AC2: no field names or implies the
+# merge/conflict/dependency class; AC3: still read-only.
+N=("$here/tanuki-ledger" --target t3)
+"${N[@]}" init >/dev/null
+
+# F1/F2: contradictory proposals for the same behavior — exclusive opposing
+# tokens (accept vs reject), one shared evidence pointer, and F2's note names
+# F1 (the mechanical trace of a one-way reframing edge).
+"${N[@]}" upsert-finding --title "loop gate should accept path-like targets in slug validation" \
+  --kind gap --evidence "r500/gate-walk#1" >/dev/null
+"${N[@]}" upsert-finding --title "loop gate should reject path-like targets in slug validation" \
+  --kind gap --evidence "r500/gate-walk#1,r500/gate-walk#2" \
+  --note "given F1, this proposal narrows to the loop gate only" >/dev/null
+
+before="$(sha256sum "$root/t3/ledger.json")"
+sout="$("${N[@]}" consolidate 2>/dev/null)"
+after="$(sha256sum "$root/t3/ledger.json")"
+[ "$before" = "$after" ] || fail "consolidate with typed signals changed ledger.json"
+pass "consolidate stays read-only with the typed signals (AC3)"
+
+echo "$sout" | python3 -c '
+import json,sys
+g = json.load(sys.stdin)["candidates"]
+assert len(g) == 1 and g[0]["ids"] == ["F1", "F2"], f"expected one F1/F2 group: {g}"
+grp = g[0]
+# Schema pin doubling as the no-verdict check (AC2): exactly the existing
+# shape plus the three factual signals — no kind/hint/class field can hide.
+assert set(grp) == {"ids", "members", "pairs", "evidence_overlap",
+                    "proposals_conflict", "reframes"}, \
+    f"unexpected group fields: {sorted(grp)}"
+assert grp["evidence_overlap"] == ["r500/gate-walk#1"], grp["evidence_overlap"]
+assert grp["proposals_conflict"] == \
+    [{"pair": ["F1", "F2"], "markers": ["accept vs reject"]}], \
+    grp["proposals_conflict"]
+assert grp["reframes"] == [{"from": "F1", "to": "F2"}], grp["reframes"]
+' || fail "typed factual signals wrong on the contradictory-pair group"
+pass "group carries evidence_overlap / proposals_conflict / reframes as facts (AC1), no verdict field (AC2)"
+
+# Conservative when nothing mechanical fired: the t2 groups (notes-only match,
+# subject+run match) have no shared pointer, no opposing tokens, no id
+# reference — every typed signal must be present and empty, never guessed.
+echo "$aout" | python3 -c '
+import json,sys
+for grp in json.load(sys.stdin)["candidates"]:
+    for k in ("evidence_overlap", "proposals_conflict", "reframes"):
+        assert grp[k] == [], f"expected conservative empty {k}: {grp[k]}"
+' || fail "typed signals not conservatively empty when nothing mechanical fired"
+pass "typed signals stay empty when nothing mechanical indicates them"
+
 echo "ALL PASS"

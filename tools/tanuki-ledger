@@ -830,11 +830,46 @@ def _jaccard(a, b):
     return len(a & b) / len(a | b) if a or b else 0.0
 
 
+# Fixed opposing-directive token pairs for the mechanical contradiction check
+# (spec-tanuki-solve D2 `proposals_conflict`). Deliberately small and fixed,
+# like _STOPWORDS (determinism over IQ): a marker fires only when each side
+# appears EXCLUSIVELY in one member's text — semantic contradiction is not
+# reliably mechanical, so this stays conservative and the decision pass keeps
+# the judgment.
+_OPPOSING_TOKENS = [("accept", "reject"), ("allow", "forbid"),
+                    ("allow", "disallow"), ("add", "remove"),
+                    ("enable", "disable"), ("keep", "remove"),
+                    ("keep", "drop"), ("always", "never"),
+                    ("support", "reject"), ("document", "remove")]
+
+
+def _has_word(tokens, word):
+    """Bare token or its plain plural/3rd-person form — no stemmer (fixed
+    tokenizer, deterministic output)."""
+    return word in tokens or word + "s" in tokens
+
+
+def _conflict_markers(toks_a, toks_b):
+    """Opposing-directive markers between two proposal texts, ordered
+    first-in-a vs second-in-b. Empty when nothing mechanical indicates
+    conflict."""
+    markers = []
+    for x, y in _OPPOSING_TOKENS:
+        for w1, w2 in ((x, y), (y, x)):
+            if (_has_word(toks_a, w1) and _has_word(toks_b, w2)
+                    and not _has_word(toks_a, w2)
+                    and not _has_word(toks_b, w1)):
+                markers.append(f"{w1} vs {w2}")
+    return markers
+
+
 def cmd_consolidate(args, ledger):
     """Read-only candidate grouping over the decision pass's input set.
-    Emits groups + the mechanical reason each pair fired; merge / conflict /
-    dependency classification is judgment and stays with the command layer
-    (spec-tanuki-solve D2: the tool proposes, never decides). Writes nothing."""
+    Emits groups + the mechanical reason each pair fired, plus typed factual
+    signals per group (evidence_overlap / proposals_conflict / reframes —
+    spec-tanuki-solve D2); merge / conflict / dependency classification is
+    judgment and stays with the command layer (D2: the tool proposes, never
+    decides — no field names a class). Writes nothing."""
     statuses = [s.strip() for s in args.status.split(",") if s.strip()]
     bad = [s for s in statuses if s not in STATUSES]
     if bad:
@@ -853,6 +888,13 @@ def cmd_consolidate(args, ledger):
             for f in cands}
     scen = {f["id"]: set(f.get("scenarios", [])) for f in cands}
     runs = {f["id"]: _run_ids(f) for f in cands}
+    evid = {f["id"]: set(f.get("evidence", []) or []) for f in cands}
+    # Finding ids a finding's own text names (e.g. "given F63, ..."): the
+    # mechanical trace of a one-way reframing edge (spec-tanuki-solve D2
+    # `reframes` — the named finding recontextualizes the naming one).
+    refs = {f["id"]: set(re.findall(r"\bF\d+\b",
+                                    f["title"] + " " + _notes_text(f)))
+            for f in cands}
 
     # Drop subject tokens generic within THIS candidate set (e.g. the tool's
     # own name appearing in half the titles) — deterministic and self-scaling.
@@ -929,6 +971,22 @@ def cmd_consolidate(args, ledger):
             if a in members and b in members:
                 pair_signals.append(
                     {"pair": [a, b], "signals": sigs})
+        # Typed factual signals (spec-tanuki-solve D2, ADDED 2026-07-27):
+        # facts the clustering computed, never a class verdict — the
+        # merge/conflict/dependency reading stays the decision pass's.
+        evidence_overlap = sorted(
+            {e for i, a in enumerate(members) for b in members[i + 1:]
+             for e in evid[a] & evid[b]})
+        proposals_conflict = []
+        for i, a in enumerate(members):
+            for b in members[i + 1:]:
+                markers = _conflict_markers(full[a], full[b])
+                if markers:
+                    proposals_conflict.append(
+                        {"pair": [a, b], "markers": markers})
+        reframes = [{"from": ref, "to": a}
+                    for a in members for ref in sorted(refs[a])
+                    if ref in members and ref != a]
         out.append({
             "ids": members,
             "members": [{"id": i, "title": by_id[i]["title"],
@@ -936,6 +994,9 @@ def cmd_consolidate(args, ledger):
                          "status": by_id[i]["status"],
                          "priority": priority(by_id[i])} for i in members],
             "pairs": pair_signals,
+            "evidence_overlap": evidence_overlap,
+            "proposals_conflict": proposals_conflict,
+            "reframes": reframes,
         })
     out.sort(key=lambda g: (-len(g["ids"]), int(g["ids"][0][1:])))
 
@@ -2388,7 +2449,13 @@ def main():
             "corroborated by weak similarity (>= min/3), a shared scenario, "
             "or a shared run. Scenario overlap and run overlap NEVER group "
             "alone — one scenario, and one run, legitimately yield many "
-            "unrelated findings. Output groups are CANDIDATES for the "
+            "unrelated findings. Each group also carries typed factual "
+            "signals: evidence_overlap (evidence pointers cited by more than "
+            "one member), proposals_conflict (opposing-directive token "
+            "markers between proposal texts, from a fixed pair list; empty "
+            "when nothing mechanical indicates conflict), and reframes "
+            "(one-way edges where one member's text names another member's "
+            "finding id). Output groups are CANDIDATES for the "
             "command layer's judgment (merge / conflict / dependency / "
             "discard) — this tool never classifies and never writes."))
     sp.add_argument("--status", default="proposed,open",
