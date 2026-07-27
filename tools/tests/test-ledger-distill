@@ -5,7 +5,9 @@
 # not yet contributed; emission renders the configured template mechanically
 # with pinned provenance and lands ONLY inside the staging directory; the
 # `contributed` marker dedupes forever (re-observation bumps recurrence,
-# never re-emits); unset config keeps the ledger byte-identical.
+# never re-emits); unset config keeps the ledger byte-identical. Story 5.12
+# (#298): the accept also appends the journey entry — the write allowlist is
+# exactly the staging directory PLUS the emitting repo's docs/journey.md.
 set -euo pipefail
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
@@ -14,7 +16,12 @@ pass() { echo "ok: $1"; }
 here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 export TANUKI_ROOT="$tmp/root"
-L=("$here/tanuki-ledger" --target t)
+# The tool resolves ITS OWN repo root for the journey append (story 5.12) —
+# run a COPY inside a throwaway tree, the test-publication-boundary pattern,
+# so docs/journey.md lands there and never in this checkout.
+mkdir -p "$tmp/repo/tools"
+cp "$here/tanuki-ledger" "$tmp/repo/tools/tanuki-ledger"
+L=("$tmp/repo/tools/tanuki-ledger" --target t)
 
 mkdir -p "$TANUKI_ROOT/scenarios" "$TANUKI_ROOT/t/events/r1" \
          "$TANUKI_ROOT/t/events/r2" "$tmp/staging"
@@ -109,7 +116,11 @@ import json, sys; assert json.load(sys.stdin)["ok"] is True
 pass "doctor: each defect named; valid block passes"
 
 # --- emit: schema-conforming file, pinned provenance, staging-dir only ---------
-"${L[@]}" distill --id F1 > /dev/null || fail "emitting a bar-clearing candidate must work"
+# Story 5.12: --episode is required to emit — the journey entry carries it.
+"${L[@]}" distill --id F1 2>"$tmp/err" && fail "emit without --episode must be refused" || true
+grep -q "episode is required" "$tmp/err" || fail "the missing episode must be named"
+"${L[@]}" distill --id F1 --episode "Retries masked the real failure in 3 runs" \
+  > /dev/null || fail "emitting a bar-clearing candidate must work"
 f="$tmp/staging/tanuki-t-f1.md"
 [ -f "$f" ] || fail "exactly one staging file must land: $(ls "$tmp/staging")"
 grep -q "^slug: tanuki-t-f1$" "$f" || fail "slug token must render"
@@ -120,9 +131,22 @@ grep -q "Chronic lesson about retries. Retries mask the real failure." "$f" \
 grep -q "Provenance: finding F1 (kind friction); recurrence 3; scenarios s1; evidence r1/s1#1" "$f" \
   || fail "provenance must pin ids, counts, and pointers"
 [ "$(ls "$tmp/staging" | wc -l)" = 1 ] || fail "exactly ONE file per accept"
+# The write allowlist (spec-den-distill §Acceptance, amended 2026-07-27 /
+# #298): exactly the staging directory PLUS the emitting repo's
+# docs/journey.md — and nothing else.
+j="$tmp/repo/docs/journey.md"
 find "$tmp" -name "*.md" -newer "$template" | grep -v "^$tmp/staging/" \
-  | grep -q . && fail "no write may land outside the staging directory" || true
-pass "emit: schema-conforming, provenance-pinned, staging-directory-only"
+  | grep -v "^$j\$" \
+  | grep -q . && fail "no write may land outside staging + docs/journey.md" || true
+pass "emit: schema-conforming, provenance-pinned, allowlist = staging + journey"
+
+# --- story 5.12: the accept appended the journey entry -------------------------
+[ -f "$j" ] || fail "the journey doc must exist in the EMITTING repo after accept"
+grep -qi "append-only" "$j" || fail "the journey header must state the append-only rule"
+grep -qE "^- [0-9]{4}-[0-9]{2}-[0-9]{2} — Retries masked the real failure in 3 runs \(F1; lesson: tanuki-t-f1\)$" "$j" \
+  || fail "the entry must carry date, episode, finding id, and lesson slug: $(cat "$j")"
+[ "$(grep -c "^- " "$j")" = 1 ] || fail "exactly ONE journey entry per accept"
+pass "story 5.12: journey entry appended with date, episode, ids, slug"
 
 # --- dedupe: contributed marker; recurrence bumps but never re-emits -----------
 python3 -c '
@@ -149,8 +173,8 @@ pass "dedupe: recurrence bumps, emission never repeats, F1 gone from candidates"
 # --- guardrails: below-bar refused; slug sanitized; no clobber -----------------
 "${L[@]}" distill --id F2 2>"$tmp/err" && fail "below-bar emit must be refused" || true
 grep -q "promotion bar" "$tmp/err" || fail "the bar must be named"
-"${L[@]}" distill --id F3 --slug '../escape' > /dev/null \
-  || fail "a hostile slug must sanitize, not fail the whole emit"
+"${L[@]}" distill --id F3 --slug '../escape' --episode "Seen across s1 and s2" \
+  > /dev/null || fail "a hostile slug must sanitize, not fail the whole emit"
 [ -f "$tmp/staging/escape.md" ] || fail "sanitized slug must land in staging"
 [ ! -e "$tmp/escape.md" ] || fail "the allowlist must hold against ../"
 
@@ -180,7 +204,8 @@ led["findings"].append({"id": "F9", "title": "another", "kind": "gap",
     "last_seen_run": "r1"})
 json.dump(led, open(p, "w"))
 '
-"${L[@]}" distill --id F9 --slug dupe 2>"$tmp/err" && fail "clobber must be refused" || true
+"${L[@]}" distill --id F9 --slug dupe --episode "dupe attempt" 2>"$tmp/err" \
+  && fail "clobber must be refused" || true
 grep -q "already exists" "$tmp/err" || fail "the no-clobber rule must be named"
 pass "guardrails: bar enforced, slug allowlist holds, hub files never clobbered"
 

@@ -706,10 +706,16 @@ grounded against `tanuki-ledger --target <t> distill --list` (the
 deterministic bar-clearing, not-yet-contributed enumeration — an item
 outside that list is not emittable and says so).
 
-- **accept** → run `tanuki-ledger --target <t> distill --id <F>` right then
-  — exactly parallel to "accept → optionally file the issue right then".
-  The RECEIPT is the tool's own output line (`contributed F… -> <path>`) —
-  relay it verbatim, never a re-derived path.
+- **accept** → author the **episode** — the concrete fact behind the lesson
+  as ONE atomic fact (an event, number, quote, or result, drawn from the
+  brief/evidence, never a paraphrase of the lesson) — then run
+  `tanuki-ledger --target <t> distill --id <F> --episode "…"` right then
+  (add `--issues "#…"` when issues are tied to it) — exactly parallel to
+  "accept → optionally file the issue right then". The same accept appends
+  the journey entry to this repo's `docs/journey.md` (story 5.12 /
+  spec-den-distill §4). The RECEIPT is the tool's own output lines
+  (`contributed F… -> <path>` and `journey: appended <path> …`) — relay
+  both verbatim, never a re-derived path.
 - **dismiss** → `set-status --id … --status dismissed` (deduped-against, and
   `distill` will never emit it).
 - **defer** → stays as-is; `status` keeps it visible until decided.
