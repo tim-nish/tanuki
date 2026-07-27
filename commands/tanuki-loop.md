@@ -81,7 +81,7 @@ live in the scenarios file's `"loop"` block, stored once, never retyped:
    this step — but when the repo lacks `.gitignore` coverage for regenerable
    test output, a Phase 1 run may still want `doctor` for its
    test-cmd-artifacts check alone (F211): it predicts the gate's
-   `git worktree remove` refusal (morning-gate step 7) before the run starts
+   `git worktree remove` refusal (morning-gate step 5) before the run starts
    rather than at its last step. The check now covers both directions
    (F111/#242): untracked residue test_cmd sheds (`artifacts`), and build
    output regenerated over a file already **tracked** on the base
@@ -204,10 +204,10 @@ breakers, records the start SHA, and snapshots the ledger (exit 3 +
    `status` and the dashboard). A run that must commit a legitimate binary
    declares it deliberately — `iter-verify --allow-artifact <path>` (per
    path, repeatable); the override is recorded in the audit trail, and the
-   guard never stands down silently. The gate stays belt-and-suspenders:
-   **`gate-push` still refuses** to push a merge that adds artifact paths
-   (`--allow-artifacts` overrides deliberately), so nothing regenerable
-   reaches the remote even past an overridden check (e).
+   guard never stands down silently. The delivery path stays
+   belt-and-suspenders: `gate-push` is retired and refuses outright (it can
+   never land loop output on the base), so the guard here is the last check
+   before `gate-pr` pushes the integration branch (e).
 7. Append the iteration to the audit artifact (start/end SHA, findings
    bumped/new, items implemented, items deferred). Loop back to step 1.
 
@@ -331,8 +331,8 @@ iterations write only the `queue.md` line (`defer` is unchanged — no issue,
 story, or other outward artifact at emission time); the attended gate is the
 same-sitting moment where each deferred item receives its tracking artifact.
 
-> **Two-outcomes-only delivery (triage of #262/#263 — supersedes the
-> merge-first steps below).** The loop **never merges to `main`**, attended or
+> **Two-outcomes-only delivery (triage of #262/#263 — the former
+> merge-first steps are removed from this walk).** The loop **never merges to `main`**, attended or
 > not. Delivery is exactly one of two outcomes, and **PR is the default**:
 > - **PR-from-branch (default, `"gate": "pr"`)** — after final tests pass, run
 >   `tanuki-loop gate-pr`; it opens one ready-for-review PR `integration →
@@ -349,7 +349,7 @@ same-sitting moment where each deferred item receives its tracking artifact.
 > `status.completion` / `finish.completion` — `normal:true` with
 > `state:"delivered"` (or `"awaiting-delivery"` until you run `gate-pr`) on a
 > normal close, `normal:false` on an aborted/errored one. The absence of a
-> terminal artifact therefore never reads as a silent success. Steps 5–7 below
+> terminal artifact therefore never reads as a silent success. Steps 3–5 below
 > (materialize issues, cleanup) still apply **after** the human merges.
 
 Then, behind the operator's single approval, deliver (per the two-outcomes note
@@ -361,40 +361,15 @@ above) — **the loop never merges to `main` itself**:
    down, and gate steps still work on a finished run — `test` echoes a
    `run_finished` block naming the close reason, and appends its result to the
    closed run's audit. That block is a confirmation, not a warning.
-2. **Merge `integration → main`** — a plain `git merge --no-ff
-   <integration-branch>` on `main` (there is no `tanuki-loop merge` subcommand;
-   this one gate step is a hand-run git operation).
-   **If the merge conflicts** — the base moved under the run and a hunk
-   overlaps — this hand-run step has no tool recovery, unlike the others: abort
-   with `git merge --abort` to return to a clean base, reconcile the divergence
-   (rebase or re-run the loop on the fresh base), or resolve the conflict by
-   hand and `git commit` the merge. Do **not** push a half-merged tree; the
-   later `gate-push` divergence guard is not a substitute for a clean merge
-   here (F152).
-   **Check out the base branch first, and use its real name.** The merge runs
-   in the operator's normal checkout and lands on whatever branch is currently
-   checked out — confirm where you are with `git branch --show-current`, then
-   `git checkout <base>` before merging, or the batch lands somewhere
-   unintended (F137). The base is **not** assumed to be `main`: take the
-   actual name from `init`'s `base` / `base_upstream` output (it may be
-   `master` or anything else); the `main` in these snippets is a placeholder
-   (F100, F103).
-   **Look at `status`'s `warning` field before approving.** If the loop's
-   commits swept build artifacts (`__pycache__`, `*.pyc`) onto the integration
-   branch, `iter-verify` recorded them and `status` names them — they reach the
-   remote at step 4 unless removed now (F102). A non-null value looks like
-   `"warning": "build artifacts committed: tools/__pycache__/ (2 files) — see
-   iter 3"` (an example of the shape, not literal output); `null` means nothing
-   was flagged (F106). Use `--no-ff` so the batch
-   lands as one reviewable merge commit that `gate-check` can then confirm is
-   reachable; executed by the gate only after approval, never unattended (F12).
-   Being a hand-run git command, the merge itself prints no `tanuki-loop`
-   confirmation (git prints its own merge summary as usual) — `gate-check`
-   succeeding in step 3 **is** the tool-level success signal for the merge
-   (F187, F194).
-3. **Verify** with `tanuki-loop gate-check` (integration HEAD reachable from
-   base).
-   **`gate-check` also reports where you are in this 7-step sequence** — read
+2. **Deliver** — exactly one of the two outcomes (spec §"Two-outcomes-only
+   delivery"): run `tanuki-loop gate-pr` to push the **integration branch
+   only** (never the base, never forced) and open one PR `integration →
+   base` (the default — see "PR delivery" below), or, for a `"gate":
+   "branch"` target, record the branch-only terminal fact and stop. **The
+   loop ends here.** The merge into the base is the human's act — PR
+   approval + merge on the forge, or a manual branch merge — never the
+   loop's.
+   **`gate-check` reports where you are in this delivery sequence** — read
    its `gate_progress` block when you lose your place (a crash-retry, a
    handover, or picking the gate back up hours later). Every step here is
    independently idempotent, so the risk is not damage but *not knowing which
@@ -411,45 +386,30 @@ above) — **the loop never merges to `main` itself**:
    about what this state can prove, not a prediction.
    **On a re-run or crash-retry after the branch was already deleted** (a
    later step, or a prior gate pass, removed the integration branch — see
-   step 7), `gate-check` does not error: it reports `branch_deleted: true`
+   step 5), `gate-check` does not error: it reports `branch_deleted: true`
    with a `note` explaining that a deleted branch is the *success* state at
    this point, not a missing one (F108). Treat that output as a pass and
-   continue — the merge already landed on the base.
-4. **Push the base branch** with `tanuki-loop gate-push` — the first
-   outward-facing step, run **before** any issue is materialized. Until the
-   merge commit exists on the remote, the commit links step 5 stamps onto
-   issues 404 and a local-only `main` diverges the remote for the next
-   workflow's `git pull --ff-only`. `gate-push` fetches first and, if the
-   remote has moved, **refuses rather than force-pushing** (exit 3,
-   `diverged: true`): reconcile the remote in, re-run the final tests, and
-   re-run `gate-push`. It **also refuses when the merged diff adds build
-   artifacts** (exit 3, `build_artifacts: […]`) — regenerable output must not
-   reach the remote, and this is the last mechanical boundary before it does
-   (F102). Remove them (`git rm -r --cached <path>`), add them to
-   `.gitignore`, commit, and re-run; `--allow-artifacts` overrides
-   deliberately. `status`'s `warning` field names these paths before you get
-   here — read it when deciding the merge. Only past a successful push does
-   anything else outward-facing run.
-5. **Materialize** issues — *skip steps 5–6 entirely if no issue tracker is
-   configured (e.g. a hostless target); the merge commit and audit trail are
-   already the record* — **one per resolved problem** (keyed by the lead
+   continue.
+3. **Materialize** issues — **after the human merges, keyed off the merged
+   PR**. Applicability is **declared, never inferred** (spec §"Morning gate",
+   issue #301): the target declares its tracker in the scenarios `loop`
+   block; undeclared is cannot-determine (reported, never silently skipped),
+   and a trackerless target skips steps 3–4, its landed batch already
+   recorded in the merge commit and the audit trail — **one per resolved problem** (keyed by the lead
    ledger finding id, or a `+`-joined set), describing **what landed**, each
    body stamped `tanuki-loop: <run-id>/<problem-key>`. Before creating,
    `tanuki-loop issue-get --key <problem-key>` (and a marker search) returns
    any existing issue; create only the missing ones and record each with
    `tanuki-loop issue-put --key <problem-key> --issue <n>` — a mid-gate death
-   re-runs from here without duplicating. **Steps 5–6 apply only where an issue
-   tracker is configured** (as with the board reconciliation in step 6): for a
-   hostless/trackerless target the landed batch is already recorded in the merge
-   commit and the audit trail, so skip issue materialization entirely rather
-   than inventing a substitute (F15).
-6. **Link** each to the (now pushed) merge commit, **close as completed**,
+   re-runs from here without duplicating. (F15; the declared-applicability rule above governs — hostlessness never
+   implies tracklessness.)
+4. **Link** each to the merged PR's merge commit, **close as completed**,
    reconcile the board to Done (where project-board tooling is configured).
-   *(Skipped along with step 5 when no tracker is configured.)*
-7. Remove the loop worktree (`git worktree remove` — if it refuses with a
+   *(Skipped along with step 3 when no tracker is declared.)*
+5. Remove the loop worktree (`git worktree remove` — if it refuses with a
    modified-file error naming regenerable output, see the note at the end of
    this step). **This worktree removal is the terminal action of the attended
-   gate — once the merge is pushed (step 4) and the worktree is gone, you are
+   gate — once the delivery is settled (`landed`) and the worktree is gone, you are
    done.** **The one rule about `finish` (F136/F149/F151): it is never
    required here, and running it after the merge landed is harmless.** Nothing
    in this workflow invokes it; skipping it loses nothing; running it anyway
@@ -484,7 +444,7 @@ above) — **the loop never merges to `main` itself**:
    breaker and nothing is wrong with the batch: use `git worktree remove
    --force`, or clean the paths first. The durable fix is to stop tracking
    them on the base (`git rm -r --cached <path>` + `.gitignore`), which also
-   removes the `gate-push` artifact refusal for every later run. **Untracked**
+   removes the artifact refusals for every later run. **Untracked**
    regenerable residue triggers the same refusal (F111 residual): `test_cmd`
    sheds files like pytest `__pycache__/` into the worktree without any
    pre-existing commit involved, and `git worktree remove` refuses over those
@@ -499,8 +459,8 @@ enumeration `landed|pending|declined|unknown`, cleanup-follows-proof); on
 conflict the spec wins.
 
 **This is the default delivery (triage of #262/#263): the loop never merges to
-`main`, so the merge-first steps 2–4 above are removed and PR delivery replaces
-them for every target with a forge.** `doctor` validates `gh` availability up
+`main`, so the former merge-first steps are removed — see the two-outcomes
+note above — and PR delivery replaces them for every target with a forge.** `doctor` validates `gh` availability up
 front. A target with no forge sets `"gate": "branch"` instead (leave the
 integration branch, open no PR — you merge it yourself). The gate:
 
@@ -757,12 +717,14 @@ Per-hunk verdicts (closed set):
 - Questions only in iteration 1 (recorded as run policy); iterations ≥ 2 never
   ask — unanswered judgment defers. A finding is re-fixed up to its attempt
   cap (default 4), then frozen — never a whole-loop stop.
-- `integration → main` runs only after explicit approval, merge-first and
-  idempotent, and is **pushed to the remote before any issue is materialized**
-  (`gate-push`, refusing a diverged remote rather than force-pushing) — a
-  local-only merge leaves dangling issue links and a diverged remote. On a
-  PR-protected target (`"gate": "pr"`) the approval takes the form of PR
-  approval + merge on the forge: the loop ends at delivering one ready-for-review
+- Delivery runs only after explicit approval and is exactly one of two
+  outcomes (spec §"Two-outcomes-only delivery"): the default is one
+  ready-for-review PR `integration → base` via `gate-pr`, a `"gate":
+  "branch"` target leaves the branch instead, and the loop never merges or
+  pushes the base itself (`gate-push` is retired and refuses). Issues are
+  materialized only **after the human merges**, keyed off the merged PR — a
+  pre-merge issue would carry links that 404. The approval takes the form of PR
+  approval + merge on the forge: the loop ends at delivering the
   PR (`gate-pr` — a review request, never ratification; owner ruling 2026-07-17,
   ready-by-default amendment 2026-07-20; Draft available opt-in),
   it never auto-merges, and settlement is derived by read-only surfaces from
