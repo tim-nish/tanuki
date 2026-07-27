@@ -32,10 +32,28 @@ them deliberately.
 - [`specs/`](../specs/) — one directory per contract
   (`specs/spec-*/SPEC.md`), each the current governing text for its area
   (e.g. `spec-tanuki-loop`, `spec-host-snapshot`, `spec-tanuki-view`).
-- [`docs/tanuki-spec.md`](tanuki-spec.md) — the overall prototype spec:
-  standing constraints, the three-role model, and the public vocabulary
-  (Event / Finding / Proposal). Read this for the whole-system contract; read
-  a `specs/spec-*/SPEC.md` for a specific area.
+- [`docs/tanuki-spec.md`](tanuki-spec.md) — the overall prototype spec,
+  **canonical for exactly: standing constraints, the three-role model, the
+  public vocabulary (Event / Finding / Proposal), and the config-key table**
+  (ruled 2026-07-27, issue #345). Read this for the whole-system contract;
+  read a `specs/spec-*/SPEC.md` for a specific area. Its remaining
+  command-grammar / decision-pass / file-layout prose is a pointer layer
+  being archived (story 5.14) — where it disagrees with a per-topic spec,
+  the per-topic spec wins.
+
+### Derived-surface rules (ruled 2026-07-27 — issues #343, #344, #345)
+
+- **Size ceilings.** `commands/*.md` ≤ ~13k tokens each (chars/4; the
+  2026-07-27 high-water mark, to be reviewed downward after story 5.15's
+  trim); `docs/tanuki-spec.md` ≤ ~8.5k tokens. An over-budget surface is a
+  finding to fix — never silent truncation, never a reason to drop content
+  without a decision.
+- **Restated contracts carry a cite, and the spec wins.** A contract passage
+  restated in a command file names the spec section that owns it; on any
+  conflict between the restatement and the owning spec, **the spec wins and
+  the command file is the defect**. (This refines — not replaces — the
+  command-file-wins rule above, which continues to govern command file vs.
+  README *procedure* text.)
 
 ## 3. Development history — *non-normative*
 
