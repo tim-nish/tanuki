@@ -757,6 +757,19 @@ The loop ends by presenting, for one review:
 - the audit artifact (every auto-decision the loop made in lieu of the human,
   plus per-iteration start/end SHAs and the convergence/breaker reason).
 
+**Every queue entry is discharged before the run closes (ADDED 2026-07-27,
+triage of #309/#310).** The morning review queue is a deferral generator, so
+the tracking-artifact rule binds **per emitted item**: the gate does not
+complete while any `queue.md` entry lacks a disposition — filed as an issue or
+story, executed at the gate, or explicitly marked **no-artifact-needed** with
+a reason recorded beside the entry. Emission-time filing stays forbidden
+(unattended iterations write only `queue.md`, per the no-outward-artifacts
+rule above); the attended gate is the same-sitting moment where each deferred
+item receives its tracking artifact. The queue's *rendering* at the gate is
+**capped (~10 visible) and ranked** by the ledger's computed priority; the
+full file remains the durable record — the cap bounds presentation, never the
+discharge duty.
+
 On the operator's approval the gate delivers via the two-outcomes model above —
 it **never** merges `integration → main` itself (AMENDED 2026-07-21, triage of
 #262/#263; the former local-merge + `gate-push`-onto-base steps are removed):

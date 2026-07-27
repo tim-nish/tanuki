@@ -62,6 +62,15 @@ resolves — before any drive consumes it. Once the declared-input
 configuration surface (#172, stories 1.27–1.29) lands, the block is
 declared/edited there; until then, a doctor-validated hand edit.
 
+That surface has landed; the block enters the catalog as **dotted-path
+scalars** (ADDED 2026-07-27, triage of issue #306): `contribute_back.path`
+and `contribute_back.schema` are two typed scalar catalog entries — path: an
+existing directory; schema: a resolvable template — each with its own doctor,
+the pair guarded both-or-neither by the block doctor above. The nested JSON
+object stays the storage shape, assembled by `tanuki-config`; `set`, `check`
+and `--dry-run` work unchanged because every catalog entry is still a scalar.
+No nested-object catalog type is introduced for a two-leaf block.
+
 **Scope is per-target, never machine-wide (issue #241 / F198).** `contribute_back`
 is resolved **only** from a target's own configuration — its scenarios-file
 `defaults` block, or the per-target declared-input surface once it lands —
@@ -120,6 +129,17 @@ command):
   summary counts contributed items alongside filed issues.
 - Dispositions are written back by the command (`set-status`), never typed
   by the user; deferred candidates stay visible in `status`.
+- **Accept also appends the journey entry (ADDED 2026-07-27, triage of issue
+  #298).** When a lesson candidate is accepted, the same sitting appends one
+  entry to this repo's journey document `docs/journey.md` (append-only, never
+  edited retroactively — entries are harvest pins): **date**, the **concrete
+  episode** written as an atomic fact (event, number, quote, or result),
+  the **finding/issue ids** (F-numbers, #issues), and the **hub lesson slug**
+  the acceptance produced. This is an accepted-item effect in the *emitting*
+  repo — the proposal-only boundary (§1) is untouched; nothing new is written
+  into any consuming side. Backfill of already-promoted lessons arrives as
+  NEEDS-RECORDING tasks from the consumer-side topic↔evidence join, not from
+  this command.
 
 ## Acceptance
 
@@ -128,8 +148,10 @@ command):
   in the emission directory, carrying pins; ledger records `contributed`; a
   later run re-observing the pattern bumps recurrence, emits nothing.
 - A dismissed candidate is never emitted and stays deduped-against.
-- No write ever lands outside the configured emission directory (fixture-
-  asserted allowlist).
+- No write ever lands outside the configured emission directory **or
+  `docs/journey.md`** (fixture-asserted allowlist; the journey doc joined the
+  allowlist with the 2026-07-27 #298 ruling — it is the only non-emission
+  write the accept path may make).
 - The picker's "distill den" walk over a pre-existing ledger behaves
   identically to the in-run pass.
 

@@ -109,7 +109,14 @@ clustering by evidence-pointer overlap, shared scenario family, shared
 subsystem path, and proposal-text similarity — with a reason per candidate
 group. It proposes, never decides: the command layer confirms or discards
 each candidate group by judgment (semantic contradiction is not reliably
-mechanical), and may add groups the clustering missed. `consolidate` reads
+mechanical), and may add groups the clustering missed. Each candidate group
+carries typed, **factual signals** (ADDED 2026-07-27, triage of #304) — e.g.
+`evidence_overlap` (shared evidence pointers), `proposals_conflict`
+(mechanical contradiction markers between proposal texts), `reframes` (a
+one-way reframing edge between members) — facts the clustering computed,
+never a class verdict: no `kind`/`hint` field exists, and the
+merge/conflict/dependency reading remains the decision pass's judgment,
+inferred from the signals at the point of arbitration. `consolidate` reads
 bounded views only (no whole-ledger load beyond the existing bounded-view
 rule) and writes nothing.
 
@@ -120,6 +127,14 @@ arbitration: the branches considered, the chosen branch, and the constituent
 finding ids of the losing branch. This keeps the downstream record
 self-contained (a reader of the single filed issue sees that an alternative
 existed and was rejected) without any downstream tooling awareness.
+
+The loser's ledger entry needs no new vocabulary (CLARIFIED 2026-07-27,
+triage of #305): its `dismissed`-with-reason or absorbed status **plus the
+shared issue URL** *is* the structured pointer to this arbitration record —
+the issue body is the record, by this design. The free-text note convention
+(`superseded by <winner>: <branch>`) is optional color and never
+load-bearing; no `--supersedes`/`--losing-branch` primitive is added, per the
+non-goal "no second status vocabulary".
 
 ### D4 — acceptance test for the incident class
 

@@ -447,6 +447,18 @@ search enters selection):**
   lifecycle — `upsert-finding`, `promote` — **may** carry it and are not
   required to; no other surface is obliged to repeat it.
 
+  **`compact`'s aggregate summary names the act too (ADDED 2026-07-27, triage
+  of issue #330).** The summary line reporting awaiting findings already
+  enumerates the `cannot-determine` ids; it also names their resolving act as
+  **one runnable command** — the union of the set's drivable scenarios,
+  rendered in the same form as the ACCEPTED-row resolving act
+  (`tanuki-drive … --only <scenario-union>`, the reserved `ingest`
+  pseudo-scenario excluded). An aggregate surface may aggregate, but it never
+  reports the same fact more weakly than the per-row surface beneath it: when
+  no member of the set has a drivable scenario, the summary says that instead
+  (the same degenerate branch the per-finding renderer takes), never the
+  generic "drive the scenario(s)" with no command.
+
   **The canonical-transition silence rule is NOT relaxed** (`docs/tanuki-spec.md`
   §"Finding lifecycle"; spec decision 2026-07-17, story 1.5 / issue #67 / F63).
   `set-status` stays silent on a canonical transition, including
