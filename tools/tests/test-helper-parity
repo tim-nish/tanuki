@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# Cross-tool helper parity (story 5.13 / issue #342). The five tools are
+# deliberately standalone zero-dependency scripts (no shared module —
+# specs/spec-tanuki-loop/DECISION-2026-07-27-single-file-tools.md), so shared
+# helpers exist as copies by design. This guard is what makes the copies
+# safe: a fix applied to one copy fails here until it reaches the others.
+#
+# Families are an EXPLICIT list, never name collision alone — cmd_init /
+# cmd_status / main share names across tools and are intentionally
+# tool-specific. Scope note: the parity families are per-tool helper copies;
+# scenario-file "loop"-block keys (e.g. drive_model, a different file's
+# contract) and per-tool CONFIG_DEFAULTS slices are out of scope here.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+mkdir -p "$TANUKI_ROOT/scenarios"
+
+python3 - "$here" <<'PY' || fail "helper parity"
+import ast, os, sys
+import importlib.machinery
+import importlib.util
+
+here = sys.argv[1]
+TOOLS = ["tanuki-config", "tanuki-drive", "tanuki-ledger",
+         "tanuki-loop", "tanuki-scheduler"]
+
+src = {t: open(os.path.join(here, t), encoding="utf-8").read() for t in TOOLS}
+tree = {t: ast.parse(s) for t, s in src.items()}
+
+def fn_source(tool, name, strip_doc=False, strip_name=False):
+    for node in tree[tool].body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            seg = ast.get_source_segment(src[tool], node)
+            if strip_doc or strip_name:
+                mod = ast.parse(seg)
+                fn = mod.body[0]
+                if strip_doc and ast.get_docstring(fn):
+                    fn.body = fn.body[1:]
+                if strip_name:
+                    fn.name = "_"
+                seg = ast.unparse(fn)
+            return seg
+    return None
+
+failures = []
+
+# --- byte-identical copy families ------------------------------------------
+FAMILIES = {
+    "slug_target": TOOLS,
+    "die": TOOLS,
+    "open_scenarios": ["tanuki-drive", "tanuki-loop", "tanuki-scheduler"],
+    # drive's load_config(scenario_file_data=None) is a documented superset
+    # (scenario-defaults overlay, story 1.15) and is exempt from this family.
+    "load_config": ["tanuki-ledger", "tanuki-scheduler"],
+}
+for name, members in FAMILIES.items():
+    bodies = {m: fn_source(m, name) for m in members}
+    missing = [m for m, b in bodies.items() if b is None]
+    if missing:
+        failures.append(f"{name}: missing in {missing}")
+        continue
+    if len(set(bodies.values())) != 1:
+        diff = {m: hash(b) for m, b in bodies.items()}
+        failures.append(f"{name}: copies diverged across {sorted(diff)}")
+
+# --- mirrored pair: identical logic under different names -------------------
+a = fn_source("tanuki-drive", "render_probe", strip_doc=True, strip_name=True)
+b = fn_source("tanuki-loop", "_probe_text", strip_doc=True, strip_name=True)
+if not a or not b:
+    failures.append("probe renderer pair: function missing")
+elif a != b:
+    failures.append("probe renderer pair: render_probe (drive) != "
+                    "_probe_text (loop) after name/docstring stripping")
+
+# --- behavioral parity: import the tools as modules -------------------------
+def load(tool):
+    loader = importlib.machinery.SourceFileLoader(
+        tool.replace("-", "_"), os.path.join(here, tool))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+ledger = load("tanuki-ledger")
+loop = load("tanuki-loop")
+sched = load("tanuki-scheduler")
+
+# priority (ledger, canonical) vs _queue_sort_key rank (loop mirror):
+# P1 -> 1, P2 -> 2, P3 -> 3 over the full decision grid.
+grid = []
+for rec in (1, 2, 3, 4):
+    for nscen in (1, 2):
+        for kind in ("gap", "bug"):
+            grid.append({"id": f"f-{rec}-{nscen}-{kind}", "recurrence": rec,
+                         "scenarios": [f"s{i}" for i in range(nscen)],
+                         "kind": kind})
+rank_of = {"P1": 1, "P2": 2, "P3": 3}
+key = loop._queue_sort_key(grid)
+for f in grid:
+    want = rank_of[ledger.priority(f)]
+    got = key(f["id"])[0]
+    if want != got:
+        failures.append(f"priority mirror: {f['id']} ledger={want} loop={got}")
+
+# current_binding (ledger) vs effective_binding (scheduler): same verdict on
+# legacy (<2 hosts), valid selection, and invalid selection (both die, exit 2).
+import json
+def write_scen(target, body):
+    path = os.path.join(os.environ["TANUKI_ROOT"], "scenarios",
+                        f"{target}.scenarios.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(body, fh)
+
+def verdict(fn, target):
+    try:
+        return ("value", fn(target))
+    except SystemExit as e:
+        return ("exit", e.code)
+
+cases = {
+    "legacy": {"hosts": {"a": "/x"}},
+    "valid": {"hosts": {"a": "/x", "b": "/y"}, "host_binding": "b"},
+    "invalid": {"hosts": {"a": "/x", "b": "/y"}, "host_binding": "zz"},
+}
+expect = {"legacy": ("value", None), "valid": ("value", "b"),
+          "invalid": ("exit", 2)}
+for name, body in cases.items():
+    write_scen(f"parity-{name}", body)
+    vl = verdict(ledger.current_binding, f"parity-{name}")
+    vs = verdict(sched.effective_binding, f"parity-{name}")
+    if vl != vs or vl != expect[name]:
+        failures.append(f"binding mirror [{name}]: ledger={vl} "
+                        f"scheduler={vs} expected={expect[name]}")
+
+if failures:
+    print("\n".join(failures), file=sys.stderr)
+    sys.exit(1)
+PY
+pass "copy families byte-identical; mirrored pairs agree; binding fail-closed"

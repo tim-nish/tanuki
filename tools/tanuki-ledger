@@ -177,9 +177,14 @@ def latest_run(pointers, prior=None):
     return max(runs, key=run_key) if runs else prior
 
 
+def die(msg):
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(2)
+
+
 def load_config():
-    """Promotion thresholds: built-ins overridden by ~/.tanuki/config.json
-    (docs/tanuki-spec.md "Configuration"). CLI flags override both."""
+    """Built-ins overridden by ~/.tanuki/config.json (docs/tanuki-spec.md
+    "Configuration"). CLI flags override both."""
     cfg = dict(CONFIG_DEFAULTS)
     path = os.path.join(TANUKI_ROOT, "config.json")
     if os.path.exists(path):
@@ -1106,7 +1111,10 @@ def current_binding(target):
     if not isinstance(hosts, dict) or len(hosts) < 2:
         return None
     sel = scen.get("host_binding")
-    return sel if sel in hosts else None
+    if sel not in hosts:
+        die(f"multi-binding target: `host_binding` must name one of "
+            f"{sorted(hosts)} (got {sel!r})")
+    return sel
 
 
 def bindings_by_run(target):

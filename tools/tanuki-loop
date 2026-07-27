@@ -416,7 +416,8 @@ def open_scenarios(path, target):
     ~/.tanuki/scenarios/<target>.scenarios.json."""
     p = os.path.expanduser(path)
     if not os.path.exists(p):
-        canon = os.path.join(TANUKI_ROOT, "scenarios", f"{target}.scenarios.json")
+        canon = os.path.join(TANUKI_ROOT, "scenarios",
+                             f"{target or '<target>'}.scenarios.json")
         die(f"scenarios config not found: {p}\n"
             f"  canonical location: {canon}\n"
             "  (create it with `/tanuki init`; "
