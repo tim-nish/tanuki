@@ -297,6 +297,34 @@ Do not end at "here is what ran." Present, for one review:
 `state.json` / `audit.md` / `queue.md` (under `~/.tanuki/<target>/loop/<run>/`)
 — take them from there rather than hunting the run dir.
 
+**Every queue entry is discharged before the run closes (ADDED 2026-07-27,
+triage of #309).** The morning review queue is a deferral generator, so the
+tracking-artifact rule binds **per emitted item**: walk every `queue.md` entry
+and record a disposition beside it, and do not complete the gate while any
+entry lacks one. The walk is attended — the tool presents, records, and
+checks; **the disposition itself is always yours, never the tool's**:
+- `tanuki-loop queue-list` renders every entry (DEFER and FROZEN alike) with
+  the disposition already recorded beside it, or `null` while undischarged —
+  walk them one by one.
+- For each entry, record exactly one of three dispositions — the record lands
+  **beside the entry in `queue.md`** (the durable artifact), not only in
+  session output:
+  - **filed** — the item received its issue/story in this sitting:
+    `tanuki-loop queue-discharge --finding F42 --disposition filed --url <issue/story URL>`
+  - **executed** — the item was done at the gate itself:
+    `tanuki-loop queue-discharge --finding F42 --disposition executed [--note "…"]`
+  - **no-artifact-needed** — with the reason recorded:
+    `tanuki-loop queue-discharge --finding F42 --disposition no-artifact-needed --reason "…"`
+- `tanuki-loop queue-check` is the mechanical boundary: it refuses (exit 3,
+  `undischarged: […]`) while any entry lacks a disposition. Run it before
+  delivering (before `gate-pr`, or before leaving a branch-only run) and do
+  not deliver past a refusal.
+
+Emission-time filing stays forbidden, exactly as before: unattended
+iterations write only the `queue.md` line (`defer` is unchanged — no issue,
+story, or other outward artifact at emission time); the attended gate is the
+same-sitting moment where each deferred item receives its tracking artifact.
+
 > **Two-outcomes-only delivery (triage of #262/#263 — supersedes the
 > merge-first steps below).** The loop **never merges to `main`**, attended or
 > not. Delivery is exactly one of two outcomes, and **PR is the default**:
@@ -572,7 +600,10 @@ execution history, transitions, coverage, selection history) use
 `tanuki-scheduler --target <t> history` (surfaced as `/tanuki <t> history`).
 
 The deferred queue is handed back for a normal attended triage sitting —
-the loop never decides a spec alternative on its own.
+the loop never decides a spec alternative on its own. That sitting is the
+morning gate's discharge walk (triage of #309): every entry receives its
+disposition (`queue-list` / `queue-discharge` / `queue-check` above), and
+the gate does not complete while any entry is undischarged.
 
 ## Reconcile (`/tanuki-loop <target> reconcile [branch…]`)
 

@@ -78,6 +78,26 @@ Subcommands (JSON out unless noted; a breaker prints {"breaker": …} + exit 3):
                                  "advisory unavailable" state — non-blocking,
                                  but failure never reads as zero drift (#168)
   defer --finding F --reason "…" append to the morning queue
+  queue-list                     every queue.md entry (DEFER/FROZEN) with the
+                                 disposition recorded beside it, null while
+                                 undischarged — the morning-gate walk's
+                                 presentation substrate (#309)
+  queue-discharge --finding F --disposition filed|executed|no-artifact-needed
+       [--url U] [--note N] [--reason R]
+                                 record the OPERATOR'S disposition beside the
+                                 entry in queue.md (durable, not only session
+                                 output): filed requires --url (the issue/
+                                 story), no-artifact-needed requires --reason,
+                                 executed takes an optional --note. The tool
+                                 records, it never decides. Idempotent: an
+                                 already-discharged entry is echoed, never
+                                 duplicated or overwritten
+  queue-check                    the discharge duty's mechanical boundary
+                                 (spec-tanuki-loop §"Morning gate", ADDED
+                                 2026-07-27): refuses (exit 3,
+                                 undischarged: […]) while any queue.md entry
+                                 lacks a disposition — the gate does not
+                                 complete past a refusal
   log --audit "…"                append to the audit artifact
   gate-check                     integration HEAD reachable from base — i.e. it
                                  landed (the HUMAN merged it; the loop never does)
@@ -3902,6 +3922,123 @@ def cmd_defer(args):
     out({"ok": True})
 
 
+# The morning gate's discharge duty (story 5.8, #309; spec-tanuki-loop
+# §"Morning gate": "Every queue entry is discharged before the run closes").
+# The queue is a deferral generator, so the tracking-artifact rule binds per
+# emitted item: at the attended gate every queue.md entry receives exactly one
+# of three operator dispositions — filed (issue/story URL), executed at the
+# gate, or no-artifact-needed with a reason — recorded BESIDE the entry in
+# queue.md, not only in session output. The tool parses, records, and checks;
+# the disposition itself is always the operator's (the gate is an attended
+# command-layer flow). Emission-time filing stays forbidden: `defer` above is
+# untouched — the queue line remains an unattended iteration's only write.
+QUEUE_ENTRY_TAGS = ("- DEFER ", "- FROZEN ")
+QUEUE_DISCHARGE_PREFIX = "  - DISCHARGED "
+QUEUE_DISPOSITIONS = ("filed", "executed", "no-artifact-needed")
+
+
+def _queue_path(state):
+    return os.path.join(loop_dir(state["target"], state["run"]), "queue.md")
+
+
+def _queue_entries(state):
+    """Parse queue.md into its entries — every DEFER/FROZEN line, each with
+    the disposition recorded beside it (the indented `- DISCHARGED
+    <disposition>: <detail>` line directly under the entry) or None while
+    undischarged."""
+    path = _queue_path(state)
+    entries = []
+    if not os.path.exists(path):
+        return entries
+    with open(path, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    for i, ln in enumerate(lines):
+        for tag in QUEUE_ENTRY_TAGS:
+            if ln.startswith(tag) and ":" in ln[len(tag):]:
+                fid, reason = ln[len(tag):].split(":", 1)
+                disp = None
+                nxt = lines[i + 1] if i + 1 < len(lines) else ""
+                if (nxt.startswith(QUEUE_DISCHARGE_PREFIX)
+                        and ":" in nxt[len(QUEUE_DISCHARGE_PREFIX):]):
+                    kind, detail = nxt[
+                        len(QUEUE_DISCHARGE_PREFIX):].split(":", 1)
+                    disp = {"disposition": kind.strip(),
+                            "detail": detail.strip()}
+                entries.append({"line": i + 1, "kind": tag.strip("- "),
+                                "finding": fid.strip(),
+                                "reason": reason.strip(),
+                                "disposition": disp})
+    return entries
+
+
+def cmd_queue_list(args):
+    state = load_state(args.target, args.run)
+    entries = _queue_entries(state)
+    out({"entries": entries,
+         "undischarged": [e["finding"] for e in entries
+                          if e["disposition"] is None]})
+
+
+def cmd_queue_discharge(args):
+    state = load_state(args.target, args.run)
+    if args.disposition == "filed" and not args.url:
+        die("--disposition filed requires --url (the issue/story URL "
+            "recorded beside the entry)")
+    if args.disposition == "no-artifact-needed" and not args.reason:
+        die("--disposition no-artifact-needed requires --reason (recorded "
+            "beside the entry — an unexplained non-artifact is a silent "
+            "scope deletion)")
+    detail = {"filed": args.url, "executed": args.note or "at the gate",
+              "no-artifact-needed": args.reason}[args.disposition]
+    matching = [e for e in _queue_entries(state)
+                if e["finding"] == args.finding]
+    if not matching:
+        die(f"no queue.md entry for {args.finding} — `queue-list` names the "
+            "entries this run actually deferred/froze")
+    undischarged = [e for e in matching if e["disposition"] is None]
+    if not undischarged:
+        # Idempotent re-run (the F108 convention): echo the existing record
+        # rather than duplicating or silently overwriting it. Changing a
+        # recorded disposition is a hand edit of queue.md, deliberate.
+        out({"ok": True, "finding": args.finding,
+             "already_discharged": True,
+             "disposition": matching[0]["disposition"]})
+        return
+    path = _queue_path(state)
+    with open(path, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    record = f"{QUEUE_DISCHARGE_PREFIX}{args.disposition}: {detail}"
+    for e in sorted(undischarged, key=lambda e: e["line"], reverse=True):
+        lines.insert(e["line"], record)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(tmp, path)
+    audit(state, f"gate discharged {args.finding}: "
+                 f"{args.disposition} — {detail}")
+    out({"ok": True, "finding": args.finding,
+         "disposition": {"disposition": args.disposition, "detail": detail},
+         "entries_discharged": len(undischarged)})
+
+
+def cmd_queue_check(args):
+    state = load_state(args.target, args.run)
+    entries = _queue_entries(state)
+    undischarged = [e["finding"] for e in entries
+                    if e["disposition"] is None]
+    if undischarged:
+        out({"ok": False, "entries": len(entries),
+             "undischarged": undischarged,
+             "hint": "the gate does not complete while any queue.md entry "
+                     "lacks a disposition (spec-tanuki-loop §'Morning "
+                     "gate'): rule on each with `queue-discharge --finding "
+                     "<F> --disposition filed|executed|no-artifact-needed` "
+                     "(filed takes --url, no-artifact-needed takes "
+                     "--reason), then re-run"})
+        sys.exit(3)
+    out({"ok": True, "entries": len(entries), "undischarged": []})
+
+
 def cmd_log(args):
     state = load_state(args.target, args.run)
     audit(state, args.audit)
@@ -6156,6 +6293,26 @@ def main():
                          "mint findings (F226)")
     sp.add_argument("--reason", required=True,
                     help="why the finding is deferred (recorded in queue.md)")
+    sub.add_parser("queue-list")
+    sp = sub.add_parser("queue-discharge")
+    sp.add_argument("--finding", required=True,
+                    help="the queue.md entry's finding id (as `queue-list` "
+                         "reports it) to discharge")
+    sp.add_argument("--disposition", required=True,
+                    choices=list(QUEUE_DISPOSITIONS),
+                    help="the operator's ruling on the entry — the tool "
+                         "records it beside the entry in queue.md, it never "
+                         "chooses (#309)")
+    sp.add_argument("--url", default=None,
+                    help="the issue/story URL — required with "
+                         "--disposition filed")
+    sp.add_argument("--note", default=None,
+                    help="optional note with --disposition executed "
+                         "(default: 'at the gate')")
+    sp.add_argument("--reason", default=None,
+                    help="why no tracking artifact is needed — required "
+                         "with --disposition no-artifact-needed")
+    sub.add_parser("queue-check")
     sp = sub.add_parser("log")
     sp.add_argument("--audit", required=True,
                     help="free-text line to append to the run's audit trail")
@@ -6429,7 +6586,9 @@ def main():
      "iter-start": cmd_iter_start, "iter-verify": cmd_iter_verify,
      "rollback": cmd_rollback, "recover": cmd_recover,
      "test": cmd_test, "attempt": cmd_attempt,
-     "record-cycle": cmd_record_cycle, "defer": cmd_defer, "log": cmd_log,
+     "record-cycle": cmd_record_cycle, "defer": cmd_defer,
+     "queue-list": cmd_queue_list, "queue-discharge": cmd_queue_discharge,
+     "queue-check": cmd_queue_check, "log": cmd_log,
      "gate-check": cmd_gate_check, "gate-push": cmd_gate_push,
      "gate-pr": cmd_gate_pr, "issue-get": cmd_issue_get,
      "issue-put": cmd_issue_put, "policy": cmd_policy, "finish": cmd_finish,
