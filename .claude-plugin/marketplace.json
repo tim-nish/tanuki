@@ -8,7 +8,7 @@
     {
       "name": "tanuki",
       "source": "./",
-      "description": "Automated dogfooding for Claude Code plugins — /tanuki drives scenarios in disposable clones and distills them into a ranked proposal brief; /tanuki-loop runs the cycle unattended overnight."
+      "description": "Automated dogfooding for Claude Code plugins: drive branching user scenarios in disposable clones, mine Events into deduplicated Findings with recurrence tracking, and consolidate chronic ones into a ranked Proposal brief for human review. Proposals-only — nothing merges, nothing is auto-filed."
     }
   ]
 }
