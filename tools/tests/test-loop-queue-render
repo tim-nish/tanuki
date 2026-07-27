@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# Fixture for story 5.9 / issue #310 (spec-tanuki-loop "Morning gate"): the
+# morning queue's RENDERING is capped (~10 visible) and RANKED by the ledger's
+# computed priority — ties broken by finding id — with an explicit
+# "+N more — full: queue.md" marker when truncated. The cap bounds the
+# presentation only: queue.md keeps every entry, and a truncated reason still
+# carries the ellipsis marker and the pointer to the full text (the "No
+# model-supplied text except quoted reasons" rule).
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+loop="$here/tanuki-loop"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+
+repo="$tmp/repo"
+git init -q "$repo" && git -C "$repo" config user.email t@e && git -C "$repo" config user.name t
+git -C "$repo" checkout -qb main && echo v0 > "$repo/f" && git -C "$repo" add -A && git -C "$repo" commit -qm base
+
+L=("$loop" --target t)
+"${L[@]}" init --loop-repo "$repo" --cap 3 >/dev/null
+
+# The ledger carries the computed priority's inputs (tanuki-ledger priority():
+# P1 = recurrence >= 3 or seen in >= 2 scenarios; P2 = recurrence 2 or kind
+# 'gap'; P3 = seen once). F99 is deferred but NOT in the ledger — the declared
+# fallback ranks it after P3, still deterministically by id.
+cat > "$TANUKI_ROOT/t/ledger.json" <<'EOF'
+{"findings": [
+  {"id": "F10", "status": "open", "kind": "defect", "recurrence": 3, "scenarios": ["s1"]},
+  {"id": "F11", "status": "open", "kind": "defect", "recurrence": 4, "scenarios": ["s1"]},
+  {"id": "F12", "status": "open", "kind": "defect", "recurrence": 1, "scenarios": ["s1", "s2"]},
+  {"id": "F13", "status": "open", "kind": "defect", "recurrence": 2, "scenarios": ["s1"]},
+  {"id": "F14", "status": "open", "kind": "gap",    "recurrence": 1, "scenarios": ["s1"]},
+  {"id": "F20", "status": "open", "kind": "defect", "recurrence": 1, "scenarios": ["s1"]},
+  {"id": "F21", "status": "open", "kind": "defect", "recurrence": 1, "scenarios": ["s1"]},
+  {"id": "F22", "status": "open", "kind": "defect", "recurrence": 1, "scenarios": ["s1"]},
+  {"id": "F23", "status": "open", "kind": "defect", "recurrence": 1, "scenarios": ["s1"]},
+  {"id": "F24", "status": "open", "kind": "defect", "recurrence": 1, "scenarios": ["s1"]},
+  {"id": "F25", "status": "open", "kind": "defect", "recurrence": 1, "scenarios": ["s1"]}
+]}
+EOF
+"${L[@]}" iter-start >/dev/null   # section 3 renders deltas once a run moves
+
+# --- under the cap: no "+N more" marker ---------------------------------------
+"${L[@]}" defer --finding F20 --reason "small" >/dev/null
+"${L[@]}" defer --finding F21 --reason "small" >/dev/null
+out0="$("${L[@]}" dashboard)"
+grep -q "deferred F20:" <<<"$out0" || fail "under-cap entry missing"
+grep -qE "\+[0-9]+ more — full: queue.md" <<<"$out0" \
+  && fail "an under-cap queue must not render a truncation marker"
+pass "under the cap: every entry renders, no truncation marker"
+
+# --- over the cap: 10 visible + explicit "+N more — full: queue.md" -----------
+# 12 entries total: 11 deferred (file order deliberately scrambles priority,
+# and F10's reason is long enough to force the one-line truncation) + 1 frozen.
+longreason="this deliberately long deferral reason exceeds the ninety character one-line truncation width so the ellipsis marker and pointer must both appear"
+"${L[@]}" defer --finding F22 --reason "small" >/dev/null
+"${L[@]}" defer --finding F99 --reason "not in the ledger" >/dev/null
+"${L[@]}" defer --finding F25 --reason "small" >/dev/null
+"${L[@]}" defer --finding F13 --reason "recurrence two" >/dev/null
+"${L[@]}" defer --finding F10 --reason "$longreason" >/dev/null
+"${L[@]}" defer --finding F23 --reason "small" >/dev/null
+"${L[@]}" defer --finding F14 --reason "a gap kind" >/dev/null
+"${L[@]}" defer --finding F12 --reason "two scenarios" >/dev/null
+"${L[@]}" defer --finding F24 --reason "small" >/dev/null
+run="$("${L[@]}" status | python3 -c 'import json,sys;print(json.load(sys.stdin)["run"])')"
+qdir="$TANUKI_ROOT/t/loop/$run"
+printf -- "- FROZEN F11: exceeded 3 fix attempts — needs human review\n" >> "$qdir/queue.md"
+python3 - "$qdir/state.json" <<'EOF'
+import json,sys
+p=sys.argv[1]; s=json.load(open(p)); s.setdefault("frozen",[]).append("F11")
+json.dump(s,open(p,"w"))
+EOF
+
+out="$("${L[@]}" dashboard)"
+shown="$(grep -cE "^    (deferred|frozen) F" <<<"$out")"
+[ "$shown" = "10" ] || fail "expected exactly 10 visible queue entries, got $shown"
+grep -qF "+2 more — full: queue.md" <<<"$out" \
+  || fail "truncated queue must state the hidden count and point at queue.md"
+pass "over the cap: exactly 10 entries visible, '+2 more — full: queue.md' stated"
+
+# --- ranked by ledger priority, ties broken by finding id ---------------------
+# P1: F10, F11 (recurrence >= 3), F12 (2 scenarios); P2: F13 (recurrence 2),
+# F14 (kind gap); P3 by id: F20..F24. Hidden: F25 (last P3 by id) and F99
+# (fallback: not in the ledger ranks after P3). Never file order.
+order="$(grep -oE "^    (deferred|frozen) F[0-9]+" <<<"$out" \
+  | grep -oE "F[0-9]+" | tr '\n' ',')"
+[ "$order" = "F10,F11,F12,F13,F14,F20,F21,F22,F23,F24," ] \
+  || fail "queue not ranked by priority with id tie-break: $order"
+grep -q "frozen F11 (attempt cap):" <<<"$out" \
+  || fail "a frozen entry must keep its (attempt cap) label in the ranked list"
+grep -q "F99" <<<"$out" \
+  && fail "the not-in-ledger entry (fallback rank, below P3) should be hidden here"
+pass "visible set is the priority ranking's top; frozen label kept; fallback ranks last"
+
+# --- truncation never hides justification (F7 rule, pinned for the queue) -----
+grep -qE "deferred F10: .*… — full: queue.md" <<<"$out" \
+  || fail "a truncated reason must carry the ellipsis marker AND the queue.md pointer"
+pass "truncated reason keeps the explicit '… — full: queue.md' pointer"
+
+# --- the cap bounds presentation only: queue.md itself is untouched -----------
+n_q="$(grep -cE "^- (DEFER|FROZEN) F" "$qdir/queue.md")"
+[ "$n_q" = "12" ] || fail "queue.md must keep every entry (expected 12, got $n_q)"
+grep -q "DEFER F99" "$qdir/queue.md" || fail "hidden entries must survive in queue.md"
+pass "queue.md keeps all 12 entries — the cap never touches the durable record"
+
+echo "all queue-render checks passed"
