@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# Fixture for the morning gate's queue-discharge duty (story 5.8, #309;
+# spec-tanuki-loop §"Morning gate": "Every queue entry is discharged before
+# the run closes").
+#
+# The load-bearing rules: every queue.md entry (DEFER and FROZEN alike)
+# receives exactly one of three OPERATOR dispositions — filed (issue/story
+# URL), executed at the gate, or no-artifact-needed with a reason — recorded
+# BESIDE the entry in queue.md, not only in session output; `queue-check`
+# refuses (exit 3) while any entry lacks one, so the gate cannot complete
+# past an undischarged entry; and `defer`'s emission-time write stays
+# byte-unchanged — the queue line remains an unattended iteration's only
+# write, no outward artifact (the no-outward-artifacts rule, §"Defer /
+# freeze, do not stop").
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+export TANUKI_ROOT="$tmp/root"
+jget() { python3 -c "import json,sys;print(json.load(sys.stdin)$1)"; }
+
+repo="$tmp/repo"
+git init -q "$repo"
+git -C "$repo" config user.email t@e; git -C "$repo" config user.name t
+git -C "$repo" checkout -qb main
+echo v0 > "$repo/f"; git -C "$repo" add -A; git -C "$repo" commit -qm base
+
+L=("$here/tanuki-loop" --target t)
+init_json="$("${L[@]}" init --loop-repo "$repo" --cap 4 --attempt-cap 1)"
+run="$(echo "$init_json" | jget '["run"]')"
+q="$(echo "$init_json" | jget '["artifacts"]["queue"]')"
+[ -f "$q" ] || fail "init did not create queue.md at $q"
+
+# --- AC3: defer's emission is byte-unchanged — the queue line is the only
+# write, no outward artifact, no disposition scaffolding at emission time ----
+"${L[@]}" defer --finding F1 --reason "spec decision, needs the operator" >/dev/null
+printf '# morning review queue — %s\n- DEFER F1: spec decision, needs the operator\n' "$run" \
+  | cmp -s - "$q" || fail "defer must write exactly the queue line — nothing beside it (AC3): $(cat "$q")"
+pass "defer emission byte-unchanged: the queue line remains the only write"
+
+# A frozen entry queues the same duty (attempt-cap 1: the second attempt
+# freezes and writes the FROZEN line).
+"${L[@]}" attempt --finding F2 >/dev/null
+"${L[@]}" attempt --finding F2 | jget '["frozen"]' | grep -q True \
+  || fail "attempt past the cap should freeze F2"
+
+# --- queue-list: every entry presented, disposition null while undischarged -
+"${L[@]}" queue-list > /tmp/ql.json
+[ "$(jget '["entries"].__len__()' < /tmp/ql.json)" = "2" ] \
+  || fail "queue-list should present both entries: $(cat /tmp/ql.json)"
+[ "$(jget '["entries"][0]["kind"]' < /tmp/ql.json)" = "DEFER" ] \
+  || fail "first entry should be the DEFER"
+[ "$(jget '["entries"][1]["kind"]' < /tmp/ql.json)" = "FROZEN" ] \
+  || fail "second entry should be the FROZEN"
+[ "$(jget '["entries"][0]["disposition"]' < /tmp/ql.json)" = "None" ] \
+  || fail "an undischarged entry's disposition must be null"
+[ "$(jget '["undischarged"]' < /tmp/ql.json)" = "['F1', 'F2']" ] \
+  || fail "undischarged should name both findings: $(cat /tmp/ql.json)"
+pass "queue-list presents DEFER and FROZEN entries with null dispositions"
+
+# --- queue-check refuses while any entry lacks a disposition (AC1) ----------
+rc=0; "${L[@]}" queue-check > /tmp/qc.json 2>&1 || rc=$?
+[ "$rc" = "3" ] || fail "queue-check must refuse (exit 3) with undischarged entries, got rc=$rc"
+[ "$(jget '["undischarged"]' < /tmp/qc.json)" = "['F1', 'F2']" ] \
+  || fail "queue-check refusal must name the undischarged entries: $(cat /tmp/qc.json)"
+grep -q "queue-discharge" /tmp/qc.json \
+  || fail "the refusal hint must name the discharge command"
+pass "queue-check refuses (exit 3) while entries are undischarged"
+
+# --- discharge validation: the record's required parts are enforced ---------
+rc=0; "${L[@]}" queue-discharge --finding F1 --disposition filed >/dev/null 2>&1 || rc=$?
+[ "$rc" = "2" ] || fail "filed without --url must die (exit 2), got rc=$rc"
+rc=0; "${L[@]}" queue-discharge --finding F2 --disposition no-artifact-needed >/dev/null 2>&1 || rc=$?
+[ "$rc" = "2" ] || fail "no-artifact-needed without --reason must die (exit 2), got rc=$rc"
+rc=0; "${L[@]}" queue-discharge --finding F9 --disposition executed >/dev/null 2>&1 || rc=$?
+[ "$rc" = "2" ] || fail "discharging a finding with no queue entry must die (exit 2), got rc=$rc"
+pass "discharge validation: filed needs --url, no-artifact-needed needs --reason, unknown entry dies"
+
+# --- AC2 round-trip: the record lands BESIDE the entry in queue.md ----------
+url="https://github.com/tim-nish/tanuki/issues/999"
+"${L[@]}" queue-discharge --finding F1 --disposition filed --url "$url" \
+  | jget '["ok"]' | grep -q True || fail "filed discharge should succeed"
+grep -A1 '^- DEFER F1:' "$q" | grep -q "^  - DISCHARGED filed: $url" \
+  || fail "the filed record must land beside the entry in queue.md: $(cat "$q")"
+"${L[@]}" queue-list | jget '["entries"][0]["disposition"]["detail"]' | grep -q "$url" \
+  || fail "queue-list must round-trip the recorded URL"
+pass "filed disposition recorded beside the entry and round-tripped"
+
+# One discharged, one not: the check still refuses and names only F2.
+rc=0; "${L[@]}" queue-check > /tmp/qc2.json 2>&1 || rc=$?
+[ "$rc" = "3" ] || fail "queue-check must still refuse with one entry undischarged"
+[ "$(jget '["undischarged"]' < /tmp/qc2.json)" = "['F2']" ] \
+  || fail "only the undischarged entry should be named: $(cat /tmp/qc2.json)"
+pass "queue-check refuses until EVERY entry is discharged"
+
+"${L[@]}" queue-discharge --finding F2 --disposition no-artifact-needed \
+  --reason "superseded by the F1 issue" >/dev/null
+grep -A1 '^- FROZEN F2:' "$q" \
+  | grep -q '^  - DISCHARGED no-artifact-needed: superseded by the F1 issue' \
+  || fail "the no-artifact-needed record must land beside the FROZEN entry: $(cat "$q")"
+pass "no-artifact-needed disposition (with reason) recorded beside the FROZEN entry"
+
+# --- all discharged: the check passes -----------------------------------------
+"${L[@]}" queue-check > /tmp/qc3.json
+jget '["ok"]' < /tmp/qc3.json | grep -q True || fail "queue-check should pass once all discharged"
+[ "$(jget '["entries"]' < /tmp/qc3.json)" = "2" ] \
+  || fail "queue-check should count both entries: $(cat /tmp/qc3.json)"
+pass "queue-check passes once every entry has a disposition"
+
+# --- idempotent re-discharge: echoed, never duplicated or overwritten -------
+"${L[@]}" queue-discharge --finding F1 --disposition executed > /tmp/qd.json
+jget '["already_discharged"]' < /tmp/qd.json | grep -q True \
+  || fail "re-discharging must echo already_discharged: $(cat /tmp/qd.json)"
+jget '["disposition"]["disposition"]' < /tmp/qd.json | grep -q filed \
+  || fail "the echo must carry the EXISTING record, not the new attempt"
+[ "$(grep -c 'DISCHARGED filed' "$q")" = "1" ] \
+  || fail "re-discharge must not duplicate the record: $(cat "$q")"
+pass "re-discharge echoes the existing record; queue.md untouched"
+
+# --- executed disposition: default detail names the gate --------------------
+"${L[@]}" defer --finding F3 --reason "small doc fix" >/dev/null
+"${L[@]}" queue-discharge --finding F3 --disposition executed >/dev/null
+grep -A1 '^- DEFER F3:' "$q" | grep -q '^  - DISCHARGED executed: at the gate' \
+  || fail "executed without --note should record 'at the gate': $(cat "$q")"
+"${L[@]}" queue-check | jget '["ok"]' | grep -q True \
+  || fail "queue-check should pass again after the late entry is discharged"
+pass "executed disposition defaults its detail to 'at the gate'"
+
+# --- the surfaces that parse queue.md still work over discharge records -----
+"${L[@]}" status >/dev/null || fail "status must not choke on discharge records in queue.md"
+pass "status still parses a queue.md carrying discharge records"
+
+echo "ALL PASSED"

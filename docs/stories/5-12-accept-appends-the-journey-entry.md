@@ -14,8 +14,8 @@ On conflict, the issue wins.
 
 Ruling (2026-07-27 triage, alternative A): the journey-doc convention is
 adopted — the append is an accepted-item effect in the emitting repo, the
-proposal-only boundary untouched. Served policy, consulted at
-`product-lab@d261caee84c9e617818b5f92c8757fbb2decf1fa`: "NEEDS-RECORDING is
+proposal-only boundary untouched. Served policy line, consulted 2026-07-27
+(verbatim pin held in the private triage ledger): "NEEDS-RECORDING is
 COMPUTED in the join step and DISCHARGED by a tracking artifact in the target
 repo (an Issue, or an append under a NEEDS-RECORDING heading in that repo's
 declared journey doc)" (topics/articles.md:49).
