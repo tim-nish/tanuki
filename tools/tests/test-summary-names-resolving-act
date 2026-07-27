@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# Fixture for story 5.7 / issue #330 (owner ruling 2026-07-27, alternative A):
+# the awaiting-findings summary names the resolving act as ONE runnable
+# command over the UNION of the cannot-determine set's drivable scenarios —
+# the same form `resolving_action` renders per finding — instead of the
+# generic "drive the scenario(s) to make absence measurable". An aggregate
+# surface may aggregate, but it never reports the same fact more weakly than
+# the per-row surface beneath it.
+#
+# Asserts:
+#   1. AC1 — the summary tail ends with one `tanuki-drive … --only <union>`
+#      command over the set's drivable scenarios, reserved `ingest`
+#      pseudo-scenario excluded;
+#   2. AC2 — when NO member has a drivable scenario, the summary takes the
+#      same degenerate branch as the per-finding renderer (absence cannot be
+#      measured until seen in a driven scenario), never the generic phrase
+#      with no command;
+#   3. AC3 — the per-row ACCEPTED resolving act is byte-identical to before
+#      this story.
+set -euo pipefail
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "ok: $1"; }
+
+here="$(cd "$(dirname "$0")/.." && pwd)"   # tools/
+root="$(mktemp -d)"; trap 'rm -rf "$root"' EXIT
+export TANUKI_ROOT="$root"
+L=("$here/tanuki-ledger" --target t)
+
+"${L[@]}" init >/dev/null 2>&1
+
+# --- AC1: union command over the set's drivable scenarios ---------------------
+# Two hand-ingested findings, never driven by any run. F1 carries an `ingest`
+# pointer alongside its real scenario on purpose: it must survive into the
+# finding's scope without ever being suggested as drivable.
+"${L[@]}" upsert-finding --title "checkout one" --kind gap \
+  --evidence "r0/checkout#1,r0/ingest#1" >/dev/null
+"${L[@]}" upsert-finding --title "billing one" --kind gap \
+  --evidence "r0/billing#1" >/dev/null
+for f in F1 F2; do
+  "${L[@]}" set-status --id "$f" --status accepted >/dev/null 2>&1
+done
+
+out="$("${L[@]}" status 2>/dev/null)"
+nxt="$("${L[@]}" next 2>/dev/null)"
+
+summary="$(echo "$out" | grep "not progressing toward the bar")" \
+  || fail "AC1: summary must still name the cannot-determine set: $out"
+echo "$summary" | grep -qF -- \
+  "drive billing, checkout to make absence measurable: \`tanuki-drive --target t --plugin <repo> --scenarios <file> --run <run> --only billing,checkout\`" \
+  || fail "AC1: summary must end with ONE runnable command over the union: $summary"
+echo "$summary" | grep -q -- "--only.*ingest" \
+  && fail "AC1: reserved 'ingest' pseudo-scenario must not enter the union: $summary"
+echo "$out" | grep -q "drive the scenario(s) to make absence measurable" \
+  && fail "AC1: the generic no-command phrase must be gone: $out"
+echo "$nxt" | grep -qF -- "--only billing,checkout" \
+  || fail "AC1: next carries the same union command: $nxt"
+pass "AC1: summary names the resolving act as one union command (ingest excluded)"
+
+# --- AC3: the per-row resolving act is byte-identical -------------------------
+echo "$out" | grep -qF \
+  "      -> drive checkout to make absence measurable: \`tanuki-drive --target t --plugin <repo> --scenarios <file> --run <run> --only checkout\`" \
+  || fail "AC3: F1's per-row resolving act must be byte-identical: $out"
+echo "$out" | grep -qF \
+  "      -> drive billing to make absence measurable: \`tanuki-drive --target t --plugin <repo> --scenarios <file> --run <run> --only billing\`" \
+  || fail "AC3: F2's per-row resolving act must be byte-identical: $out"
+pass "AC3: ACCEPTED rows render the per-finding act unchanged"
+
+# --- AC2: degenerate branch when no member has a drivable scenario ------------
+root2="$(mktemp -d)"; trap 'rm -rf "$root" "$root2"' EXIT
+export TANUKI_ROOT="$root2"
+"${L[@]}" init >/dev/null 2>&1
+"${L[@]}" upsert-finding --title "manual only a" --kind gap \
+  --evidence "r0/ingest#1" >/dev/null
+"${L[@]}" upsert-finding --title "manual only b" --kind gap \
+  --evidence "r0/ingest#2" >/dev/null
+for f in F1 F2; do
+  "${L[@]}" set-status --id "$f" --status accepted >/dev/null 2>&1
+done
+
+out2="$("${L[@]}" status 2>/dev/null)"
+summary2="$(echo "$out2" | grep "not progressing toward the bar")" \
+  || fail "AC2: summary must name the cannot-determine set: $out2"
+echo "$summary2" | grep -q "no drivable scenario is recorded for these findings" \
+  || fail "AC2: degenerate branch must say no drivable scenario is recorded: $summary2"
+echo "$summary2" | grep -q "absence cannot be measured until they are seen in a driven scenario" \
+  || fail "AC2: degenerate branch must mirror the per-finding renderer: $summary2"
+echo "$summary2" | grep -q "drive the scenario(s)" \
+  && fail "AC2: never the generic phrase with no command: $summary2"
+# Scope the no-command check to the TAIL — the line's preamble legitimately
+# names tanuki-drive as the sibling tool.
+tail2="${summary2##*not progressing toward the bar at all — }"
+echo "$tail2" | grep -q "tanuki-drive" \
+  && fail "AC2: no command can be suggested when nothing is drivable: $tail2"
+pass "AC2: all-manual set takes the same degenerate branch as the per-row act"
+
+echo "ALL OK"

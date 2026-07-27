@@ -1104,11 +1104,20 @@ def resolving_action(f, target=None):
     The reserved `ingest` pseudo-scenario is not drivable, so it never appears
     in the suggested set.
     """
-    scen = sorted(set(f.get("scenarios") or []) - {"ingest"})
+    return _absence_act(f.get("scenarios") or [], target)
+
+
+def _absence_act(scenarios, target=None, plural=False):
+    """One renderer for the act that makes absence measurable — the per-finding
+    rows (resolving_action) and the awaiting summary's union tail (story 5.7 /
+    issue #330) must not grow separate command templates for the same act."""
+    scen = sorted(set(scenarios) - {"ingest"})
     if not scen:
-        return ("no drivable scenario is recorded for this finding (evidence "
-                "is manual/ingest only) — absence cannot be measured until it "
-                "is seen in a driven scenario")
+        who, seen = (("these findings", "they are") if plural
+                     else ("this finding", "it is"))
+        return (f"no drivable scenario is recorded for {who} (evidence "
+                f"is manual/ingest only) — absence cannot be measured until "
+                f"{seen} seen in a driven scenario")
     t = f" --target {target}" if target else " --target <t>"
     return (f"drive {', '.join(scen)} to make absence measurable: "
             f"`tanuki-drive{t} --plugin <repo> --scenarios <file> "
@@ -1531,13 +1540,17 @@ def compaction_hint(awaiting, target=None):
         msg += "; " + ", while ".join(clauses)
     if target:
         verdict_of = absence_verdict_fn(target)
-        undet = [f["id"] for f in awaiting
-                 if verdict_of(f) == CANNOT_DETERMINE]
+        undet = [f for f in awaiting if verdict_of(f) == CANNOT_DETERMINE]
         if undet:
-            msg += (f". {len(undet)} of these ({', '.join(undet)}) are "
+            # Story 5.7 / issue #330: the aggregate names the resolving act as
+            # ONE runnable command over the union of the set's drivable
+            # scenarios — never the same fact more weakly than the rows above.
+            union = [s for f in undet for s in f.get("scenarios") or []]
+            msg += (f". {len(undet)} of these "
+                    f"({', '.join(f['id'] for f in undet)}) are "
                     f"{CANNOT_DETERMINE}: no recorded run drove their scope, "
                     f"so they are not progressing toward the bar at all — "
-                    f"drive the scenario(s) to make absence measurable")
+                    f"{_absence_act(union, target, plural=len(undet) > 1)}")
     return msg
 
 
