@@ -76,6 +76,11 @@ Global file `~/.tanuki/config.json` (all keys optional); a per-target
 overrides it; CLI flags override both. Built-in defaults apply when no file
 exists — Tanuki runs with zero configuration.
 
+This table is the **canonical key registry** (ruled 2026-07-27, issue #340):
+every key in any tool's `CONFIG_DEFAULTS` or the `tanuki-config` CATALOG has
+a row here, and the parity check (story 5.16) enforces it. A key added in
+code without a row is a defect.
+
 | key | default | used by | meaning |
 |---|---|---|---|
 | `driver_model` | `claude-sonnet-5` | drive | model for scenario execution |
@@ -84,6 +89,9 @@ exists — Tanuki runs with zero configuration.
 | `max_turns` | `40` | drive | per-scenario turn cap (scenario `max_turns` overrides) |
 | `timeout_s` | `900` | drive | per-scenario wall-clock cap |
 | `est_cost_per_scenario_usd` | `1.5` | drive `--estimate` | fallback when no run history exists |
+| `drive_concurrency` | `1` | drive | parallel scenario fan-out per drive (story 1.21); `1` = serial; coerced via `int()` |
+| `driven_env_passthrough` | `[]` | drive | env-var names deliberately admitted into the driven session's otherwise-scrubbed environment (story 5.1 / #300); empty by default |
+| `reach_min_turns` | `5` | drive | turns below which an execution with no declared probe is judged not to have entered the plugin flow (story 5.3 / #299) |
 | `min_recurrence` | `3` | ledger promote | chronic threshold |
 | `min_scenarios` | `2` | ledger promote | breadth threshold |
 | `compaction_unseen_runs` | `3` | ledger compact | runs before a finding tombstones — for verified-fixed (`accepted`): driven-and-absent runs (runs that replayed the finding's scenario without it recurring — spec-tanuki-scenario-lifecycle); for `dismissed`: elapsed runs (deadness is not scenario-conditional) |
