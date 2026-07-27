@@ -111,6 +111,8 @@ STATES = ("unexplored", "active", "regression")
 
 
 def load_config():
+    """Built-ins overridden by ~/.tanuki/config.json (docs/tanuki-spec.md
+    "Configuration"). CLI flags override both."""
     cfg = dict(CONFIG_DEFAULTS)
     path = os.path.join(TANUKI_ROOT, "config.json")
     if os.path.exists(path):
@@ -269,8 +271,9 @@ def die(msg):
 
 def open_scenarios(path, target):
     """Open a scenarios config, or die naming the CANONICAL location so a
-    misplaced or absent config surfaces immediately (issue #4). The only
-    supported home is ~/.tanuki/scenarios/<target>.scenarios.json."""
+    misplaced or absent config surfaces immediately (issue #4) instead of a raw
+    traceback or a silently-read stale copy. The only supported home is
+    ~/.tanuki/scenarios/<target>.scenarios.json."""
     p = os.path.expanduser(path)
     if not os.path.exists(p):
         canon = os.path.join(TANUKI_ROOT, "scenarios",
